@@ -9,20 +9,22 @@ using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var firebasePath = Path.Combine(
-    builder.Environment.ContentRootPath,
-    "Firebase",
-    "factorymanagementsystem-1ea9a-firebase-adminsdk-fbsvc-07261a7548.json");
+var firebaseJson = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT");
+
+if (string.IsNullOrWhiteSpace(firebaseJson))
+{
+    throw new Exception("FIREBASE_SERVICE_ACCOUNT environment variable is missing.");
+}
+
+var credential = GoogleCredential.FromJson(firebaseJson);
 
 FirebaseApp.Create(new AppOptions
 {
-    Credential = GoogleCredential.FromFile(firebasePath)
+    Credential = credential
 });
 
 builder.Services.AddSingleton(provider =>
 {
-    var credential = GoogleCredential.FromFile(firebasePath);
-
     var client = new FirestoreClientBuilder
     {
         Credential = credential

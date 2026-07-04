@@ -1,0 +1,6 @@
+@FACTORY_MANAGEMENT_SYSTEM_HostAddress = http://localhost:5271
+
+GET {{FACTORY_MANAGEMENT_SYSTEM_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

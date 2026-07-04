@@ -93,6 +93,7 @@ app.UseAuthorization();
 
 // Test Endpoint
 app.MapGet("/", () => "Factory Management API Running");
+app.MapGet("/test", () => "OK");
 
 app.MapControllers();
 

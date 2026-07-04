@@ -4,19 +4,37 @@ using FirebaseAdmin;
 using Google.Apis.Auth.OAuth2;
 using Google.Cloud.Firestore;
 using Google.Cloud.Firestore.V1;
-using Microsoft.AspNetCore.Builder.Extensions;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var firebaseJson = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT");
+// =====================================================
+// Firebase Authentication
+// Render -> Environment Variable
+// Local -> Firebase JSON File
+// =====================================================
 
-if (string.IsNullOrWhiteSpace(firebaseJson))
+
+GoogleCredential credential;
+
+if (builder.Environment.IsDevelopment())
 {
-    throw new Exception("FIREBASE_SERVICE_ACCOUNT environment variable is missing.");
-}
+    var firebasePath = Path.Combine(
+        builder.Environment.ContentRootPath,
+        "Firebase",
+        "factorymanagementsystem-1ea9a-firebase-adminsdk-fbsvc-07261a7548.json");
 
-var credential = GoogleCredential.FromJson(firebaseJson);
+    credential = GoogleCredential.FromFile(firebasePath);
+}
+else
+{
+    var firebaseJson = Environment.GetEnvironmentVariable("FIREBASE_SERVICE_ACCOUNT");
+
+    if (string.IsNullOrWhiteSpace(firebaseJson))
+        throw new Exception("FIREBASE_SERVICE_ACCOUNT environment variable is missing.");
+
+    credential = GoogleCredential.FromJson(firebaseJson);
+}
 
 FirebaseApp.Create(new AppOptions
 {
@@ -32,19 +50,22 @@ builder.Services.AddSingleton(provider =>
 
     return FirestoreDb.Create("factorymanagementsystem-1ea9a", client);
 });
+
 builder.Services.AddSingleton<FirestoreService>();
 
-// Add services to the container.
+// =====================================================
+// Services
+// =====================================================
+
 builder.Services.AddControllers();
 
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
+    options.UseSqlServer(
+        builder.Configuration.GetConnectionString("DefaultConnection")));
 
-// Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// CORS
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFlutter", policy =>
@@ -57,19 +78,21 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.UseSwagger();
-    app.UseSwaggerUI();
-}
+// =====================================================
+// Middleware
+// =====================================================
+
+app.UseSwagger();
+app.UseSwaggerUI();
 
 app.UseHttpsRedirection();
 
-// Enable CORS
 app.UseCors("AllowFlutter");
 
 app.UseAuthorization();
+
+// Test Endpoint
+app.MapGet("/", () => "Factory Management API Running");
 
 app.MapControllers();
 

@@ -6,6 +6,8 @@ COPY . .
 RUN dotnet restore "FACTORY MANAGEMENT SYSTEM.csproj"
 RUN dotnet publish "FACTORY MANAGEMENT SYSTEM.csproj" -c Release -o /app/publish
 
+RUN ls -la /app/publish
+
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 
 WORKDIR /app

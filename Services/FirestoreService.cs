@@ -1,4 +1,5 @@
 ﻿using Google.Cloud.Firestore;
+using Google.Cloud.Firestore.V1;
 
 namespace FactoryManagementSystem.Services
 {
@@ -18,5 +19,6 @@ namespace FactoryManagementSystem.Services
         public CollectionReference Lines => _db.Collection("Lines");
         public CollectionReference OperationMasters => _db.Collection("OperationMasters");
         public CollectionReference CCLayouts => _db.Collection("CCLayouts");
+        public CollectionReference LayoutMasters =>_db.Collection("LayoutMasters");
     }
 }

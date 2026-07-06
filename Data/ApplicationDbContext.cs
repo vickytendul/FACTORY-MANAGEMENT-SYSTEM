@@ -23,5 +23,6 @@ namespace FactoryManagementSystem.Data
                 .HasKey(x => x.OperationId);
         }
         public DbSet<CCLayout> CCLayouts { get; set; }
+        public DbSet<LayoutMaster> LayoutMasters { get; set; }
     }
 }

@@ -21,8 +21,10 @@ namespace FactoryManagementSystem.Data
 
             modelBuilder.Entity<OperationMaster>()
                 .HasKey(x => x.OperationId);
+            modelBuilder.Entity<EmployeeMaster>().HasKey(x => x.EmployeeId);
         }
         public DbSet<CCLayout> CCLayouts { get; set; }
         public DbSet<LayoutMaster> LayoutMasters { get; set; }
+        public DbSet<EmployeeMaster> EmployeeMasters { get; set; }
     }
 }

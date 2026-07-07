@@ -25,9 +25,12 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetEmployees()
         {
-            var employees = await _context.EmployeeMasters
+            var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+
+            var employees = snapshot.Documents
+                .Select(x => x.ConvertTo<EmployeeMaster>())
                 .OrderBy(x => x.EmployeeCode)
-                .ToListAsync();
+                .ToList();
 
             return Ok(employees);
         }

@@ -21,5 +21,7 @@ namespace FactoryManagementSystem.Services
         public CollectionReference CCLayouts => _db.Collection("CCLayouts");
         public CollectionReference LayoutMasters =>_db.Collection("LayoutMasters");
         public CollectionReference EmployeeMasters =>_db.Collection("EmployeeMasters");
+        public CollectionReference LayoutTransactions =>
+    _db.Collection("LayoutTransactions");
     }
 }

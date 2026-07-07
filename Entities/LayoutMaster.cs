@@ -31,5 +31,7 @@ namespace FactoryManagementSystem.Entities
 
         [FirestoreProperty]
         public bool IsActive { get; set; } = true;
+        [FirestoreProperty]
+        public string Section { get; set; } = "MAIN";
     }
 }

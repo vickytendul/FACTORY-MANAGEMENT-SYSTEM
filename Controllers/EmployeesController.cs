@@ -72,7 +72,15 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                if (await _context.EmployeeMasters.AnyAsync(x => x.EmployeeCode == employee.EmployeeCode))
+                // Get all employees from Firestore
+                var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+
+                var employees = snapshot.Documents
+                    .Select(x => x.ConvertTo<EmployeeMaster>())
+                    .ToList();
+
+                // Duplicate Employee Code Check
+                if (employees.Any(x => x.EmployeeCode == employee.EmployeeCode))
                 {
                     return BadRequest(new
                     {
@@ -81,7 +89,8 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                if (await _context.EmployeeMasters.AnyAsync(x => x.EmployeeBarcode == employee.EmployeeBarcode))
+                // Duplicate Barcode Check
+                if (employees.Any(x => x.EmployeeBarcode == employee.EmployeeBarcode))
                 {
                     return BadRequest(new
                     {
@@ -92,10 +101,12 @@ namespace FactoryManagementSystem.Controllers
 
                 employee.IsActive = true;
 
-                _context.EmployeeMasters.Add(employee);
-                await _context.SaveChangesAsync();
+                // Generate next EmployeeId
+                employee.EmployeeId = employees.Any()
+                    ? employees.Max(x => x.EmployeeId) + 1
+                    : 1;
 
-                // Save to Firestore using EmployeeCode as Document ID
+                // Save to Firestore
                 await _firestore.EmployeeMasters
                     .Document(employee.EmployeeCode)
                     .SetAsync(employee);
@@ -122,10 +133,14 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var existing = await _context.EmployeeMasters
-                    .FirstOrDefaultAsync(x => x.EmployeeId == id);
+                var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
 
-                if (existing == null)
+                var documents = snapshot.Documents;
+
+                var existingDoc = documents.FirstOrDefault(x =>
+                    x.ConvertTo<EmployeeMaster>().EmployeeId == id);
+
+                if (existingDoc == null)
                 {
                     return NotFound(new
                     {
@@ -134,8 +149,12 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
+                var employees = documents
+                    .Select(x => x.ConvertTo<EmployeeMaster>())
+                    .ToList();
+
                 // Employee Code Duplicate Check
-                if (await _context.EmployeeMasters.AnyAsync(x =>
+                if (employees.Any(x =>
                     x.EmployeeCode == employee.EmployeeCode &&
                     x.EmployeeId != id))
                 {
@@ -147,7 +166,7 @@ namespace FactoryManagementSystem.Controllers
                 }
 
                 // Employee Barcode Duplicate Check
-                if (await _context.EmployeeMasters.AnyAsync(x =>
+                if (employees.Any(x =>
                     x.EmployeeBarcode == employee.EmployeeBarcode &&
                     x.EmployeeId != id))
                 {
@@ -158,19 +177,10 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                existing.EmployeeCode = employee.EmployeeCode;
-                existing.EmployeeBarcode = employee.EmployeeBarcode;
-                existing.EmployeeName = employee.EmployeeName;
-                existing.Grade = employee.Grade;
-                existing.Designation = employee.Designation;
-                existing.Department = employee.Department;
-                existing.IsActive = employee.IsActive;
+                employee.EmployeeId = id;
 
-                await _context.SaveChangesAsync();
-
-                await _firestore.EmployeeMasters
-                    .Document(existing.EmployeeCode)
-                    .SetAsync(existing);
+                // Update the same Firestore document
+                await existingDoc.Reference.SetAsync(employee);
 
                 return Ok(new
                 {
@@ -194,10 +204,12 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var employee = await _context.EmployeeMasters
-                    .FirstOrDefaultAsync(x => x.EmployeeId == id);
+                var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
 
-                if (employee == null)
+                var document = snapshot.Documents.FirstOrDefault(x =>
+                    x.ConvertTo<EmployeeMaster>().EmployeeId == id);
+
+                if (document == null)
                 {
                     return NotFound(new
                     {
@@ -206,13 +218,11 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
+                var employee = document.ConvertTo<EmployeeMaster>();
+
                 employee.IsActive = !employee.IsActive;
 
-                await _context.SaveChangesAsync();
-
-                await _firestore.EmployeeMasters
-                    .Document(employee.EmployeeCode)
-                    .SetAsync(employee);
+                await document.Reference.SetAsync(employee);
 
                 return Ok(new
                 {

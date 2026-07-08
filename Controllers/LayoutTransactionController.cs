@@ -64,6 +64,8 @@ namespace FactoryManagementSystem.Controllers
 
                     var transaction = new LayoutTransaction
                     {
+                        LayoutMasterId = item.LayoutMasterId,
+
                         ZoneId = request.ZoneId,
                         ZoneName = request.ZoneName,
 

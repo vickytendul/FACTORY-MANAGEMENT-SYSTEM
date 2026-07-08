@@ -12,6 +12,14 @@ namespace FactoryManagementSystem.Entities
         [FirestoreProperty]
         public int TransactionId { get; set; }
 
+        // Firestore Document Id (for Update/Delete)
+        [FirestoreDocumentId]
+        public string FirestoreId { get; set; } = string.Empty;
+
+        // Layout Row Reference
+        [FirestoreProperty]
+        public int LayoutMasterId { get; set; }
+
         // Production Details
         [FirestoreProperty]
         public int ZoneId { get; set; }

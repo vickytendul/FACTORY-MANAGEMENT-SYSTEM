@@ -16,6 +16,9 @@
 
     public class LayoutTransactionItem
     {
+        // Unique Layout Row Id
+        public int LayoutMasterId { get; set; }
+
         public int OperationId { get; set; }
 
         public string OperationName { get; set; } = string.Empty;

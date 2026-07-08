@@ -25,11 +25,42 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                // Check if this Line + CC already has an active allocation
+                var existingAllocation = await _firestore.LayoutTransactions
+                    .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
+                    .WhereEqualTo(nameof(LayoutTransaction.CCId), request.CCId)
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                if (existingAllocation.Documents.Any())
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "This Line and CC already has an active allocation."
+                    });
+                }
                 foreach (var item in request.Items)
                 {
                     // Skip empty rows
                     if (string.IsNullOrWhiteSpace(item.EmployeeCode))
                         continue;
+                    // Check if employee is already allocated in any active layout
+                    var existingEmployee = await _firestore.LayoutTransactions
+                        .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode)
+                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                        .Limit(1)
+                        .GetSnapshotAsync();
+
+                    if (existingEmployee.Documents.Any())
+                    {
+                        return BadRequest(new
+                        {
+                            Success = false,
+                            Message = $"Employee {item.EmployeeCode} is already allocated."
+                        });
+                    }
 
                     var transaction = new LayoutTransaction
                     {
@@ -76,6 +107,35 @@ namespace FactoryManagementSystem.Controllers
                     Success = true,
                     Message = "Layout Allocation Saved Successfully."
                 });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = ex.Message
+                });
+            }
+        }
+
+        // GET: api/LayoutTransaction?lineId=1&ccId=1
+        [HttpGet]
+        public async Task<IActionResult> GetAllocation(int lineId, int ccId)
+        {
+            try
+            {
+                var snapshot = await _firestore.LayoutTransactions
+                    .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
+                    .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                    
+                    .GetSnapshotAsync();
+
+                var data = snapshot.Documents
+                    .Select(x => x.ConvertTo<LayoutTransaction>())
+                    .ToList();
+
+                return Ok(data);
             }
             catch (Exception ex)
             {

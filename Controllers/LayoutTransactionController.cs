@@ -62,14 +62,14 @@ namespace FactoryManagementSystem.Controllers
                     };
 
                     // SQL Server
-                    _context.LayoutTransactions.Add(transaction);
+                    //_context.LayoutTransactions.Add(transaction);
 
                     // Firestore
                     await _firestore.LayoutTransactions
                         .AddAsync(transaction);
                 }
 
-                await _context.SaveChangesAsync();
+               // await _context.SaveChangesAsync();
 
                 return Ok(new
                 {

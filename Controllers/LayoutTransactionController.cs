@@ -148,5 +148,38 @@ namespace FactoryManagementSystem.Controllers
                 });
             }
         }
+
+        [HttpPut("{firestoreId}")]
+        public async Task<IActionResult> Update(
+    string firestoreId,
+    [FromBody] LayoutTransaction request)
+        {
+            var docRef = _firestore.LayoutTransactions.Document(firestoreId);
+
+            var snapshot = await docRef.GetSnapshotAsync();
+
+            if (!snapshot.Exists)
+            {
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = "Allocation not found."
+                });
+            }
+
+            await docRef.UpdateAsync(new Dictionary<string, object>
+    {
+        { nameof(LayoutTransaction.EmployeeCode), request.EmployeeCode },
+        { nameof(LayoutTransaction.EmployeeBarcode), request.EmployeeBarcode },
+        { nameof(LayoutTransaction.EmployeeName), request.EmployeeName },
+        { nameof(LayoutTransaction.EmployeeGrade), request.EmployeeGrade }
+    });
+
+            return Ok(new
+            {
+                Success = true,
+                Message = "Allocation updated successfully."
+            });
+        }
     }
 }

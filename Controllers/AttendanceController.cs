@@ -58,20 +58,21 @@ namespace FactoryManagementSystem.Controllers
                 });
             }
         }
+
         [HttpGet]
         public async Task<IActionResult> Get(
-            int lineId,
-            int ccId,
-            DateTime attendanceDate)
+       int lineId,
+       int ccId,
+       DateTime attendanceDate)
         {
-            var from = DateTime.SpecifyKind(attendanceDate.Date, DateTimeKind.Utc);
-            var to = from.AddDays(1);
+            var utcDate = DateTime.SpecifyKind(
+                attendanceDate.Date,
+                DateTimeKind.Utc);
 
             var snapshot = await _firestore.AttendanceTransactions
                 .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
                 .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
-                .WhereGreaterThanOrEqualTo(nameof(AttendanceTransaction.AttendanceDate), from)
-                .WhereLessThan(nameof(AttendanceTransaction.AttendanceDate), to)
+                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
                 .GetSnapshotAsync();
 
             var data = snapshot.Documents.Select(doc =>

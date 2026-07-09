@@ -23,5 +23,7 @@ namespace FactoryManagementSystem.Services
         public CollectionReference EmployeeMasters =>_db.Collection("EmployeeMasters");
         public CollectionReference LayoutTransactions =>
     _db.Collection("LayoutTransactions");
+        public CollectionReference AttendanceTransactions =>
+    _db.Collection("AttendanceTransactions");
     }
 }

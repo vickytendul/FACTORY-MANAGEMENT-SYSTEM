@@ -50,6 +50,8 @@ namespace FactoryManagementSystem.Entities
 
         [FirestoreProperty]
         public string EmployeeName { get; set; } = string.Empty;
+        [FirestoreProperty]
+        public string Designation { get; set; } = string.Empty;
 
         // Attendance
         [FirestoreProperty]

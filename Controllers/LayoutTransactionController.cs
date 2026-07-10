@@ -25,28 +25,28 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // Check if this Line + CC already has an active allocation
-                var existingAllocation = await _firestore.LayoutTransactions
+                // Fetch all existing active transactions for this Line + CC
+                var existingSnapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
                     .WhereEqualTo(nameof(LayoutTransaction.CCId), request.CCId)
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .Limit(1)
                     .GetSnapshotAsync();
 
-                if (existingAllocation.Documents.Any())
-                {
-                    return BadRequest(new
+                var existingDocs = existingSnapshot.Documents
+                    .Select(d => new
                     {
-                        Success = false,
-                        Message = "This Line and CC already has an active allocation."
-                    });
-                }
+                        DocId = d.Id,
+                        Transaction = d.ConvertTo<LayoutTransaction>()
+                    })
+                    .ToList();
+
                 foreach (var item in request.Items)
                 {
                     // Skip empty rows
                     if (string.IsNullOrWhiteSpace(item.EmployeeCode))
                         continue;
-                    // Check if employee is already allocated in any active layout
+
+                    // Check if employee is already allocated in a DIFFERENT active layout
                     var existingEmployee = await _firestore.LayoutTransactions
                         .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode)
                         .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
@@ -55,54 +55,72 @@ namespace FactoryManagementSystem.Controllers
 
                     if (existingEmployee.Documents.Any())
                     {
-                        return BadRequest(new
+                        var empDoc = existingEmployee.Documents.First().ConvertTo<LayoutTransaction>();
+                        // Only block if it's a different Line + CC
+                        if (empDoc.LineId != request.LineId || empDoc.CCId != request.CCId)
                         {
-                            Success = false,
-                            Message = $"Employee {item.EmployeeCode} is already allocated."
-                        });
+                            return BadRequest(new
+                            {
+                                Success = false,
+                                Message = $"Employee {item.EmployeeCode} is already allocated."
+                            });
+                        }
                     }
 
-                    var transaction = new LayoutTransaction
+                    // Find existing transaction by LayoutMasterId for upsert
+                    var existing = existingDocs.FirstOrDefault(e => e.Transaction.LayoutMasterId == item.LayoutMasterId);
+
+                    if (existing != null)
                     {
-                        LayoutMasterId = item.LayoutMasterId,
+                        // Update existing document employee fields
+                        var docRef = _firestore.LayoutTransactions.Document(existing.DocId);
+                        await docRef.UpdateAsync(new Dictionary<string, object>
+                        {
+                            { nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode },
+                            { nameof(LayoutTransaction.EmployeeBarcode), item.EmployeeBarcode },
+                            { nameof(LayoutTransaction.EmployeeName), item.EmployeeName },
+                            { nameof(LayoutTransaction.EmployeeGrade), item.EmployeeGrade }
+                        });
+                        existingDocs.Remove(existing);
+                    }
+                    else
+                    {
+                        // Insert new document
+                        var transaction = new LayoutTransaction
+                        {
+                            LayoutMasterId = item.LayoutMasterId,
 
-                        ZoneId = request.ZoneId,
-                        ZoneName = request.ZoneName,
+                            ZoneId = request.ZoneId,
+                            ZoneName = request.ZoneName,
 
-                        LineId = request.LineId,
-                        LineName = request.LineName,
+                            LineId = request.LineId,
+                            LineName = request.LineName,
 
-                        CCId = request.CCId,
-                        CCNo = request.CCNo,
+                            CCId = request.CCId,
+                            CCNo = request.CCNo,
 
-                        OperationId = item.OperationId,
-                        OperationName = item.OperationName,
-                        OperationGrade = item.OperationGrade,
-                        MachineType = item.MachineType,
-                        Section = item.Section,
+                            OperationId = item.OperationId,
+                            OperationName = item.OperationName,
+                            OperationGrade = item.OperationGrade,
+                            MachineType = item.MachineType,
+                            Section = item.Section,
 
-                        EmployeeCode = item.EmployeeCode,
-                        EmployeeBarcode = item.EmployeeBarcode,
-                        EmployeeName = item.EmployeeName,
-                        EmployeeGrade = item.EmployeeGrade,
+                            EmployeeCode = item.EmployeeCode,
+                            EmployeeBarcode = item.EmployeeBarcode,
+                            EmployeeName = item.EmployeeName,
+                            EmployeeGrade = item.EmployeeGrade,
 
-                        AllocationDate = DateTime.UtcNow.Date,
-                        AllocatedDateTime = DateTime.UtcNow,
+                            AllocationDate = DateTime.UtcNow.Date,
+                            AllocatedDateTime = DateTime.UtcNow,
 
-                        AllocatedBy = "Supervisor",
+                            AllocatedBy = "Supervisor",
 
-                        IsActive = true
-                    };
+                            IsActive = true
+                        };
 
-                    // SQL Server
-                    //_context.LayoutTransactions.Add(transaction);
-
-                    // Firestore
-                    await _firestore.LayoutTransactions
-                        .AddAsync(transaction);
+                        await _firestore.LayoutTransactions.AddAsync(transaction);
+                    }
                 }
-
-               // await _context.SaveChangesAsync();
 
                 return Ok(new
                 {

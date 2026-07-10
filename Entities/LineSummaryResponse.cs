@@ -3,7 +3,7 @@
     public class LineSummaryResponse
     {
         public string CCNo { get; set; } = string.Empty;
-        public decimal SAM { get; set; }
+        public double SAM { get; set; }
 
         public int TailorsOnRoll { get; set; }
         public int OthersOnRoll { get; set; }

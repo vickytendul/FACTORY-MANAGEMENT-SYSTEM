@@ -12,7 +12,7 @@ namespace FactoryManagementSystem.Entities
         public string CCNo { get; set; } = string.Empty;
 
         [FirestoreProperty]
-        public decimal SAM { get; set; }
+        public double SAM { get; set; }
 
         [FirestoreProperty]
         public bool IsActive { get; set; } = true;

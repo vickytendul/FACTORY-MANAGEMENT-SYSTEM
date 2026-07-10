@@ -37,9 +37,10 @@ namespace FactoryManagementSystem.Controllers
                         .Document(item.CCId.ToString()),
                     new
                     {
-                        item.CCId,
-                        item.CCNo,
-                        item.IsActive
+                        CCId = item.CCId,
+                        CCNo = item.CCNo,
+                        SAM = Convert.ToDouble(item.SAM),   // ✅ FIX
+                        IsActive = item.IsActive
                     });
             }
 

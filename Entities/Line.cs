@@ -17,7 +17,7 @@ namespace FactoryManagementSystem.Entities
         [FirestoreProperty]
         public bool IsActive { get; set; }
 
-        [FirestoreProperty]
-        public DateTime CreatedDate { get; set; }
+        //[FirestoreProperty]
+       // public DateTime CreatedDate { get; set; }
     }
 }

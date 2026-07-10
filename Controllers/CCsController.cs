@@ -63,7 +63,8 @@ namespace FactoryManagementSystem.Controllers
                 .Select(x => new
                 {
                     ccId = x.CCId,
-                    ccNo = x.CCNo
+                    ccNo = x.CCNo,
+                    sam = x.SAM    // ✅ Added
                 })
                 .ToList();
 

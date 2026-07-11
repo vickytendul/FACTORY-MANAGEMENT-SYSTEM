@@ -16,13 +16,14 @@ namespace FactoryManagementSystem.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetLines(int zoneId)
+        public async Task<IActionResult> GetLines(int? zoneId)
         {
             var snapshot = await _firestore.Lines.GetSnapshotAsync();
 
             var lines = snapshot.Documents
                 .Select(x => x.ConvertTo<Line>())
-                .Where(x => x.ZoneId == zoneId && x.IsActive)
+                .Where(x => x.IsActive)
+                .Where(x => zoneId == null || x.ZoneId == zoneId)
                 .OrderBy(x => x.LineId)
                 .Select(x => new
                 {

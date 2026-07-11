@@ -138,18 +138,22 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
-        // GET: api/LayoutTransaction?lineId=1&ccId=1
+        // GET: api/LayoutTransaction?lineId=1&ccId=1  (ccId optional)
         [HttpGet]
-        public async Task<IActionResult> GetAllocation(int lineId, int ccId)
+        public async Task<IActionResult> GetAllocation(int lineId, int? ccId)
         {
             try
             {
-                var snapshot = await _firestore.LayoutTransactions
+                var query = _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
-                    .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    
-                    .GetSnapshotAsync();
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true);
+
+                if (ccId.HasValue)
+                {
+                    query = query.WhereEqualTo(nameof(LayoutTransaction.CCId), ccId.Value);
+                }
+
+                var snapshot = await query.GetSnapshotAsync();
 
                 var data = snapshot.Documents
                     .Select(x => x.ConvertTo<LayoutTransaction>())

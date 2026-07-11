@@ -61,28 +61,59 @@ namespace FactoryManagementSystem.Controllers
 
         [HttpGet]
         public async Task<IActionResult> Get(
-       int lineId,
-       int ccId,
-       DateTime attendanceDate)
+            int lineId,
+            DateTime attendanceDate,
+            int? ccId = null)
         {
-            var utcDate = DateTime.SpecifyKind(
-                attendanceDate.Date,
-                DateTimeKind.Utc);
-
-            var snapshot = await _firestore.AttendanceTransactions
-                .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
-                .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
-                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
-                .GetSnapshotAsync();
-
-            var data = snapshot.Documents.Select(doc =>
+            try
             {
-                var item = doc.ConvertTo<AttendanceTransaction>();
-                item.FirestoreId = doc.Id;
-                return item;
-            }).ToList();
+                // Resolve CC from active LayoutTransaction if not provided
+                if (ccId == null)
+                {
+                    var layoutSnapshot = await _firestore.LayoutTransactions
+                        .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
+                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                        .Limit(1)
+                        .GetSnapshotAsync();
 
-            return Ok(data);
+                    if (layoutSnapshot.Documents.Any())
+                    {
+                        var layout = layoutSnapshot.Documents.First().ConvertTo<LayoutTransaction>();
+                        ccId = layout.CCId;
+                    }
+                    else
+                    {
+                        return Ok(new List<AttendanceTransaction>());
+                    }
+                }
+
+                var utcDate = DateTime.SpecifyKind(
+                    attendanceDate.Date,
+                    DateTimeKind.Utc);
+
+                var snapshot = await _firestore.AttendanceTransactions
+                    .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
+                    .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
+                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
+                    .GetSnapshotAsync();
+
+                var data = snapshot.Documents.Select(doc =>
+                {
+                    var item = doc.ConvertTo<AttendanceTransaction>();
+                    item.FirestoreId = doc.Id;
+                    return item;
+                }).ToList();
+
+                return Ok(data);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = ex.Message
+                });
+            }
         }
     }
 }

@@ -18,11 +18,31 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> Get(
             int lineId,
-            int ccId,
-            DateTime date)
+            DateTime date,
+            int? ccId = null)
         {
             try
             {
+                // Resolve CC from active LayoutTransaction if not provided
+                if (ccId == null)
+                {
+                    var activeLayoutSnapshot = await _firestore.LayoutTransactions
+                        .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
+                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                        .Limit(1)
+                        .GetSnapshotAsync();
+
+                    if (activeLayoutSnapshot.Documents.Any())
+                    {
+                        var layout = activeLayoutSnapshot.Documents.First().ConvertTo<LayoutTransaction>();
+                        ccId = layout.CCId;
+                    }
+                    else
+                    {
+                        return Ok(new LineSummaryResponse());
+                    }
+                }
+
                 var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
 
                 // Fetch the CC to get SAM and CCNo
@@ -122,6 +142,21 @@ namespace FactoryManagementSystem.Controllers
                 int othersPresent = othersOnRoll - absentOthers;
                 int totalPresent = tailorsPresent + othersPresent;
 
+                // Fetch output for this line + date
+                double output = 0;
+                var outputSnapshot = await _firestore.OutputTransactions
+                    .WhereEqualTo(nameof(OutputTransaction.LineId), lineId)
+                    .WhereEqualTo(nameof(OutputTransaction.OutputDate), utcDate)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                var outputDoc = outputSnapshot.Documents.FirstOrDefault();
+                if (outputDoc != null)
+                {
+                    var outputRecord = outputDoc.ConvertTo<OutputTransaction>();
+                    output = outputRecord.Output;
+                }
+
                 var response = new LineSummaryResponse
                 {
                     CCNo = cc.CCNo,
@@ -131,7 +166,8 @@ namespace FactoryManagementSystem.Controllers
                     TotalOnRoll = totalOnRoll,
                     TailorsPresent = tailorsPresent < 0 ? 0 : tailorsPresent,
                     OthersPresent = othersPresent < 0 ? 0 : othersPresent,
-                    TotalPresent = totalPresent < 0 ? 0 : totalPresent
+                    TotalPresent = totalPresent < 0 ? 0 : totalPresent,
+                    Output = output
                 };
 
                 return Ok(response);

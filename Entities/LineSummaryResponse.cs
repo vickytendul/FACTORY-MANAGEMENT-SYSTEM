@@ -19,5 +19,7 @@
             TotalOnRoll == 0
                 ? 0
                 : Math.Round((decimal)Absent * 100 / TotalOnRoll, 2);
+
+        public double Output { get; set; }
     }
 }

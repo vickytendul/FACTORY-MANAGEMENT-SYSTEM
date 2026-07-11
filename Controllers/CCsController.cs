@@ -64,11 +64,38 @@ namespace FactoryManagementSystem.Controllers
                 {
                     ccId = x.CCId,
                     ccNo = x.CCNo,
-                    sam = x.SAM    // ✅ Added
+                    sam = x.SAM
                 })
                 .ToList();
 
             return Ok(result);
         }
+
+        [HttpPut("{ccId}/sam")]
+        public async Task<IActionResult> UpdateSam(int ccId, [FromBody] SamUpdateRequest request)
+        {
+            try
+            {
+                var snapshot = await _firestore.CCs.GetSnapshotAsync();
+                var document = snapshot.Documents
+                    .FirstOrDefault(d => d.ConvertTo<CC>().CCId == ccId);
+
+                if (document == null)
+                    return NotFound(new { Success = false, Message = "CC not found." });
+
+                await document.Reference.UpdateAsync(nameof(CC.SAM), request.Sam);
+
+                return Ok(new { Success = true, Message = "SAM updated successfully." });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+    }
+
+    public class SamUpdateRequest
+    {
+        public double Sam { get; set; }
     }
 }

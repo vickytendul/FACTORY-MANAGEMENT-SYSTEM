@@ -138,6 +138,32 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // GET: api/LayoutTransaction/all  — returns all active transactions
+        [HttpGet("all")]
+        public async Task<IActionResult> GetAllActive()
+        {
+            try
+            {
+                var snapshot = await _firestore.LayoutTransactions
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                    .GetSnapshotAsync();
+
+                var data = snapshot.Documents
+                    .Select(x => x.ConvertTo<LayoutTransaction>())
+                    .ToList();
+
+                return Ok(data);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = ex.Message
+                });
+            }
+        }
+
         // GET: api/LayoutTransaction?lineId=1&ccId=1  (ccId optional)
         [HttpGet]
         public async Task<IActionResult> GetAllocation(int lineId, int? ccId)

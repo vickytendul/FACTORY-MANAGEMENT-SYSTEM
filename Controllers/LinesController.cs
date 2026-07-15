@@ -1,5 +1,6 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -18,13 +19,21 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetLines(int? zoneId)
         {
-            var snapshot = await _firestore.Lines.GetSnapshotAsync();
+            // OPTIMIZED: Filter by IsActive and optional ZoneId at Firestore level
+            Query query = _firestore.Lines
+                .WhereEqualTo(nameof(Line.IsActive), true);
+
+            if (zoneId.HasValue)
+            {
+                query = query.WhereEqualTo(nameof(Line.ZoneId), zoneId.Value);
+            }
+
+            var snapshot = await query
+                .OrderBy(nameof(Line.LineId))
+                .GetSnapshotAsync();
 
             var lines = snapshot.Documents
                 .Select(x => x.ConvertTo<Line>())
-                .Where(x => x.IsActive)
-                .Where(x => zoneId == null || x.ZoneId == zoneId)
-                .OrderBy(x => x.LineId)
                 .Select(x => new
                 {
                     lineId = x.LineId,

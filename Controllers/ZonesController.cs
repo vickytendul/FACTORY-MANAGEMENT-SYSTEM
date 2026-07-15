@@ -1,5 +1,6 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -18,12 +19,14 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetZones()
         {
-            var snapshot = await _firestore.Zones.GetSnapshotAsync();
+            // OPTIMIZED: Filter by IsActive at Firestore level (not entire collection)
+            var snapshot = await _firestore.Zones
+                .WhereEqualTo(nameof(Zone.IsActive), true)
+                .OrderBy(nameof(Zone.ZoneId))
+                .GetSnapshotAsync();
 
             var zones = snapshot.Documents
                 .Select(x => x.ConvertTo<Zone>())
-                .Where(x => x.IsActive)
-                .OrderBy(x => x.ZoneId)
                 .ToList();
 
             return Ok(zones);

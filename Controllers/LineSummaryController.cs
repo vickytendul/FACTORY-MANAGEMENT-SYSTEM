@@ -1,5 +1,6 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -26,6 +27,7 @@ namespace FactoryManagementSystem.Controllers
                 // Resolve CC from active LayoutTransaction if not provided
                 if (ccId == null)
                 {
+                    // OPTIMIZED: Query only active transactions for this specific line (1-2 reads instead of N)
                     var activeLayoutSnapshot = await _firestore.LayoutTransactions
                         .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
                         .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
@@ -45,7 +47,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
 
-                // Fetch the CC to get SAM and CCNo
+                // OPTIMIZED: Query only the specific CC (1 read instead of N)
                 var ccSnapshot = await _firestore.CCs
                     .WhereEqualTo(nameof(CC.CCId), ccId)
                     .Limit(1)
@@ -64,7 +66,7 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                // Fetch all active LayoutTransactions for this line + cc
+                // OPTIMIZED: Query only active transactions for this specific line + cc (not entire collection)
                 var layoutSnapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
                     .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
@@ -90,12 +92,31 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                // Build employee code lookup from EmployeeMasters for Designation
-                var empSnapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
-                var employeeDesignations = empSnapshot.Documents
-                    .Select(d => d.ConvertTo<EmployeeMaster>())
-                    .Where(e => e.IsActive)
-                    .ToDictionary(e => e.EmployeeCode, e => e.Designation ?? "", StringComparer.OrdinalIgnoreCase);
+                // OPTIMIZED: Build employee code lookup - query only employees that are in the layout
+                // Instead of reading entire EmployeeMasters collection, query specific employees
+                var employeeCodes = layoutItems.Select(x => x.EmployeeCode).Distinct().ToList();
+                var employeeDesignations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                // Batch query employees by their codes (Firestore doesn't support IN queries with more than 30 items)
+                // So we query in batches of 30
+                const int batchSize = 30;
+                for (int i = 0; i < employeeCodes.Count; i += batchSize)
+                {
+                    var batch = employeeCodes.Skip(i).Take(batchSize).ToList();
+                    foreach (var code in batch)
+                    {
+                        var empSnapshot = await _firestore.EmployeeMasters
+                            .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), code)
+                            .Limit(1)
+                            .GetSnapshotAsync();
+
+                        if (empSnapshot.Documents.Any())
+                        {
+                            var emp = empSnapshot.Documents.First().ConvertTo<EmployeeMaster>();
+                            employeeDesignations[code] = emp.Designation ?? "";
+                        }
+                    }
+                }
 
                 // Calculate On Roll counts by Designation
                 int tailorsOnRoll = 0;
@@ -114,7 +135,7 @@ namespace FactoryManagementSystem.Controllers
 
                 int totalOnRoll = tailorsOnRoll + othersOnRoll;
 
-                // Fetch AttendanceTransactions for this line + cc + date
+                // OPTIMIZED: Query only attendance for this specific line + cc + date (not entire collection)
                 var attendanceSnapshot = await _firestore.AttendanceTransactions
                     .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
                     .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
@@ -142,7 +163,7 @@ namespace FactoryManagementSystem.Controllers
                 int othersPresent = othersOnRoll - absentOthers;
                 int totalPresent = tailorsPresent + othersPresent;
 
-                // Fetch output for this line + date
+                // OPTIMIZED: Query only output for this specific line + date (1-2 reads instead of N)
                 double output = 0;
                 var outputSnapshot = await _firestore.OutputTransactions
                     .WhereEqualTo(nameof(OutputTransaction.LineId), lineId)

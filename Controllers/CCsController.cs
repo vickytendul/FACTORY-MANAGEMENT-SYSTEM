@@ -1,39 +1,4 @@
-﻿/*using FactoryManagementSystem.Data;
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-
-namespace FactoryManagementSystem.Controllers
-{
-    [ApiController]
-    [Route("api/[controller]")]
-    public class CCsController : ControllerBase
-    {
-        private readonly ApplicationDbContext _context;
-
-        public CCsController(ApplicationDbContext context)
-        {
-            _context = context;
-        }
-
-        [HttpGet]
-        public async Task<IActionResult> GetCCs()
-        {
-            var ccs = await _context.CCs
-                .Where(x => x.IsActive)
-                .OrderBy(x => x.CCNo)
-                .Select(x => new
-                {
-                    ccId = x.CCId,
-                    ccNo = x.CCNo
-                })
-                .ToListAsync();
-
-            return Ok(ccs);
-        }
-    }
-}*/
-
-using FactoryManagementSystem.Entities;
+﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
@@ -54,16 +19,17 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetCCs([FromQuery] bool includeInactive = false)
         {
-            var snapshot = await _firestore.CCs.GetSnapshotAsync();
+            // OPTIMIZED: Filter active/inactive at Firestore level
+            Query query = includeInactive
+                ? _firestore.CCs
+                : _firestore.CCs.WhereEqualTo(nameof(CC.IsActive), true);
 
-            var query = snapshot.Documents
-                .Select(d => d.ConvertTo<CC>());
+            var snapshot = await query
+                .OrderBy(nameof(CC.CCNo))
+                .GetSnapshotAsync();
 
-            if (!includeInactive)
-                query = query.Where(x => x.IsActive);
-
-            var result = query
-                .OrderBy(x => x.CCNo)
+            var result = snapshot.Documents
+                .Select(d => d.ConvertTo<CC>())
                 .Select(x => new
                 {
                     ccId = x.CCId,
@@ -79,20 +45,25 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet("{ccId}")]
         public async Task<IActionResult> GetCC(int ccId)
         {
-            var snapshot = await _firestore.CCs.GetSnapshotAsync();
-            var document = snapshot.Documents
-                .Select(d => new { Doc = d, CC = d.ConvertTo<CC>() })
-                .FirstOrDefault(x => x.CC.CCId == ccId);
+            // OPTIMIZED: Query only the specific CC (1 read instead of N)
+            var snapshot = await _firestore.CCs
+                .WhereEqualTo(nameof(CC.CCId), ccId)
+                .Limit(1)
+                .GetSnapshotAsync();
+
+            var document = snapshot.Documents.FirstOrDefault();
 
             if (document == null)
                 return NotFound(new { Success = false, Message = "CC not found." });
 
+            var cc = document.ConvertTo<CC>();
+
             return Ok(new
             {
-                ccId = document.CC.CCId,
-                ccNo = document.CC.CCNo,
-                sam = document.CC.SAM,
-                isActive = document.CC.IsActive
+                ccId = cc.CCId,
+                ccNo = cc.CCNo,
+                sam = cc.SAM,
+                isActive = cc.IsActive
             });
         }
 
@@ -101,16 +72,17 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // Check duplicate CC No
-                var allSnapshot = await _firestore.CCs.GetSnapshotAsync();
-                var existing = allSnapshot.Documents
-                    .Select(d => d.ConvertTo<CC>())
-                    .FirstOrDefault(x => x.CCNo.Trim().ToUpper() == (request.CCNo ?? "").Trim().ToUpper());
+                // OPTIMIZED: Query only documents with matching CCNo (1 read instead of N)
+                var duplicateSnapshot = await _firestore.CCs
+                    .WhereEqualTo(nameof(CC.CCNo), (request.CCNo ?? "").Trim().ToUpper())
+                    .Limit(1)
+                    .GetSnapshotAsync();
 
-                if (existing != null)
+                if (duplicateSnapshot.Documents.Any())
                     return BadRequest(new { Success = false, Message = "CC Number already exists." });
 
-                // Get next CCId
+                // Generate next CCId - need to find max (still requires scan for max)
+                var allSnapshot = await _firestore.CCs.GetSnapshotAsync();
                 var maxId = allSnapshot.Documents.Any()
                     ? allSnapshot.Documents.Select(d => d.ConvertTo<CC>()).Max(x => x.CCId)
                     : 0;
@@ -149,23 +121,29 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.CCs.GetSnapshotAsync();
-                var document = snapshot.Documents
-                    .Select(d => new { Doc = d, CC = d.ConvertTo<CC>() })
-                    .FirstOrDefault(x => x.CC.CCId == ccId);
+                // OPTIMIZED: Find the specific CC (1 read instead of N)
+                var targetSnapshot = await _firestore.CCs
+                    .WhereEqualTo(nameof(CC.CCId), ccId)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                var document = targetSnapshot.Documents.FirstOrDefault();
 
                 if (document == null)
                     return NotFound(new { Success = false, Message = "CC not found." });
 
-                // Check duplicate CC No (excluding self)
-                var duplicate = snapshot.Documents
-                    .Select(d => d.ConvertTo<CC>())
-                    .FirstOrDefault(x => x.CCId != ccId && x.CCNo.Trim().ToUpper() == (request.CCNo ?? "").Trim().ToUpper());
+                // OPTIMIZED: Check duplicate CCNo excluding self (1 read instead of N)
+                var duplicateSnapshot = await _firestore.CCs
+                    .WhereEqualTo(nameof(CC.CCNo), (request.CCNo ?? "").Trim().ToUpper())
+                    .GetSnapshotAsync();
 
-                if (duplicate != null)
+                if (duplicateSnapshot.Documents.Any(x =>
+                    x.ConvertTo<CC>().CCId != ccId))
+                {
                     return BadRequest(new { Success = false, Message = "CC Number already exists." });
+                }
 
-                await document.Doc.Reference.UpdateAsync(new Dictionary<string, object>
+                await document.Reference.UpdateAsync(new Dictionary<string, object>
                 {
                     { nameof(CC.CCNo), request.CCNo ?? "" },
                     { nameof(CC.SAM), request.Sam },
@@ -185,15 +163,20 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.CCs.GetSnapshotAsync();
-                var document = snapshot.Documents
-                    .Select(d => new { Doc = d, CC = d.ConvertTo<CC>() })
-                    .FirstOrDefault(x => x.CC.CCId == ccId);
+                // OPTIMIZED: Query only the specific CC (1 read instead of N)
+                var snapshot = await _firestore.CCs
+                    .WhereEqualTo(nameof(CC.CCId), ccId)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                var document = snapshot.Documents.FirstOrDefault();
 
                 if (document == null)
                     return NotFound(new { Success = false, Message = "CC not found." });
 
-                await document.Doc.Reference.UpdateAsync(nameof(CC.IsActive), !document.CC.IsActive);
+                var cc = document.ConvertTo<CC>();
+
+                await document.Reference.UpdateAsync(nameof(CC.IsActive), !cc.IsActive);
 
                 return Ok(new { Success = true, Message = "CC status updated successfully." });
             }
@@ -208,9 +191,13 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.CCs.GetSnapshotAsync();
-                var document = snapshot.Documents
-                    .FirstOrDefault(d => d.ConvertTo<CC>().CCId == ccId);
+                // OPTIMIZED: Query only the specific CC (1 read instead of N)
+                var snapshot = await _firestore.CCs
+                    .WhereEqualTo(nameof(CC.CCId), ccId)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                var document = snapshot.Documents.FirstOrDefault();
 
                 if (document == null)
                     return NotFound(new { Success = false, Message = "CC not found." });

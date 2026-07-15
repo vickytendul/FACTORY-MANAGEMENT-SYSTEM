@@ -27,5 +27,6 @@ namespace FactoryManagementSystem.Services
     _db.Collection("AttendanceTransactions");
         public CollectionReference OutputTransactions =>
     _db.Collection("OutputTransactions");
+        public CollectionReference Counters => _db.Collection("Counters");
     }
 }

@@ -1,5 +1,6 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -22,9 +23,11 @@ namespace FactoryManagementSystem.Controllers
             {
                 foreach (var item in request)
                 {
+                    // OPTIMIZED: Query only attendance for this specific employee + date (1-2 reads instead of N)
                     var exists = await _firestore.AttendanceTransactions
-                        .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), DateTime.UtcNow.Date)
                         .WhereEqualTo(nameof(AttendanceTransaction.EmployeeCode), item.EmployeeCode)
+                        .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), DateTime.UtcNow.Date)
+                        .Limit(1)
                         .GetSnapshotAsync();
 
                     if (exists.Documents.Any())
@@ -70,6 +73,7 @@ namespace FactoryManagementSystem.Controllers
                 // Resolve CC from active LayoutTransaction if not provided
                 if (ccId == null)
                 {
+                    // OPTIMIZED: Query only active transactions for this specific line (1-2 reads instead of N)
                     var layoutSnapshot = await _firestore.LayoutTransactions
                         .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
                         .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
@@ -91,6 +95,7 @@ namespace FactoryManagementSystem.Controllers
                     attendanceDate.Date,
                     DateTimeKind.Utc);
 
+                // OPTIMIZED: Query only attendance for this specific line + cc + date (not entire collection)
                 var snapshot = await _firestore.AttendanceTransactions
                     .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
                     .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)

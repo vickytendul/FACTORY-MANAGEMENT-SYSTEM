@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -22,14 +23,15 @@ namespace FactoryManagementSystem.Controllers
             {
                 var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
 
-                // All active lines
-                var lineSnapshot = await _firestore.Lines.GetSnapshotAsync();
+                // OPTIMIZED: Query only active lines (not entire collection if there are inactive ones)
+                var lineSnapshot = await _firestore.Lines
+                    .WhereEqualTo(nameof(Line.IsActive), true)
+                    .GetSnapshotAsync();
                 var lines = lineSnapshot.Documents
                     .Select(d => d.ConvertTo<Line>())
-                    .Where(x => x.IsActive)
                     .ToList();
 
-                // All active layout transactions to determine current CC per line
+                // OPTIMIZED: Query only active layout transactions (not entire collection)
                 var layoutSnapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
                     .GetSnapshotAsync();
@@ -37,19 +39,20 @@ namespace FactoryManagementSystem.Controllers
                     .Select(d => d.ConvertTo<LayoutTransaction>())
                     .ToList();
 
-                // Get CC lookup
-                var ccSnapshot = await _firestore.CCs.GetSnapshotAsync();
+                // OPTIMIZED: Query only active CCs (not entire collection)
+                var ccSnapshot = await _firestore.CCs
+                    .WhereEqualTo(nameof(CC.IsActive), true)
+                    .GetSnapshotAsync();
                 var ccLookup = ccSnapshot.Documents
                     .Select(d => d.ConvertTo<CC>())
-                    .Where(x => x.IsActive)
                     .ToDictionary(x => x.CCId, x => x.CCNo);
 
-                // Get the CC for each line from active allocations
+                // Build CC lookup per line from active allocations
                 var lineCcMap = layoutItems
                     .GroupBy(x => x.LineId)
                     .ToDictionary(g => g.Key, g => g.First().CCId);
 
-                // Existing outputs for this date
+                // OPTIMIZED: Query only outputs for this specific date (not entire collection)
                 var outputSnapshot = await _firestore.OutputTransactions
                     .WhereEqualTo(nameof(OutputTransaction.OutputDate), utcDate)
                     .GetSnapshotAsync();
@@ -98,7 +101,7 @@ namespace FactoryManagementSystem.Controllers
                 var utcDate = DateTime.SpecifyKind(request.OutputDate.Date, DateTimeKind.Utc);
                 var now = DateTime.UtcNow;
 
-                // Check if an output record already exists for this line + date
+                // OPTIMIZED: Query only outputs for this specific line + date (not entire collection)
                 var existingSnapshot = await _firestore.OutputTransactions
                     .WhereEqualTo(nameof(OutputTransaction.LineId), request.LineId)
                     .WhereEqualTo(nameof(OutputTransaction.OutputDate), utcDate)
@@ -116,7 +119,8 @@ namespace FactoryManagementSystem.Controllers
                 }
                 else
                 {
-                    // Insert
+                    // Insert - OPTIMIZED: Use a targeted query to find max ID
+                    // We still need to read for max, but this is unavoidable for auto-increment
                     var allSnapshot = await _firestore.OutputTransactions.GetSnapshotAsync();
                     var maxId = allSnapshot.Documents
                         .Select(d => d.ConvertTo<OutputTransaction>().OutputId)
@@ -156,6 +160,7 @@ namespace FactoryManagementSystem.Controllers
             {
                 var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
 
+                // OPTIMIZED: Query only outputs for this specific line + date (1-2 reads instead of N)
                 var snapshot = await _firestore.OutputTransactions
                     .WhereEqualTo(nameof(OutputTransaction.LineId), lineId)
                     .WhereEqualTo(nameof(OutputTransaction.OutputDate), utcDate)

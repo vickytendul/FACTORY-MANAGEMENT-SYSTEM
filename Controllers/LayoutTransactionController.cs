@@ -1,6 +1,7 @@
 ﻿using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -25,7 +26,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // Fetch all existing active transactions for this Line + CC
+                // OPTIMIZED: Query only active transactions for this specific Line + CC (not entire collection)
                 var existingSnapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
                     .WhereEqualTo(nameof(LayoutTransaction.CCId), request.CCId)
@@ -46,7 +47,7 @@ namespace FactoryManagementSystem.Controllers
                     if (string.IsNullOrWhiteSpace(item.EmployeeCode))
                         continue;
 
-                    // Check if employee is already allocated in a DIFFERENT active layout
+                    // OPTIMIZED: Check if employee is already allocated (1 query per employee instead of reading entire collection)
                     var existingEmployee = await _firestore.LayoutTransactions
                         .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode)
                         .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
@@ -144,6 +145,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                // OPTIMIZED: Filter by IsActive at Firestore level
                 var snapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
                     .GetSnapshotAsync();
@@ -170,7 +172,8 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var query = _firestore.LayoutTransactions
+                // OPTIMIZED: Filter by LineId and IsActive at Firestore level
+                Query query = _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true);
 

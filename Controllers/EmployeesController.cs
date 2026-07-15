@@ -1,6 +1,7 @@
 ﻿using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -12,6 +13,7 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly FirestoreService _firestore;
+        private const string CounterDocId = "EmployeeCounter";
 
         public EmployeesController(
             ApplicationDbContext context,
@@ -39,20 +41,22 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet("barcode/{barcode}")]
         public async Task<IActionResult> GetEmployeeByBarcode(string barcode)
         {
-            var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+            var snapshot = await _firestore.EmployeeMasters
+                .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), barcode)
+                .WhereEqualTo(nameof(EmployeeMaster.IsActive), true)
+                .Limit(1)
+                .GetSnapshotAsync();
 
-            var employee = snapshot.Documents
-                .Select(x => x.ConvertTo<EmployeeMaster>())
-                .FirstOrDefault(x =>
-                    x.EmployeeBarcode == barcode &&
-                    x.IsActive);
+            var document = snapshot.Documents.FirstOrDefault();
 
-            if (employee == null)
+            if (document == null)
                 return NotFound(new
                 {
                     Success = false,
                     Message = "Employee not found."
                 });
+
+            var employee = document.ConvertTo<EmployeeMaster>();
 
             return Ok(new
             {
@@ -66,21 +70,41 @@ namespace FactoryManagementSystem.Controllers
             });
         }
 
+        // GET: api/Employees/code/{code}
+        [HttpGet("code/{code}")]
+        public async Task<IActionResult> GetEmployeeByCode(string code)
+        {
+            var snapshot = await _firestore.EmployeeMasters
+                .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), code)
+                .Limit(1)
+                .GetSnapshotAsync();
+
+            var document = snapshot.Documents.FirstOrDefault();
+
+            if (document == null)
+                return NotFound(new
+                {
+                    Success = false,
+                    Message = "Employee not found."
+                });
+
+            var employee = document.ConvertTo<EmployeeMaster>();
+
+            return Ok(employee);
+        }
+
         // POST: api/Employees
         [HttpPost]
         public async Task<IActionResult> AddEmployee([FromBody] EmployeeMaster employee)
         {
             try
             {
-                // Get all employees from Firestore
-                var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+                var codeSnapshot = await _firestore.EmployeeMasters
+                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), employee.EmployeeCode)
+                    .Limit(1)
+                    .GetSnapshotAsync();
 
-                var employees = snapshot.Documents
-                    .Select(x => x.ConvertTo<EmployeeMaster>())
-                    .ToList();
-
-                // Duplicate Employee Code Check
-                if (employees.Any(x => x.EmployeeCode == employee.EmployeeCode))
+                if (codeSnapshot.Documents.Any())
                 {
                     return BadRequest(new
                     {
@@ -89,8 +113,12 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                // Duplicate Barcode Check
-                if (employees.Any(x => x.EmployeeBarcode == employee.EmployeeBarcode))
+                var barcodeSnapshot = await _firestore.EmployeeMasters
+                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), employee.EmployeeBarcode)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                if (barcodeSnapshot.Documents.Any())
                 {
                     return BadRequest(new
                     {
@@ -101,12 +129,25 @@ namespace FactoryManagementSystem.Controllers
 
                 employee.IsActive = true;
 
-                // Generate next EmployeeId
-                employee.EmployeeId = employees.Any()
-                    ? employees.Max(x => x.EmployeeId) + 1
-                    : 1;
+                // Read counter document to get next EmployeeId (1 read instead of scanning entire collection)
+                var counterRef = _firestore.Counters.Document(CounterDocId);
+                var counterSnapshot = await counterRef.GetSnapshotAsync();
 
-                // Save to Firestore
+                EmployeeCounter counter;
+                if (!counterSnapshot.Exists)
+                {
+                    counter = new EmployeeCounter { LatestEmployeeId = 0 };
+                }
+                else
+                {
+                    counter = counterSnapshot.ConvertTo<EmployeeCounter>();
+                }
+
+                counter.LatestEmployeeId++;
+                employee.EmployeeId = counter.LatestEmployeeId;
+
+                // Update counter and save employee
+                await counterRef.SetAsync(counter);
                 await _firestore.EmployeeMasters
                     .Document(employee.EmployeeCode)
                     .SetAsync(employee);
@@ -133,12 +174,12 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+                var targetSnapshot = await _firestore.EmployeeMasters
+                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeId), id)
+                    .Limit(1)
+                    .GetSnapshotAsync();
 
-                var documents = snapshot.Documents;
-
-                var existingDoc = documents.FirstOrDefault(x =>
-                    x.ConvertTo<EmployeeMaster>().EmployeeId == id);
+                var existingDoc = targetSnapshot.Documents.FirstOrDefault();
 
                 if (existingDoc == null)
                 {
@@ -149,14 +190,14 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                var employees = documents
-                    .Select(x => x.ConvertTo<EmployeeMaster>())
-                    .ToList();
+                // Check duplicate EmployeeCode excluding self
+                var codeSnapshot = await _firestore.EmployeeMasters
+                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), employee.EmployeeCode)
+                    .Limit(1)
+                    .GetSnapshotAsync();
 
-                // Employee Code Duplicate Check
-                if (employees.Any(x =>
-                    x.EmployeeCode == employee.EmployeeCode &&
-                    x.EmployeeId != id))
+                var codeDoc = codeSnapshot.Documents.FirstOrDefault();
+                if (codeDoc != null && codeDoc.ConvertTo<EmployeeMaster>().EmployeeId != id)
                 {
                     return BadRequest(new
                     {
@@ -165,10 +206,14 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                // Employee Barcode Duplicate Check
-                if (employees.Any(x =>
-                    x.EmployeeBarcode == employee.EmployeeBarcode &&
-                    x.EmployeeId != id))
+                // Check duplicate Barcode excluding self
+                var barcodeSnapshot = await _firestore.EmployeeMasters
+                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), employee.EmployeeBarcode)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                var barcodeDoc = barcodeSnapshot.Documents.FirstOrDefault();
+                if (barcodeDoc != null && barcodeDoc.ConvertTo<EmployeeMaster>().EmployeeId != id)
                 {
                     return BadRequest(new
                     {
@@ -179,7 +224,6 @@ namespace FactoryManagementSystem.Controllers
 
                 employee.EmployeeId = id;
 
-                // Update the same Firestore document
                 await existingDoc.Reference.SetAsync(employee);
 
                 return Ok(new
@@ -204,10 +248,12 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+                var snapshot = await _firestore.EmployeeMasters
+                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeId), id)
+                    .Limit(1)
+                    .GetSnapshotAsync();
 
-                var document = snapshot.Documents.FirstOrDefault(x =>
-                    x.ConvertTo<EmployeeMaster>().EmployeeId == id);
+                var document = snapshot.Documents.FirstOrDefault();
 
                 if (document == null)
                 {

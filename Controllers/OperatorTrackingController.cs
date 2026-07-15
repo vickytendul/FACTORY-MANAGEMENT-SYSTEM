@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -22,14 +23,15 @@ namespace FactoryManagementSystem.Controllers
             {
                 var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
 
-                // All active employees
-                var empSnapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+                // All active employees (needed for complete list)
+                var empSnapshot = await _firestore.EmployeeMasters
+                    .WhereEqualTo(nameof(EmployeeMaster.IsActive), true)
+                    .GetSnapshotAsync();
                 var employees = empSnapshot.Documents
                     .Select(x => x.ConvertTo<EmployeeMaster>())
-                    .Where(x => x.IsActive)
                     .ToList();
 
-                // All active layout transactions (current allocations)
+                // OPTIMIZED: Query only active layout transactions (already filtered)
                 var layoutSnapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
                     .GetSnapshotAsync();
@@ -37,7 +39,7 @@ namespace FactoryManagementSystem.Controllers
                     .Select(x => x.ConvertTo<LayoutTransaction>())
                     .ToList();
 
-                // Attendance for the selected date
+                // OPTIMIZED: Query only attendance for this specific date (not entire collection)
                 var attSnapshot = await _firestore.AttendanceTransactions
                     .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
                     .GetSnapshotAsync();

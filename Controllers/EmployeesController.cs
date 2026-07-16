@@ -23,18 +23,134 @@ namespace FactoryManagementSystem.Controllers
             _firestore = firestore;
         }
 
-        // GET: api/Employees
-        [HttpGet]
-        public async Task<IActionResult> GetEmployees()
+        // GET: api/Employees/paginated?pageSize=50&search=&activeOnly=true&lastEmployeeCode=
+        [HttpGet("paginated")]
+        public async Task<IActionResult> GetEmployeesPaginated(
+            [FromQuery] int pageSize = 50,
+            [FromQuery] string? search = null,
+            [FromQuery] bool? activeOnly = null,
+            [FromQuery] string? lastEmployeeCode = null)
         {
-            var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+            var query = _firestore.EmployeeMasters
+                .OrderBy(nameof(EmployeeMaster.EmployeeCode));
+
+            if (activeOnly == true)
+                query = query.WhereEqualTo(nameof(EmployeeMaster.IsActive), true);
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                var upper = search.ToUpperInvariant();
+                query = query
+                    .WhereGreaterThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper)
+                    .WhereLessThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper + '\uf8ff');
+            }
+
+            if (!string.IsNullOrWhiteSpace(lastEmployeeCode))
+                query = query.StartAfter(lastEmployeeCode);
+
+            query = query.Limit(pageSize + 1);
+
+            var snapshot = await query.GetSnapshotAsync();
 
             var employees = snapshot.Documents
+                .Take(pageSize)
                 .Select(x => x.ConvertTo<EmployeeMaster>())
-                .OrderBy(x => x.EmployeeCode)
                 .ToList();
 
-            return Ok(employees);
+            var hasNextPage = snapshot.Documents.Count > pageSize;
+            var lastCode = employees.LastOrDefault()?.EmployeeCode;
+
+            long totalCount = 0;
+            try
+            {
+                var countQuery = (Query)_firestore.EmployeeMasters;
+                if (activeOnly == true)
+                    countQuery = countQuery.WhereEqualTo(nameof(EmployeeMaster.IsActive), true);
+                if (!string.IsNullOrWhiteSpace(search))
+                {
+                    var upper = search.ToUpperInvariant();
+                    countQuery = countQuery
+                        .WhereGreaterThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper)
+                        .WhereLessThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper + '\uf8ff');
+                }
+                var countSnapshot = await countQuery.Count().GetSnapshotAsync();
+                totalCount = countSnapshot.Count ?? 0;
+            }
+            catch
+            {
+                totalCount = employees.Count;
+            }
+
+            return Ok(new
+            {
+                employees,
+                totalCount,
+                hasNextPage,
+                lastEmployeeCode = lastCode
+            });
+        }
+
+        // GET: api/Employees/summary
+        [HttpGet("summary")]
+        public async Task<IActionResult> GetSummary()
+        {
+            var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+            var employees = snapshot.Documents
+                .Select(x => x.ConvertTo<EmployeeMaster>())
+                .ToList();
+
+            var layoutSnapshot = await _firestore.LayoutTransactions.GetSnapshotAsync();
+            var allocatedCodes = layoutSnapshot.Documents
+                .Select(x => x.GetValue<string>("employeeCode"))
+                .Where(x => x != null)
+                .ToHashSet();
+
+            var categories = new Dictionary<string, int[]>
+            {
+                ["Tailor"] = new int[2],
+                ["Packing Helper"] = new int[2],
+                ["Store Helper"] = new int[2],
+                ["Sewing Helper"] = new int[2],
+                ["Sewing Leader"] = new int[2],
+                ["Quality Checking"] = new int[2]
+            };
+
+            foreach (var emp in employees)
+            {
+                var cat = Categorize(emp.Department, emp.Designation);
+                if (cat == null || !categories.ContainsKey(cat)) continue;
+
+                categories[cat][0]++;
+                if (allocatedCodes.Contains(emp.EmployeeCode))
+                    categories[cat][1]++;
+            }
+
+            var totalCount = employees.Count;
+            var totalAllocated = employees.Count(e => allocatedCodes.Contains(e.EmployeeCode));
+
+            return Ok(new
+            {
+                totalCount,
+                totalAllocated,
+                categories = categories.ToDictionary(
+                    k => k.Key,
+                    v => new { total = v.Value[0], allocated = v.Value[1] }
+                )
+            });
+        }
+
+        private static string? Categorize(string? department, string? designation)
+        {
+            var dept = (department ?? "").Trim().ToUpperInvariant();
+            var desig = (designation ?? "").Trim().ToUpperInvariant();
+            if (string.IsNullOrEmpty(dept)) return null;
+            if (dept.StartsWith("TAILOR") || desig.StartsWith("TAILOR")) return "Tailor";
+            if (dept == "QUALITY") return "Quality Checking";
+            if (dept == "PACKING" && desig.Contains("HELPER")) return "Packing Helper";
+            if (dept == "STORE" && desig.Contains("HELPER")) return "Store Helper";
+            if (dept == "SEWING" && desig.Contains("HELPER")) return "Sewing Helper";
+            if (dept == "SEWING" && (desig.Contains("LEADER") || desig.Contains("LEADEAR"))) return "Sewing Leader";
+            return null;
         }
 
         // GET: api/Employees/barcode/{barcode}
@@ -129,7 +245,6 @@ namespace FactoryManagementSystem.Controllers
 
                 employee.IsActive = true;
 
-                // Read counter document to get next EmployeeId (1 read instead of scanning entire collection)
                 var counterRef = _firestore.Counters.Document(CounterDocId);
                 var counterSnapshot = await counterRef.GetSnapshotAsync();
 
@@ -146,17 +261,12 @@ namespace FactoryManagementSystem.Controllers
                 counter.LatestEmployeeId++;
                 employee.EmployeeId = counter.LatestEmployeeId;
 
-                // Update counter and save employee
                 await counterRef.SetAsync(counter);
                 await _firestore.EmployeeMasters
                     .Document(employee.EmployeeCode)
                     .SetAsync(employee);
 
-                return Ok(new
-                {
-                    Success = true,
-                    Message = "Employee Added Successfully."
-                });
+                return Ok(employee);
             }
             catch (Exception ex)
             {
@@ -190,7 +300,6 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                // Check duplicate EmployeeCode excluding self
                 var codeSnapshot = await _firestore.EmployeeMasters
                     .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), employee.EmployeeCode)
                     .Limit(1)
@@ -206,7 +315,6 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                // Check duplicate Barcode excluding self
                 var barcodeSnapshot = await _firestore.EmployeeMasters
                     .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), employee.EmployeeBarcode)
                     .Limit(1)

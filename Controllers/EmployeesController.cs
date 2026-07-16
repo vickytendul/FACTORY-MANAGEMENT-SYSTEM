@@ -13,14 +13,17 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly FirestoreService _firestore;
+        private readonly SummaryService _summaryService;
         private const string CounterDocId = "EmployeeCounter";
 
         public EmployeesController(
             ApplicationDbContext context,
-            FirestoreService firestore)
+            FirestoreService firestore,
+            SummaryService summaryService)
         {
             _context = context;
             _firestore = firestore;
+            _summaryService = summaryService;
         }
 
         // GET: api/Employees/paginated?pageSize=50&search=&activeOnly=true&lastEmployeeCode=
@@ -90,72 +93,38 @@ namespace FactoryManagementSystem.Controllers
             });
         }
 
-        // GET: api/Employees/summary
+                // GET: api/Employees/summary
         [HttpGet("summary")]
         public async Task<IActionResult> GetSummary()
         {
-            var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
-            var employees = snapshot.Documents
-                .Select(x => x.ConvertTo<EmployeeMaster>())
-                .ToList();
+            var docRef = _firestore.Summary.Document("EmployeeSummary");
+            var snapshot = await docRef.GetSnapshotAsync();
 
-            var layoutSnapshot = await _firestore.LayoutTransactions.GetSnapshotAsync();
-
-            var allocatedCodes = layoutSnapshot.Documents
-                .Select(x => x.ConvertTo<LayoutTransaction>())
-                .Where(x => x.IsActive && !string.IsNullOrWhiteSpace(x.EmployeeCode))
-                .Select(x => x.EmployeeCode.Trim())
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            var categories = new Dictionary<string, int[]>
+            if (!snapshot.Exists)
             {
-                ["Tailor"] = new int[2],
-                ["Packing Helper"] = new int[2],
-                ["Store Helper"] = new int[2],
-                ["Sewing Helper"] = new int[2],
-                ["Sewing Leader"] = new int[2],
-                ["Quality Checking"] = new int[2]
-            };
-
-            foreach (var emp in employees)
-            {
-                var cat = Categorize(emp.Department, emp.Designation);
-                if (cat == null || !categories.ContainsKey(cat)) continue;
-
-                categories[cat][0]++;
-                if (allocatedCodes.Contains(emp.EmployeeCode))
-                    categories[cat][1]++;
+                await _summaryService.RecalculateAsync();
+                snapshot = await docRef.GetSnapshotAsync();
             }
 
-            var totalCount = employees.Count;
-            var totalAllocated = employees.Count(e => allocatedCodes.Contains(e.EmployeeCode));
+            var summary = snapshot.ConvertTo<EmployeeSummary>();
 
             return Ok(new
             {
-                totalCount,
-                totalAllocated,
-                categories = categories.ToDictionary(
-                    k => k.Key,
-                    v => new { total = v.Value[0], allocated = v.Value[1] }
-                )
+                totalCount = summary.TotalManpower,
+                totalAllocated = summary.TotalAllocated,
+                categories = new Dictionary<string, object>
+                {
+                    ["Tailor"] = new { total = summary.TailorTotal, allocated = summary.TailorAllocated },
+                    ["Sewing Helper"] = new { total = summary.SewingHelperTotal, allocated = summary.SewingHelperAllocated },
+                    ["Sewing Leader"] = new { total = summary.SewingLeaderTotal, allocated = summary.SewingLeaderAllocated },
+                    ["Quality Checking"] = new { total = summary.QualityCheckingTotal, allocated = summary.QualityCheckingAllocated },
+                    ["Packing Helper"] = new { total = summary.PackingHelperTotal, allocated = summary.PackingHelperAllocated },
+                    ["Store Helper"] = new { total = summary.StoreHelperTotal, allocated = summary.StoreHelperAllocated },
+                }
             });
         }
 
-        private static string? Categorize(string? department, string? designation)
-        {
-            var dept = (department ?? "").Trim().ToUpperInvariant();
-            var desig = (designation ?? "").Trim().ToUpperInvariant();
-            if (string.IsNullOrEmpty(dept)) return null;
-            if (dept.StartsWith("TAILOR") || desig.StartsWith("TAILOR")) return "Tailor";
-            if (dept == "QUALITY") return "Quality Checking";
-            if (dept == "PACKING" && desig.Contains("HELPER")) return "Packing Helper";
-            if (dept == "STORE" && desig.Contains("HELPER")) return "Store Helper";
-            if (dept == "SEWING" && desig.Contains("HELPER")) return "Sewing Helper";
-            if (dept == "SEWING" && (desig.Contains("LEADER") || desig.Contains("LEADEAR"))) return "Sewing Leader";
-            return null;
-        }
-
-        // GET: api/Employees/barcode/{barcode}
+        // GET: api/Employees/barcode/{barcode}// GET: api/Employees/barcode/{barcode}
         [HttpGet("barcode/{barcode}")]
         public async Task<IActionResult> GetEmployeeByBarcode(string barcode)
         {
@@ -268,6 +237,7 @@ namespace FactoryManagementSystem.Controllers
                     .Document(employee.EmployeeCode)
                     .SetAsync(employee);
 
+                await _summaryService.RecalculateAsync();
                 return Ok(employee);
             }
             catch (Exception ex)
@@ -336,6 +306,7 @@ namespace FactoryManagementSystem.Controllers
 
                 await existingDoc.Reference.SetAsync(employee);
 
+                await _summaryService.RecalculateAsync();
                 return Ok(new
                 {
                     Success = true,
@@ -380,6 +351,7 @@ namespace FactoryManagementSystem.Controllers
 
                 await document.Reference.SetAsync(employee);
 
+                await _summaryService.RecalculateAsync();
                 return Ok(new
                 {
                     Success = true,
@@ -399,3 +371,5 @@ namespace FactoryManagementSystem.Controllers
         }
     }
 }
+
+

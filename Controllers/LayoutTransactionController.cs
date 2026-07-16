@@ -12,13 +12,16 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly FirestoreService _firestore;
+        private readonly SummaryService _summaryService;
 
         public LayoutTransactionController(
             ApplicationDbContext context,
-            FirestoreService firestore)
+            FirestoreService firestore,
+            SummaryService summaryService)
         {
             _context = context;
             _firestore = firestore;
+            _summaryService = summaryService;
         }
 
         [HttpPost]
@@ -123,6 +126,7 @@ namespace FactoryManagementSystem.Controllers
                     }
                 }
 
+                await _summaryService.RecalculateAsync();
                 return Ok(new
                 {
                     Success = true,
@@ -226,6 +230,7 @@ namespace FactoryManagementSystem.Controllers
         { nameof(LayoutTransaction.EmployeeGrade), request.EmployeeGrade }
     });
 
+            await _summaryService.RecalculateAsync();
             return Ok(new
             {
                 Success = true,
@@ -234,3 +239,4 @@ namespace FactoryManagementSystem.Controllers
         }
     }
 }
+

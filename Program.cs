@@ -52,6 +52,7 @@ builder.Services.AddSingleton(provider =>
 });
 
 builder.Services.AddSingleton<FirestoreService>();
+builder.Services.AddSingleton<SummaryService>();
 
 // =====================================================
 // Services

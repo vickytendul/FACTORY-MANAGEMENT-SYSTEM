@@ -1,4 +1,4 @@
-﻿using FactoryManagementSystem.Data;
+using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
@@ -237,7 +237,7 @@ namespace FactoryManagementSystem.Controllers
                     .Document(employee.EmployeeCode)
                     .SetAsync(employee);
 
-                await _summaryService.RecalculateAsync();
+                await _summaryService.OnEmployeeAdded(employee.Department, employee.Designation);
                 return Ok(employee);
             }
             catch (Exception ex)
@@ -306,7 +306,8 @@ namespace FactoryManagementSystem.Controllers
 
                 await existingDoc.Reference.SetAsync(employee);
 
-                await _summaryService.RecalculateAsync();
+                var oldEmployee = existingDoc.ConvertTo<EmployeeMaster>();
+                await _summaryService.OnEmployeeUpdated(oldEmployee.Department, oldEmployee.Designation, employee.Department, employee.Designation);
                 return Ok(new
                 {
                     Success = true,
@@ -351,7 +352,7 @@ namespace FactoryManagementSystem.Controllers
 
                 await document.Reference.SetAsync(employee);
 
-                await _summaryService.RecalculateAsync();
+                await _summaryService.OnEmployeeToggled(employee.Department, employee.Designation, !employee.IsActive, employee.IsActive);
                 return Ok(new
                 {
                     Success = true,
@@ -371,5 +372,6 @@ namespace FactoryManagementSystem.Controllers
         }
     }
 }
+
 
 

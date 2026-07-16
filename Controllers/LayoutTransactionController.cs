@@ -126,7 +126,29 @@ namespace FactoryManagementSystem.Controllers
                     }
                 }
 
-                await _summaryService.RecalculateAsync();
+                // Incremental summary: compare old vs new employee codes
+                var oldCodes = existingDocs
+                    .Where(e => !string.IsNullOrWhiteSpace(e.Transaction.EmployeeCode))
+                    .Select(e => e.Transaction.EmployeeCode)
+                    .ToHashSet();
+                var newCodes = request.Items
+                    .Where(i => !string.IsNullOrWhiteSpace(i.EmployeeCode))
+                    .Select(i => i.EmployeeCode)
+                    .ToHashSet();
+
+                foreach (var code in oldCodes.Except(newCodes))
+                {
+                    var emp = await _summaryService.FindEmployeeByCodeAsync(code);
+                    if (emp != null)
+                        await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation);
+                }
+                foreach (var code in newCodes.Except(oldCodes))
+                {
+                    var emp = await _summaryService.FindEmployeeByCodeAsync(code);
+                    if (emp != null)
+                        await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation);
+                }
+
                 return Ok(new
                 {
                     Success = true,
@@ -230,7 +252,18 @@ namespace FactoryManagementSystem.Controllers
         { nameof(LayoutTransaction.EmployeeGrade), request.EmployeeGrade }
     });
 
-            await _summaryService.RecalculateAsync();
+            // Incremental summary
+            var oldTransaction = snapshot.ConvertTo<LayoutTransaction>();
+            if (oldTransaction.EmployeeCode != request.EmployeeCode)
+            {
+                var oldEmp = await _summaryService.FindEmployeeByCodeAsync(oldTransaction.EmployeeCode);
+                var newEmp = await _summaryService.FindEmployeeByCodeAsync(request.EmployeeCode);
+                if (oldEmp != null)
+                    await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation);
+                if (newEmp != null)
+                    await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation);
+            }
+
             return Ok(new
             {
                 Success = true,

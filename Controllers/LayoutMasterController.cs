@@ -67,8 +67,8 @@ namespace FactoryManagementSystem.Controllers
                     SNo = i + 1,
                     OperationId = 0,
                     OperationName = item.OperationName,
-                    OperationGrade = string.Empty,
-                    MachineType = string.Empty,
+                    OperationGrade = item.OperationGrade ?? string.Empty,
+                    MachineType = item.MachineType ?? string.Empty,
                     DisplayOrder = i + 1,
                     IsActive = true,
                     Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section

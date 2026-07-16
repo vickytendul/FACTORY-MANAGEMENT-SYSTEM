@@ -100,10 +100,12 @@ namespace FactoryManagementSystem.Controllers
                 .ToList();
 
             var layoutSnapshot = await _firestore.LayoutTransactions.GetSnapshotAsync();
+
             var allocatedCodes = layoutSnapshot.Documents
-                .Select(x => x.GetValue<string>("employeeCode"))
-                .Where(x => x != null)
-                .ToHashSet();
+                .Select(x => x.ConvertTo<LayoutTransaction>())
+                .Where(x => x.IsActive && !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                .Select(x => x.EmployeeCode.Trim())
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var categories = new Dictionary<string, int[]>
             {

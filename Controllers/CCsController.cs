@@ -35,7 +35,8 @@ namespace FactoryManagementSystem.Controllers
                     ccId = x.CCId,
                     ccNo = x.CCNo,
                     sam = x.SAM,
-                    isActive = x.IsActive
+                    isActive = x.IsActive,
+                    hasMultipleLayouts = x.HasMultipleLayouts
                 })
                 .ToList();
 
@@ -63,7 +64,8 @@ namespace FactoryManagementSystem.Controllers
                 ccId = cc.CCId,
                 ccNo = cc.CCNo,
                 sam = cc.SAM,
-                isActive = cc.IsActive
+                isActive = cc.IsActive,
+                hasMultipleLayouts = cc.HasMultipleLayouts
             });
         }
 
@@ -92,7 +94,8 @@ namespace FactoryManagementSystem.Controllers
                     CCId = maxId + 1,
                     CCNo = request.CCNo ?? "",
                     SAM = request.Sam,
-                    IsActive = request.IsActive
+                    IsActive = request.IsActive,
+                    HasMultipleLayouts = request.HasMultipleLayouts
                 };
 
                 await _firestore.CCs.AddAsync(newCC);
@@ -106,7 +109,8 @@ namespace FactoryManagementSystem.Controllers
                         ccId = newCC.CCId,
                         ccNo = newCC.CCNo,
                         sam = newCC.SAM,
-                        isActive = newCC.IsActive
+                        isActive = newCC.IsActive,
+                        hasMultipleLayouts = newCC.HasMultipleLayouts
                     }
                 });
             }
@@ -147,7 +151,8 @@ namespace FactoryManagementSystem.Controllers
                 {
                     { nameof(CC.CCNo), request.CCNo ?? "" },
                     { nameof(CC.SAM), request.Sam },
-                    { nameof(CC.IsActive), request.IsActive }
+                    { nameof(CC.IsActive), request.IsActive },
+                    { nameof(CC.HasMultipleLayouts), request.HasMultipleLayouts }
                 });
 
                 return Ok(new { Success = true, Message = "CC updated successfully." });
@@ -218,6 +223,7 @@ namespace FactoryManagementSystem.Controllers
         public string? CCNo { get; set; }
         public double Sam { get; set; }
         public bool IsActive { get; set; } = true;
+        public bool HasMultipleLayouts { get; set; } = false;
     }
 
     public class SamUpdateRequest

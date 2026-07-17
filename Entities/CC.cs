@@ -16,5 +16,8 @@ namespace FactoryManagementSystem.Entities
 
         [FirestoreProperty]
         public bool IsActive { get; set; } = true;
+
+        [FirestoreProperty]
+        public bool HasMultipleLayouts { get; set; } = false;
     }
 }

@@ -33,30 +33,32 @@ namespace FactoryManagementSystem.Controllers
         }
 
         [HttpPut("batch")]
-        public async Task<IActionResult> BatchSave(int ccId, [FromBody] List<LayoutMasterSaveRequest> items)
+        public async Task<IActionResult> BatchSave(int ccId, [FromQuery] int layoutId = 0, [FromBody] List<LayoutMasterSaveRequest>? items = null)
         {
             if (items == null || items.Count == 0)
                 return BadRequest(new { Success = false, Message = "No items provided." });
 
-            // Get existing docs for this CC
+            if (layoutId > 0)
+            {
+                return await BatchSaveByLayout(layoutId, items);
+            }
+
+            // Existing CC-based logic
             var existing = await _firestore.LayoutMasters
                 .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
                 .GetSnapshotAsync();
 
             var batch = _firestore.Db.StartBatch();
 
-            // Delete existing documents
             foreach (var doc in existing.Documents)
             {
                 batch.Delete(doc.Reference);
             }
 
-            // Get or initialize counter
             var counterRef = _firestore.Counters.Document("LayoutMasterId");
             var counterSnap = await counterRef.GetSnapshotAsync();
             int nextId = counterSnap.Exists ? counterSnap.GetValue<int>("Value") + 1 : 1;
 
-            // Add new documents
             for (int i = 0; i < items.Count; i++)
             {
                 var item = items[i];
@@ -78,7 +80,60 @@ namespace FactoryManagementSystem.Controllers
                 batch.Set(docRef, layoutMaster);
             }
 
-            // Update counter
+            batch.Set(counterRef, new { Value = nextId + items.Count - 1 }, SetOptions.MergeAll);
+
+            await batch.CommitAsync();
+
+            return Ok(new { Success = true, Message = "Layout saved successfully." });
+        }
+
+        private async Task<IActionResult> BatchSaveByLayout(int layoutId, List<LayoutMasterSaveRequest> items)
+        {
+            var headerSnapshot = await _firestore.LayoutHeaders
+                .WhereEqualTo(nameof(LayoutHeader.Id), layoutId)
+                .Limit(1)
+                .GetSnapshotAsync();
+
+            var headerDoc = headerSnapshot.Documents.FirstOrDefault();
+            if (headerDoc == null)
+                return BadRequest(new { Success = false, Message = "Layout header not found." });
+
+            var header = headerDoc.ConvertTo<LayoutHeader>();
+
+            var existing = await _firestore.LayoutConfigurations
+                .WhereEqualTo(nameof(LayoutConfiguration.LayoutId), layoutId)
+                .GetSnapshotAsync();
+
+            var batch = _firestore.Db.StartBatch();
+
+            foreach (var doc in existing.Documents)
+            {
+                batch.Delete(doc.Reference);
+            }
+
+            var counterRef = _firestore.Counters.Document("LayoutConfigurationId");
+            var counterSnap = await counterRef.GetSnapshotAsync();
+            int nextId = counterSnap.Exists ? counterSnap.GetValue<int>("Value") + 1 : 1;
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                var item = items[i];
+                var config = new LayoutConfiguration
+                {
+                    Id = nextId + i,
+                    CcId = header.CcId,
+                    CcNo = header.CcNo,
+                    DisplayOrder = i + 1,
+                    OperationName = item.OperationName,
+                    MachineType = item.MachineType ?? string.Empty,
+                    OperationGrade = item.OperationGrade ?? string.Empty,
+                    LayoutId = layoutId
+                };
+
+                var docRef = _firestore.LayoutConfigurations.Document();
+                batch.Set(docRef, config);
+            }
+
             batch.Set(counterRef, new { Value = nextId + items.Count - 1 }, SetOptions.MergeAll);
 
             await batch.CommitAsync();

@@ -41,5 +41,31 @@ namespace FactoryManagementSystem.Controllers
                 });
             }
         }
+
+        [HttpGet("layout/{layoutId}")]
+        public async Task<IActionResult> GetByLayoutId(int layoutId)
+        {
+            try
+            {
+                var snapshot = await _firestore.LayoutConfigurations
+                    .WhereEqualTo(nameof(LayoutConfiguration.LayoutId), layoutId)
+                    .GetSnapshotAsync();
+
+                var items = snapshot.Documents
+                    .Select(x => x.ConvertTo<LayoutConfiguration>())
+                    .OrderBy(x => x.DisplayOrder)
+                    .ToList();
+
+                return Ok(items);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = ex.Message
+                });
+            }
+        }
     }
 }

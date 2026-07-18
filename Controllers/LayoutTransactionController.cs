@@ -226,6 +226,36 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // GET: api/LayoutTransactions/by-cc/{ccId}/operations
+        [HttpGet("by-cc/{ccId}/operations")]
+        public async Task<IActionResult> GetOperationsByCc(int ccId)
+        {
+            try
+            {
+                var snapshot = await _firestore.LayoutMasters
+                    .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
+                    .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+                    .OrderBy(nameof(LayoutMaster.DisplayOrder))
+                    .GetSnapshotAsync();
+
+                var operations = snapshot.Documents
+                    .Select(d => d.ConvertTo<LayoutMaster>())
+                    .Select(x => new
+                    {
+                        operationId = x.OperationId,
+                        operationName = x.OperationName,
+                        sequence = x.SNo
+                    })
+                    .ToList();
+
+                return Ok(operations);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         [HttpPut("{firestoreId}")]
         public async Task<IActionResult> Update(
     string firestoreId,

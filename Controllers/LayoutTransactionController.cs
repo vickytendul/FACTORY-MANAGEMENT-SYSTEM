@@ -232,23 +232,29 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.LayoutMasters
-                    .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
-                    .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
-                    .OrderBy(nameof(LayoutMaster.DisplayOrder))
+                var snapshot = await _firestore.LayoutTransactions
+                    .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
                     .GetSnapshotAsync();
 
-                var operations = snapshot.Documents
-                    .Select(d => d.ConvertTo<LayoutMaster>())
+                var totalRecords = snapshot.Documents.Count;
+
+                var ops = snapshot.Documents
+                    .Select(d => d.ConvertTo<LayoutTransaction>())
+                    .GroupBy(x => new { x.OperationId, x.OperationName })
+                    .Select(g => g.First())
                     .Select(x => new
                     {
                         operationId = x.OperationId,
-                        operationName = x.OperationName,
-                        sequence = x.SNo
+                        operationName = x.OperationName
                     })
                     .ToList();
 
-                return Ok(operations);
+                return Ok(new
+                {
+                    totalRecords,
+                    operations = ops
+                });
             }
             catch (Exception ex)
             {

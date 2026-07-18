@@ -100,13 +100,9 @@ namespace FactoryManagementSystem.Controllers
             var docRef = _firestore.Summary.Document("EmployeeSummary");
             var snapshot = await docRef.GetSnapshotAsync();
 
-            if (!snapshot.Exists)
-            {
-                await _summaryService.RecalculateAsync();
-                snapshot = await docRef.GetSnapshotAsync();
-            }
-
-            var summary = snapshot.ConvertTo<EmployeeSummary>();
+            var summary = snapshot.Exists
+                ? snapshot.ConvertTo<EmployeeSummary>()
+                : new EmployeeSummary();
 
             return Ok(new
             {
@@ -352,7 +348,7 @@ namespace FactoryManagementSystem.Controllers
 
                 await document.Reference.SetAsync(employee);
 
-                await _summaryService.OnEmployeeToggled(employee.Department, employee.Designation, !employee.IsActive, employee.IsActive);
+                await _summaryService.OnEmployeeToggled(employee.Department, employee.Designation, !employee.IsActive, employee.IsActive, employee.EmployeeCode);
                 return Ok(new
                 {
                     Success = true,

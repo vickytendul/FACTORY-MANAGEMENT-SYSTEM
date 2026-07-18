@@ -140,13 +140,13 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var emp = await _summaryService.FindEmployeeByCodeAsync(code);
                     if (emp != null)
-                        await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation);
+                        await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, code);
                 }
                 foreach (var code in newCodes.Except(oldCodes))
                 {
                     var emp = await _summaryService.FindEmployeeByCodeAsync(code);
                     if (emp != null)
-                        await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation);
+                        await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation, code);
                 }
 
                 return Ok(new
@@ -259,9 +259,9 @@ namespace FactoryManagementSystem.Controllers
                 var oldEmp = await _summaryService.FindEmployeeByCodeAsync(oldTransaction.EmployeeCode);
                 var newEmp = await _summaryService.FindEmployeeByCodeAsync(request.EmployeeCode);
                 if (oldEmp != null)
-                    await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation);
+                    await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation, oldTransaction.EmployeeCode);
                 if (newEmp != null)
-                    await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation);
+                    await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation, request.EmployeeCode);
             }
 
             return Ok(new

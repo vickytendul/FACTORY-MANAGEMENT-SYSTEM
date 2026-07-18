@@ -46,7 +46,7 @@ namespace FactoryManagementSystem.Services
             await _firestore.Summary.Document(SummaryDocId).SetAsync(s);
         }
 
-        public async Task OnEmployeeToggled(string? department, string? designation, bool wasActive, bool nowActive)
+        public async Task OnEmployeeToggled(string? department, string? designation, bool wasActive, bool nowActive, string? employeeCode = null)
         {
             var s = await GetOrCreateAsync();
             var cat = Categorize(department, designation);
@@ -64,6 +64,8 @@ namespace FactoryManagementSystem.Services
                 {
                     s.TotalAllocated--;
                     if (cat != null) DecAlloc(s, cat);
+                    if (!string.IsNullOrWhiteSpace(employeeCode))
+                        s.AllocatedEmployeeCodes.Remove(employeeCode);
                 }
             }
 
@@ -71,9 +73,20 @@ namespace FactoryManagementSystem.Services
             await _firestore.Summary.Document(SummaryDocId).SetAsync(s);
         }
 
-        public async Task OnEmployeeAllocated(string? department, string? designation)
+        public async Task OnEmployeeAllocated(string? department, string? designation, string? employeeCode = null)
         {
             var s = await GetOrCreateAsync();
+
+            if (!string.IsNullOrWhiteSpace(employeeCode))
+            {
+                if (s.AllocatedEmployeeCodes.Contains(employeeCode))
+                {
+                    Console.Error.WriteLine($"[SummaryService] WARN: {employeeCode} already counted as allocated. Skipping duplicate increment.");
+                    return;
+                }
+                s.AllocatedEmployeeCodes.Add(employeeCode);
+            }
+
             s.TotalAllocated++;
             s.TotalBalance = s.TotalManpower - s.TotalAllocated;
             var cat = Categorize(department, designation);
@@ -81,9 +94,20 @@ namespace FactoryManagementSystem.Services
             await _firestore.Summary.Document(SummaryDocId).SetAsync(s);
         }
 
-        public async Task OnEmployeeDeallocated(string? department, string? designation)
+        public async Task OnEmployeeDeallocated(string? department, string? designation, string? employeeCode = null)
         {
             var s = await GetOrCreateAsync();
+
+            if (!string.IsNullOrWhiteSpace(employeeCode))
+            {
+                if (!s.AllocatedEmployeeCodes.Contains(employeeCode))
+                {
+                    Console.Error.WriteLine($"[SummaryService] WARN: {employeeCode} not currently counted as allocated. Skipping duplicate decrement.");
+                    return;
+                }
+                s.AllocatedEmployeeCodes.Remove(employeeCode);
+            }
+
             if (s.TotalAllocated > 0) s.TotalAllocated--;
             s.TotalBalance = s.TotalManpower - s.TotalAllocated;
             var cat = Categorize(department, designation);
@@ -130,6 +154,11 @@ namespace FactoryManagementSystem.Services
             s.TotalManpower = employees.Count;
             s.TotalAllocated = employees.Count(e => allocatedCodes.Contains(e.EmployeeCode));
             s.TotalBalance = s.TotalManpower - s.TotalAllocated;
+            s.AllocatedEmployeeCodes = employees
+                .Where(e => allocatedCodes.Contains(e.EmployeeCode))
+                .Select(e => e.EmployeeCode)
+                .ToList();
+
             await _firestore.Summary.Document(SummaryDocId).SetAsync(s);
         }
 

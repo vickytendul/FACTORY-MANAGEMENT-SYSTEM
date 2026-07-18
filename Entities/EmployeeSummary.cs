@@ -32,5 +32,7 @@ namespace FactoryManagementSystem.Entities
         [FirestoreProperty] public int StoreHelperTotal { get; set; }
         [FirestoreProperty] public int StoreHelperAllocated { get; set; }
         [FirestoreProperty] public int StoreHelperBalance { get; set; }
+
+        [FirestoreProperty] public List<string> AllocatedEmployeeCodes { get; set; } = new();
     }
 }

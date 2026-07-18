@@ -75,6 +75,19 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                if (string.IsNullOrWhiteSpace(request.EmployeeCode))
+                    return BadRequest(new { Success = false, Message = "EmployeeCode is required." });
+                if (request.OperationId <= 0)
+                    return BadRequest(new { Success = false, Message = "Operation is required." });
+                if (request.CCId <= 0)
+                    return BadRequest(new { Success = false, Message = "CC is required." });
+                if (request.TargetQty <= 0)
+                    return BadRequest(new { Success = false, Message = "TargetQty must be greater than 0." });
+                if (request.ActualQty < 0)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot be negative." });
+                if (request.ActualQty > request.TargetQty)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
+
                 var now = DateTime.UtcNow;
 
                 var existingSnapshot = await _firestore.SkillTransactions
@@ -144,6 +157,13 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                if (request.TargetQty <= 0)
+                    return BadRequest(new { Success = false, Message = "TargetQty must be greater than 0." });
+                if (request.ActualQty < 0)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot be negative." });
+                if (request.ActualQty > request.TargetQty)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
+
                 var snapshot = await _firestore.SkillTransactions
                     .WhereEqualTo(nameof(SkillTransaction.TransactionId), id)
                     .WhereEqualTo(nameof(SkillTransaction.IsActive), true)

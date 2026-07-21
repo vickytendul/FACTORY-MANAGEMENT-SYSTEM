@@ -28,5 +28,8 @@ namespace FactoryManagementSystem.Entities
 
         [FirestoreProperty]
         public int LayoutId { get; set; } = 0;
+
+        [FirestoreProperty]
+        public int LayoutMasterId { get; set; }
     }
 }

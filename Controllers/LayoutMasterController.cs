@@ -184,6 +184,8 @@ namespace FactoryManagementSystem.Controllers
                     existingDoc.Record.OperationName = item.OperationName;
                     existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
                     existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
+                    if (existingDoc.Record.LayoutMasterId == 0)
+                        existingDoc.Record.LayoutMasterId = existingDoc.Record.Id;
                     batch.Set(existingDoc.DocRef, existingDoc.Record);
                     maxExistingId = Math.Max(maxExistingId, existingDoc.Record.Id);
                 }
@@ -219,7 +221,8 @@ namespace FactoryManagementSystem.Controllers
                         OperationName = item.OperationName,
                         MachineType = item.MachineType ?? string.Empty,
                         OperationGrade = item.OperationGrade ?? string.Empty,
-                        LayoutId = layoutId
+                        LayoutId = layoutId,
+                        LayoutMasterId = nextId + (i - existingDocs.Count)
                     };
 
                     var docRef = _firestore.LayoutConfigurations.Document();

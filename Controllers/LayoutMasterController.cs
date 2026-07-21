@@ -70,44 +70,78 @@ namespace FactoryManagementSystem.Controllers
                 return await BatchSaveByLayout(layoutId, items);
             }
 
-            // Existing CC-based logic
             var existing = await _firestore.LayoutMasters
                 .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
                 .GetSnapshotAsync();
 
+            var existingDocs = existing.Documents
+                .Select(d => new { DocRef = d.Reference, Record = d.ConvertTo<LayoutMaster>() })
+                .OrderBy(x => x.Record.DisplayOrder)
+                .ToList();
+
             var batch = _firestore.Db.StartBatch();
-
-            foreach (var doc in existing.Documents)
-            {
-                batch.Delete(doc.Reference);
-            }
-
-            var counterRef = _firestore.Counters.Document("LayoutMasterId");
-            var counterSnap = await counterRef.GetSnapshotAsync();
-            int nextId = counterSnap.Exists ? counterSnap.GetValue<int>("Value") + 1 : 1;
+            var newRecordCount = 0;
+            var maxExistingId = 0;
 
             for (int i = 0; i < items.Count; i++)
             {
                 var item = items[i];
-                var layoutMaster = new LayoutMaster
+                if (i < existingDocs.Count)
                 {
-                    Id = nextId + i,
-                    CCId = ccId,
-                    SNo = i + 1,
-                    OperationId = 0,
-                    OperationName = item.OperationName,
-                    OperationGrade = item.OperationGrade ?? string.Empty,
-                    MachineType = item.MachineType ?? string.Empty,
-                    DisplayOrder = i + 1,
-                    IsActive = true,
-                    Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section
-                };
-
-                var docRef = _firestore.LayoutMasters.Document();
-                batch.Set(docRef, layoutMaster);
+                    var existingDoc = existingDocs[i];
+                    existingDoc.Record.SNo = i + 1;
+                    existingDoc.Record.OperationName = item.OperationName;
+                    existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
+                    existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
+                    existingDoc.Record.DisplayOrder = i + 1;
+                    existingDoc.Record.Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section;
+                    existingDoc.Record.IsActive = true;
+                    batch.Set(existingDoc.DocRef, existingDoc.Record);
+                    maxExistingId = Math.Max(maxExistingId, existingDoc.Record.Id);
+                }
+                else
+                {
+                    newRecordCount++;
+                }
             }
 
-            batch.Set(counterRef, new { Value = nextId + items.Count - 1 }, SetOptions.MergeAll);
+            for (int i = items.Count; i < existingDocs.Count; i++)
+            {
+                batch.Delete(existingDocs[i].DocRef);
+            }
+
+            if (newRecordCount > 0)
+            {
+                var counterRef = _firestore.Counters.Document("LayoutMasterId");
+                var counterSnap = await counterRef.GetSnapshotAsync();
+                int nextId = Math.Max(
+                    counterSnap.Exists ? counterSnap.GetValue<int>("Value") + 1 : 1,
+                    maxExistingId + 1
+                );
+
+                for (int i = existingDocs.Count; i < items.Count; i++)
+                {
+                    var item = items[i];
+                    var layoutMaster = new LayoutMaster
+                    {
+                        Id = nextId + (i - existingDocs.Count),
+                        CCId = ccId,
+                        SNo = i + 1,
+                        OperationId = 0,
+                        OperationName = item.OperationName,
+                        OperationGrade = item.OperationGrade ?? string.Empty,
+                        MachineType = item.MachineType ?? string.Empty,
+                        DisplayOrder = i + 1,
+                        IsActive = true,
+                        Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section
+                    };
+
+                    var docRef = _firestore.LayoutMasters.Document();
+                    batch.Set(docRef, layoutMaster);
+                }
+
+                batch.Set(counterRef, new { Value = nextId + newRecordCount - 1 }, SetOptions.MergeAll);
+            }
 
             await batch.CommitAsync();
 
@@ -131,37 +165,69 @@ namespace FactoryManagementSystem.Controllers
                 .WhereEqualTo(nameof(LayoutConfiguration.LayoutId), layoutId)
                 .GetSnapshotAsync();
 
+            var existingDocs = existing.Documents
+                .Select(d => new { DocRef = d.Reference, Record = d.ConvertTo<LayoutConfiguration>() })
+                .OrderBy(x => x.Record.DisplayOrder)
+                .ToList();
+
             var batch = _firestore.Db.StartBatch();
-
-            foreach (var doc in existing.Documents)
-            {
-                batch.Delete(doc.Reference);
-            }
-
-            var counterRef = _firestore.Counters.Document("LayoutConfigurationId");
-            var counterSnap = await counterRef.GetSnapshotAsync();
-            int nextId = counterSnap.Exists ? counterSnap.GetValue<int>("Value") + 1 : 1;
+            var newRecordCount = 0;
+            var maxExistingId = 0;
 
             for (int i = 0; i < items.Count; i++)
             {
                 var item = items[i];
-                var config = new LayoutConfiguration
+                if (i < existingDocs.Count)
                 {
-                    Id = nextId + i,
-                    CcId = header.CcId,
-                    CcNo = header.CcNo,
-                    DisplayOrder = i + 1,
-                    OperationName = item.OperationName,
-                    MachineType = item.MachineType ?? string.Empty,
-                    OperationGrade = item.OperationGrade ?? string.Empty,
-                    LayoutId = layoutId
-                };
-
-                var docRef = _firestore.LayoutConfigurations.Document();
-                batch.Set(docRef, config);
+                    var existingDoc = existingDocs[i];
+                    existingDoc.Record.DisplayOrder = i + 1;
+                    existingDoc.Record.OperationName = item.OperationName;
+                    existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
+                    existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
+                    batch.Set(existingDoc.DocRef, existingDoc.Record);
+                    maxExistingId = Math.Max(maxExistingId, existingDoc.Record.Id);
+                }
+                else
+                {
+                    newRecordCount++;
+                }
             }
 
-            batch.Set(counterRef, new { Value = nextId + items.Count - 1 }, SetOptions.MergeAll);
+            for (int i = items.Count; i < existingDocs.Count; i++)
+            {
+                batch.Delete(existingDocs[i].DocRef);
+            }
+
+            if (newRecordCount > 0)
+            {
+                var counterRef = _firestore.Counters.Document("LayoutConfigurationId");
+                var counterSnap = await counterRef.GetSnapshotAsync();
+                int nextId = Math.Max(
+                    counterSnap.Exists ? counterSnap.GetValue<int>("Value") + 1 : 1,
+                    maxExistingId + 1
+                );
+
+                for (int i = existingDocs.Count; i < items.Count; i++)
+                {
+                    var item = items[i];
+                    var config = new LayoutConfiguration
+                    {
+                        Id = nextId + (i - existingDocs.Count),
+                        CcId = header.CcId,
+                        CcNo = header.CcNo,
+                        DisplayOrder = i + 1,
+                        OperationName = item.OperationName,
+                        MachineType = item.MachineType ?? string.Empty,
+                        OperationGrade = item.OperationGrade ?? string.Empty,
+                        LayoutId = layoutId
+                    };
+
+                    var docRef = _firestore.LayoutConfigurations.Document();
+                    batch.Set(docRef, config);
+                }
+
+                batch.Set(counterRef, new { Value = nextId + newRecordCount - 1 }, SetOptions.MergeAll);
+            }
 
             await batch.CommitAsync();
 

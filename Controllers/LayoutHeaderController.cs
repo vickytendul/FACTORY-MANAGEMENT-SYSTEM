@@ -211,6 +211,34 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        [HttpGet("~/api/LayoutHeaders/by-cc/{ccId}")]
+        public async Task<IActionResult> GetLayoutsByCc(int ccId)
+        {
+            try
+            {
+                var snapshot = await _firestore.LayoutHeaders
+                    .WhereEqualTo(nameof(LayoutHeader.CcId), ccId)
+                    .WhereEqualTo(nameof(LayoutHeader.IsActive), true)
+                    .GetSnapshotAsync();
+
+                var items = snapshot.Documents
+                    .Select(x => x.ConvertTo<LayoutHeader>())
+                    .OrderBy(x => x.LayoutName)
+                    .Select(x => new
+                    {
+                        id = x.Id,
+                        layoutName = x.LayoutName
+                    })
+                    .ToList();
+
+                return Ok(items);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         [HttpPost("{id}/copy")]
         public async Task<IActionResult> Copy(int id)
         {

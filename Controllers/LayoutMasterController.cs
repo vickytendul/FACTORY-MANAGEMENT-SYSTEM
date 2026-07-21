@@ -19,51 +19,17 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetLayoutMaster(int ccId)
         {
-            var headerSnapshot = await _firestore.LayoutHeaders
-                .WhereEqualTo(nameof(LayoutHeader.CcId), ccId)
-                .WhereEqualTo(nameof(LayoutHeader.IsActive), true)
+            var snapshot = await _firestore.LayoutMasters
+                .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
+                .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+                .OrderBy(nameof(LayoutMaster.DisplayOrder))
                 .GetSnapshotAsync();
 
-            var headers = headerSnapshot.Documents
-                .Select(x => x.ConvertTo<LayoutHeader>())
+            var layout = snapshot.Documents
+                .Select(x => x.ConvertTo<LayoutMaster>())
                 .ToList();
 
-            if (headers.Count == 1)
-            {
-                var configSnapshot = await _firestore.LayoutConfigurations
-                    .WhereEqualTo(nameof(LayoutConfiguration.LayoutId), headers[0].Id)
-                    .OrderBy(nameof(LayoutConfiguration.DisplayOrder))
-                    .GetSnapshotAsync();
-
-                var operations = configSnapshot.Documents
-                    .Select(x => x.ConvertTo<LayoutConfiguration>())
-                    .Select(x => new
-                    {
-                        layoutMasterId = x.Id,
-                        operationId = 0,
-                        operationSequence = x.DisplayOrder,
-                        operationName = x.OperationName,
-                        operationGrade = x.OperationGrade,
-                        machineType = x.MachineType,
-                        section = "MAIN"
-                    })
-                    .ToList();
-
-                return Ok(operations);
-            }
-
-            if (headers.Count > 1)
-            {
-                var layouts = headers.Select(x => new
-                {
-                    id = x.Id,
-                    layoutName = x.LayoutName
-                }).ToList();
-
-                return Ok(layouts);
-            }
-
-            return Ok(new List<object>());
+            return Ok(layout);
         }
 
         [HttpGet("by-layout/{layoutId}")]

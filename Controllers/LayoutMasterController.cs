@@ -18,7 +18,9 @@ namespace FactoryManagementSystem.Controllers
 
         [HttpGet]
         public async Task<IActionResult> GetLayoutMaster(int ccId)
+
         {
+            throw new Exception("TEST");
             var snapshot = await _firestore.LayoutMasters
                 .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
                 .WhereEqualTo(nameof(LayoutMaster.IsActive), true)

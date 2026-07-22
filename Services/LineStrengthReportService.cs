@@ -84,15 +84,15 @@ public class LineStrengthReportService
             foreach (var doc in lineGroup)
             {
                 var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
+                if (string.IsNullOrWhiteSpace(empCode)) continue;
 
-                // Try to get designation from attendance first, else empty
-                var designation = "";
+                var section = (doc.GetValue<string>("Section") ?? "").Trim().ToUpperInvariant();
+
                 var isPresent = false;
                 var isAbsent = false;
 
                 if (attLookup.TryGetValue(empCode, out var att))
                 {
-                    designation = att.Designation ?? "";
                     var status = att.AttendanceStatus ?? "";
                     isPresent = status.Equals("P", StringComparison.OrdinalIgnoreCase)
                                 || status.Equals("Present", StringComparison.OrdinalIgnoreCase);
@@ -100,51 +100,33 @@ public class LineStrengthReportService
                                || status.Equals("Absent", StringComparison.OrdinalIgnoreCase);
                 }
 
-                var dept = Categorize(designation);
-
-                switch (dept)
+                switch (section)
                 {
-                    case "Tailor":
+                    case "MAIN":
                         tailorAlloc++; if (isPresent) tailorPres++; if (isAbsent) tailorAbs++;
                         break;
-                    case "Others":
+                    case "OTHERS":
                         othersAlloc++; if (isPresent) othersPres++; if (isAbsent) othersAbs++;
                         break;
-                    case "SewingHelper":
+                    case "SEWING HELPER":
                         sewHelpAlloc++; if (isPresent) sewHelpPres++; if (isAbsent) sewHelpAbs++;
                         break;
-                    case "LineLeader":
+                    case "LINE LEADER":
                         lineLeadAlloc++; if (isPresent) lineLeadPres++; if (isAbsent) lineLeadAbs++;
                         break;
-                    case "Checker":
+                    case "CHECKERS":
                         checkAlloc++; if (isPresent) checkPres++; if (isAbsent) checkAbs++;
                         break;
-                    case "PackingHelper":
+                    case "PACKING HELPER":
                         packHelpAlloc++; if (isPresent) packHelpPres++; if (isAbsent) packHelpAbs++;
                         break;
-                    case "SuperTeam":
+                    case "SUPER TEAM":
                         superAlloc++; if (isPresent) superPres++; if (isAbsent) superAbs++;
                         break;
                 }
             }
 
-            var tailorAllocatedMain = lineGroup.Count(doc =>
-            {
-                var section = doc.GetValue<string>("Section") ?? "";
-                var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
-                return string.Equals(section, "MAIN", StringComparison.OrdinalIgnoreCase)
-                       && !string.IsNullOrWhiteSpace(empCode);
-            });
-
-            var othersAllocatedOtherSection = lineGroup.Count(doc =>
-            {
-                var section = doc.GetValue<string>("Section") ?? "";
-                var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
-                return string.Equals(section, "OTHERS", StringComparison.OrdinalIgnoreCase)
-                       && !string.IsNullOrWhiteSpace(empCode);
-            });
-
-            var totalAlloc = tailorAllocatedMain + othersAllocatedOtherSection + sewHelpAlloc
+            var totalAlloc = tailorAlloc + othersAlloc + sewHelpAlloc
                              + lineLeadAlloc + checkAlloc + packHelpAlloc + superAlloc;
             var totalPres = tailorPres + othersPres + sewHelpPres
                             + lineLeadPres + checkPres + packHelpPres + superPres;
@@ -162,14 +144,14 @@ public class LineStrengthReportService
                 TotalPresent = totalPres,
                 TotalAbsent = totalAbs,
                 TotalAbPercent = totalAlloc > 0 ? Math.Round((double)totalAbs / totalAlloc * 100, 1) : 0,
-                TailorAllocated = tailorAllocatedMain,
+                TailorAllocated = tailorAlloc,
                 TailorPresent = tailorPres,
                 TailorAbsent = tailorAbs,
-                TailorAbPercent = tailorAllocatedMain > 0 ? Math.Round((double)tailorAbs / tailorAllocatedMain * 100, 1) : 0,
-                OthersAllocated = othersAllocatedOtherSection,
+                TailorAbPercent = tailorAlloc > 0 ? Math.Round((double)tailorAbs / tailorAlloc * 100, 1) : 0,
+                OthersAllocated = othersAlloc,
                 OthersPresent = othersPres,
                 OthersAbsent = othersAbs,
-                OthersAbPercent = othersAllocatedOtherSection > 0 ? Math.Round((double)othersAbs / othersAllocatedOtherSection * 100, 1) : 0,
+                OthersAbPercent = othersAlloc > 0 ? Math.Round((double)othersAbs / othersAlloc * 100, 1) : 0,
                 SewingHelperAllocated = sewHelpAlloc,
                 SewingHelperPresent = sewHelpPres,
                 SewingHelperAbsent = sewHelpAbs,
@@ -196,15 +178,4 @@ public class LineStrengthReportService
         return results;
     }
 
-    private static string Categorize(string designation)
-    {
-        var d = designation.ToUpperInvariant().Trim();
-        if (d.Contains("PACKING")) return "PackingHelper";
-        if (d.Contains("TAILOR")) return "Tailor";
-        if (d == "HELPER" || d.Contains("SEWING")) return "SewingHelper";
-        if (d.Contains("LEADER")) return "LineLeader";
-        if (d.Contains("CHECKER") || d.Contains("CHECK")) return "Checker";
-        if (d.Contains("SUPER")) return "SuperTeam";
-        return "Others";
-    }
 }

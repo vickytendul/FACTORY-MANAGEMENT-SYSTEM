@@ -56,7 +56,13 @@ public class LineStrengthReportService
             var firstTx = lineGroup.First();
             var ccId = firstTx.GetValue<int>("CCId");
             var ccNo = firstTx.GetValue<string>("CCNo") ?? "";
-            var plannedTailors = lineGroup.Count();
+            var plannedTailors = lineGroup.Count(doc =>
+            {
+                var section = doc.GetValue<string>("Section") ?? "";
+                var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
+                return string.Equals(section, "MAIN", StringComparison.OrdinalIgnoreCase)
+                       && !string.IsNullOrWhiteSpace(empCode);
+            });
 
             // Per-department counters
             int tailorAlloc = 0, tailorPres = 0, tailorAbs = 0;

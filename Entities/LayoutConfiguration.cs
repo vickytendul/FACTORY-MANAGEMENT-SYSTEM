@@ -27,6 +27,9 @@ namespace FactoryManagementSystem.Entities
         public string OperationGrade { get; set; } = string.Empty;
 
         [FirestoreProperty]
+        public int OperationId { get; set; }
+
+        [FirestoreProperty]
         public int LayoutId { get; set; } = 0;
 
         [FirestoreProperty]

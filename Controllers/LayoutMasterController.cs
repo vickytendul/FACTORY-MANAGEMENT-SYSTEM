@@ -47,7 +47,7 @@ namespace FactoryManagementSystem.Controllers
                 .Select(x => new
                 {
                     layoutMasterId = x.Id,
-                    operationId = 0,
+                    operationId = x.OperationId,
                     operationSequence = x.DisplayOrder,
                     operationName = x.OperationName,
                     operationGrade = x.OperationGrade,
@@ -119,6 +119,7 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var existingDoc = existingDocs[i];
                     existingDoc.Record.SNo = i + 1;
+                    existingDoc.Record.OperationId = item.OperationId;
                     existingDoc.Record.OperationName = item.OperationName;
                     existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
                     existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
@@ -156,7 +157,7 @@ namespace FactoryManagementSystem.Controllers
                         Id = nextId + (i - existingDocs.Count),
                         CCId = ccId,
                         SNo = i + 1,
-                        OperationId = 0,
+                        OperationId = item.OperationId,
                         OperationName = item.OperationName,
                         OperationGrade = item.OperationGrade ?? string.Empty,
                         MachineType = item.MachineType ?? string.Empty,
@@ -210,6 +211,7 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var existingDoc = existingDocs[i];
                     existingDoc.Record.DisplayOrder = i + 1;
+                    existingDoc.Record.OperationId = item.OperationId;
                     existingDoc.Record.OperationName = item.OperationName;
                     existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
                     existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
@@ -248,6 +250,7 @@ namespace FactoryManagementSystem.Controllers
                         CcId = header.CcId,
                         CcNo = header.CcNo,
                         DisplayOrder = i + 1,
+                        OperationId = item.OperationId,
                         OperationName = item.OperationName,
                         MachineType = item.MachineType ?? string.Empty,
                         OperationGrade = item.OperationGrade ?? string.Empty,

@@ -136,7 +136,7 @@ public class LineStrengthReportService
                        && !string.IsNullOrWhiteSpace(empCode);
             });
 
-            var totalAlloc = tailorAlloc + othersAlloc + sewHelpAlloc
+            var totalAlloc = tailorAllocatedMain + othersAlloc + sewHelpAlloc
                              + lineLeadAlloc + checkAlloc + packHelpAlloc + superAlloc;
             var totalPres = tailorPres + othersPres + sewHelpPres
                             + lineLeadPres + checkPres + packHelpPres + superPres;

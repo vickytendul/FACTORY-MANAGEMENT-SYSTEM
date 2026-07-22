@@ -344,6 +344,74 @@ namespace FactoryManagementSystem.Controllers
                 Message = "Allocation updated successfully."
             });
         }
+
+        // One-time migration: populate Section on existing LayoutTransaction records
+        [HttpGet("migrate-section")]
+        public async Task<IActionResult> MigrateSection()
+        {
+            var snapshot = await _firestore.LayoutTransactions
+                .GetSnapshotAsync();
+
+            var total = snapshot.Documents.Count;
+            var updated = 0;
+            var skipped = 0;
+
+            foreach (var doc in snapshot.Documents)
+            {
+                var tx = doc.ConvertTo<LayoutTransaction>();
+
+                // Skip if already has a Section
+                if (!string.IsNullOrWhiteSpace(tx.Section))
+                {
+                    skipped++;
+                    continue;
+                }
+
+                // Skip if no LayoutMasterId
+                if (tx.LayoutMasterId <= 0)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                // Find corresponding LayoutMaster
+                var lmSnap = await _firestore.LayoutMasters
+                    .WhereEqualTo(nameof(LayoutMaster.Id), tx.LayoutMasterId)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                var lmDoc = lmSnap.Documents.FirstOrDefault();
+                if (lmDoc == null)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                var section = lmDoc.GetValue<string>(nameof(LayoutMaster.Section));
+                if (string.IsNullOrWhiteSpace(section))
+                    section = "MAIN";
+
+                // Update only the Section field
+                await doc.Reference.UpdateAsync(new Dictionary<string, object>
+                {
+                    { nameof(LayoutTransaction.Section), section }
+                });
+
+                updated++;
+            }
+
+            // Log results
+            Console.WriteLine($"[Migration] LayoutTransaction Section migration completed.");
+            Console.WriteLine($"[Migration] Total processed: {total}");
+            Console.WriteLine($"[Migration] Updated: {updated}");
+            Console.WriteLine($"[Migration] Skipped: {skipped}");
+
+            return Ok(new
+            {
+                Success = true,
+                Message = $"Migration completed. Total: {total}, Updated: {updated}, Skipped: {skipped}"
+            });
+        }
     }
 }
 

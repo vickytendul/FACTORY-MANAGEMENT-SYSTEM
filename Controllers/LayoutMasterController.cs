@@ -119,7 +119,8 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var existingDoc = existingDocs[i];
                     existingDoc.Record.SNo = i + 1;
-                    existingDoc.Record.OperationId = item.OperationId;
+                    if (existingDoc.Record.OperationId == 0)
+                        existingDoc.Record.OperationId = existingDoc.Record.Id;
                     existingDoc.Record.OperationName = item.OperationName;
                     existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
                     existingDoc.Record.MachineType = item.MachineType ?? string.Empty;

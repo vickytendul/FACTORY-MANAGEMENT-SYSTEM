@@ -31,5 +31,8 @@ namespace FactoryManagementSystem.Entities
 
         [FirestoreProperty]
         public int LayoutMasterId { get; set; }
+
+        [FirestoreProperty]
+        public string Section { get; set; } = "MAIN";
     }
 }

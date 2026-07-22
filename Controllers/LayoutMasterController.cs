@@ -52,7 +52,7 @@ namespace FactoryManagementSystem.Controllers
                     operationName = x.OperationName,
                     operationGrade = x.OperationGrade,
                     machineType = x.MachineType,
-                    section = "MAIN"
+                    section = string.IsNullOrWhiteSpace(x.Section) ? "MAIN" : x.Section
                 })
                 .ToList();
 
@@ -184,6 +184,7 @@ namespace FactoryManagementSystem.Controllers
                     existingDoc.Record.OperationName = item.OperationName;
                     existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
                     existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
+                    existingDoc.Record.Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section;
                     if (existingDoc.Record.LayoutMasterId == 0)
                         existingDoc.Record.LayoutMasterId = existingDoc.Record.Id;
                     batch.Set(existingDoc.DocRef, existingDoc.Record);
@@ -222,7 +223,8 @@ namespace FactoryManagementSystem.Controllers
                         MachineType = item.MachineType ?? string.Empty,
                         OperationGrade = item.OperationGrade ?? string.Empty,
                         LayoutId = layoutId,
-                        LayoutMasterId = nextId + (i - existingDocs.Count)
+                        LayoutMasterId = nextId + (i - existingDocs.Count),
+                        Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section
                     };
 
                     var docRef = _firestore.LayoutConfigurations.Document();

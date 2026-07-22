@@ -44,6 +44,27 @@ namespace FactoryManagementSystem.Controllers
                     })
                     .ToList();
 
+                // Build Section lookup from LayoutMaster (source of truth)
+                var layoutMasterIds = request.Items
+                    .Where(i => i.LayoutMasterId > 0)
+                    .Select(i => i.LayoutMasterId)
+                    .Distinct()
+                    .ToList();
+                var sectionLookup = new Dictionary<int, string>();
+                foreach (var lmId in layoutMasterIds)
+                {
+                    var lmSnap = await _firestore.LayoutMasters
+                        .WhereEqualTo(nameof(LayoutMaster.Id), lmId)
+                        .Limit(1)
+                        .GetSnapshotAsync();
+                    var lmDoc = lmSnap.Documents.FirstOrDefault();
+                    sectionLookup[lmId] = lmDoc != null
+                        ? (string.IsNullOrWhiteSpace(lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
+                            ? "MAIN"
+                            : lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
+                        : "MAIN";
+                }
+
                 foreach (var item in request.Items)
                 {
                     // Skip empty rows
@@ -71,19 +92,22 @@ namespace FactoryManagementSystem.Controllers
                         }
                     }
 
+                    var resolvedSection = sectionLookup.GetValueOrDefault(item.LayoutMasterId, "MAIN");
+
                     // Find existing transaction by LayoutMasterId for upsert
                     var existing = existingDocs.FirstOrDefault(e => e.Transaction.LayoutMasterId == item.LayoutMasterId);
 
                     if (existing != null)
                     {
-                        // Update existing document employee fields
+                        // Update existing document employee fields + refresh Section from LayoutMaster
                         var docRef = _firestore.LayoutTransactions.Document(existing.DocId);
                         await docRef.UpdateAsync(new Dictionary<string, object>
                         {
                             { nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode },
                             { nameof(LayoutTransaction.EmployeeBarcode), item.EmployeeBarcode },
                             { nameof(LayoutTransaction.EmployeeName), item.EmployeeName },
-                            { nameof(LayoutTransaction.EmployeeGrade), item.EmployeeGrade }
+                            { nameof(LayoutTransaction.EmployeeGrade), item.EmployeeGrade },
+                            { nameof(LayoutTransaction.Section), resolvedSection }
                         });
                         existingDocs.Remove(existing);
                     }
@@ -107,7 +131,7 @@ namespace FactoryManagementSystem.Controllers
                             OperationName = item.OperationName,
                             OperationGrade = item.OperationGrade,
                             MachineType = item.MachineType,
-                            Section = item.Section,
+                            Section = resolvedSection,
 
                             EmployeeCode = item.EmployeeCode,
                             EmployeeBarcode = item.EmployeeBarcode,
@@ -280,16 +304,30 @@ namespace FactoryManagementSystem.Controllers
                 });
             }
 
-            await docRef.UpdateAsync(new Dictionary<string, object>
-    {
-        { nameof(LayoutTransaction.EmployeeCode), request.EmployeeCode },
-        { nameof(LayoutTransaction.EmployeeBarcode), request.EmployeeBarcode },
-        { nameof(LayoutTransaction.EmployeeName), request.EmployeeName },
-        { nameof(LayoutTransaction.EmployeeGrade), request.EmployeeGrade }
-    });
-
-            // Incremental summary
             var oldTransaction = snapshot.ConvertTo<LayoutTransaction>();
+
+            // Resolve Section from LayoutMaster (source of truth)
+            var resolvedSection = "MAIN";
+            var lmSnap = await _firestore.LayoutMasters
+                .WhereEqualTo(nameof(LayoutMaster.Id), oldTransaction.LayoutMasterId)
+                .Limit(1)
+                .GetSnapshotAsync();
+            var lmDoc = lmSnap.Documents.FirstOrDefault();
+            if (lmDoc != null)
+            {
+                resolvedSection = string.IsNullOrWhiteSpace(lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
+                    ? "MAIN"
+                    : lmDoc.GetValue<string>(nameof(LayoutMaster.Section));
+            }
+
+            await docRef.UpdateAsync(new Dictionary<string, object>
+            {
+                { nameof(LayoutTransaction.EmployeeCode), request.EmployeeCode },
+                { nameof(LayoutTransaction.EmployeeBarcode), request.EmployeeBarcode },
+                { nameof(LayoutTransaction.EmployeeName), request.EmployeeName },
+                { nameof(LayoutTransaction.EmployeeGrade), request.EmployeeGrade },
+                { nameof(LayoutTransaction.Section), resolvedSection }
+            });
             if (oldTransaction.EmployeeCode != request.EmployeeCode)
             {
                 var oldEmp = await _summaryService.FindEmployeeByCodeAsync(oldTransaction.EmployeeCode);

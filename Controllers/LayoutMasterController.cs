@@ -152,12 +152,13 @@ namespace FactoryManagementSystem.Controllers
                 for (int i = existingDocs.Count; i < items.Count; i++)
                 {
                     var item = items[i];
+                    var generatedId = nextId + (i - existingDocs.Count);
                     var layoutMaster = new LayoutMaster
                     {
-                        Id = nextId + (i - existingDocs.Count),
+                        Id = generatedId,
                         CCId = ccId,
                         SNo = i + 1,
-                        OperationId = item.OperationId,
+                        OperationId = item.OperationId == 0 ? generatedId : item.OperationId,
                         OperationName = item.OperationName,
                         OperationGrade = item.OperationGrade ?? string.Empty,
                         MachineType = item.MachineType ?? string.Empty,
@@ -244,13 +245,14 @@ namespace FactoryManagementSystem.Controllers
                 for (int i = existingDocs.Count; i < items.Count; i++)
                 {
                     var item = items[i];
+                    var generatedId = nextId + (i - existingDocs.Count);
                     var config = new LayoutConfiguration
                     {
-                        Id = nextId + (i - existingDocs.Count),
+                        Id = generatedId,
                         CcId = header.CcId,
                         CcNo = header.CcNo,
                         DisplayOrder = i + 1,
-                        OperationId = item.OperationId,
+                        OperationId = item.OperationId == 0 ? generatedId : item.OperationId,
                         OperationName = item.OperationName,
                         MachineType = item.MachineType ?? string.Empty,
                         OperationGrade = item.OperationGrade ?? string.Empty,

@@ -128,6 +128,14 @@ public class LineStrengthReportService
                 }
             }
 
+            var tailorAllocatedMain = lineGroup.Count(doc =>
+            {
+                var section = doc.GetValue<string>("Section") ?? "";
+                var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
+                return string.Equals(section, "MAIN", StringComparison.OrdinalIgnoreCase)
+                       && !string.IsNullOrWhiteSpace(empCode);
+            });
+
             var totalAlloc = tailorAlloc + othersAlloc + sewHelpAlloc
                              + lineLeadAlloc + checkAlloc + packHelpAlloc + superAlloc;
             var totalPres = tailorPres + othersPres + sewHelpPres
@@ -146,10 +154,10 @@ public class LineStrengthReportService
                 TotalPresent = totalPres,
                 TotalAbsent = totalAbs,
                 TotalAbPercent = totalAlloc > 0 ? Math.Round((double)totalAbs / totalAlloc * 100, 1) : 0,
-                TailorAllocated = tailorAlloc,
+                TailorAllocated = tailorAllocatedMain,
                 TailorPresent = tailorPres,
                 TailorAbsent = tailorAbs,
-                TailorAbPercent = tailorAlloc > 0 ? Math.Round((double)tailorAbs / tailorAlloc * 100, 1) : 0,
+                TailorAbPercent = tailorAllocatedMain > 0 ? Math.Round((double)tailorAbs / tailorAllocatedMain * 100, 1) : 0,
                 OthersAllocated = othersAlloc,
                 OthersPresent = othersPres,
                 OthersAbsent = othersAbs,

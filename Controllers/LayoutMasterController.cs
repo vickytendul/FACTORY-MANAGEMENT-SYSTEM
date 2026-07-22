@@ -59,6 +59,35 @@ namespace FactoryManagementSystem.Controllers
             return Ok(operations);
         }
 
+        [HttpGet("by-cc/{ccId}/operations")]
+        public async Task<IActionResult> GetOperationsByCc(int ccId)
+        {
+            try
+            {
+                var snapshot = await _firestore.LayoutMasters
+                    .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
+                    .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+                    .GetSnapshotAsync();
+
+                var ops = snapshot.Documents
+                    .Select(d => d.ConvertTo<LayoutMaster>())
+                    .GroupBy(x => new { x.OperationId, x.OperationName })
+                    .Select(g => g.First())
+                    .Select(x => new
+                    {
+                        operationId = x.OperationId,
+                        operationName = x.OperationName
+                    })
+                    .ToList();
+
+                return Ok(new { operations = ops });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         [HttpPut("batch")]
         public async Task<IActionResult> BatchSave(int ccId, [FromQuery] int layoutId = 0, [FromBody] List<LayoutMasterSaveRequest>? items = null)
         {

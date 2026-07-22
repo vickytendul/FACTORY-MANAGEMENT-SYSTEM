@@ -41,7 +41,21 @@ public class LineStrengthReportService
             .GroupBy(a => a.EmployeeCode)
             .ToDictionary(g => g.Key, g => g.First());
 
-        // 3 — Group transactions by line and compute stats
+        // 3 — Load all active LayoutMasters and build planned-tailors lookup by CCId (1 read)
+        var lmSnap = await _firestore.LayoutMasters
+            .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+            .GetSnapshotAsync();
+
+        var plannedByCc = lmSnap.Documents
+            .Where(d =>
+            {
+                var section = d.GetValue<string>("Section") ?? "";
+                return string.Equals(section, "MAIN", StringComparison.OrdinalIgnoreCase);
+            })
+            .GroupBy(d => d.GetValue<int>("CCId"))
+            .ToDictionary(g => g.Key, g => g.Count());
+
+        // 4 — Group transactions by line and compute stats
         var lineGroups = txDocs
             .GroupBy(d => d.GetValue<int>("LineId"))
             .ToList();
@@ -56,13 +70,7 @@ public class LineStrengthReportService
             var firstTx = lineGroup.First();
             var ccId = firstTx.GetValue<int>("CCId");
             var ccNo = firstTx.GetValue<string>("CCNo") ?? "";
-            var plannedTailors = lineGroup.Count(doc =>
-            {
-                var section = doc.GetValue<string>("Section") ?? "";
-                var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
-                return string.Equals(section, "MAIN", StringComparison.OrdinalIgnoreCase)
-                       && !string.IsNullOrWhiteSpace(empCode);
-            });
+            var plannedTailors = plannedByCc.GetValueOrDefault(ccId, 0);
 
             // Per-department counters
             int tailorAlloc = 0, tailorPres = 0, tailorAbs = 0;

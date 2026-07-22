@@ -53,6 +53,7 @@ builder.Services.AddSingleton(provider =>
 
 builder.Services.AddSingleton<FirestoreService>();
 builder.Services.AddSingleton<SummaryService>();
+builder.Services.AddSingleton<LineStrengthReportService>();
 
 // =====================================================
 // Services

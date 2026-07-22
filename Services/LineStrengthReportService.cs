@@ -136,7 +136,15 @@ public class LineStrengthReportService
                        && !string.IsNullOrWhiteSpace(empCode);
             });
 
-            var totalAlloc = tailorAllocatedMain + othersAlloc + sewHelpAlloc
+            var othersAllocatedOtherSection = lineGroup.Count(doc =>
+            {
+                var section = doc.GetValue<string>("Section") ?? "";
+                var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
+                return string.Equals(section, "OTHERS", StringComparison.OrdinalIgnoreCase)
+                       && !string.IsNullOrWhiteSpace(empCode);
+            });
+
+            var totalAlloc = tailorAllocatedMain + othersAllocatedOtherSection + sewHelpAlloc
                              + lineLeadAlloc + checkAlloc + packHelpAlloc + superAlloc;
             var totalPres = tailorPres + othersPres + sewHelpPres
                             + lineLeadPres + checkPres + packHelpPres + superPres;
@@ -158,10 +166,10 @@ public class LineStrengthReportService
                 TailorPresent = tailorPres,
                 TailorAbsent = tailorAbs,
                 TailorAbPercent = tailorAllocatedMain > 0 ? Math.Round((double)tailorAbs / tailorAllocatedMain * 100, 1) : 0,
-                OthersAllocated = othersAlloc,
+                OthersAllocated = othersAllocatedOtherSection,
                 OthersPresent = othersPres,
                 OthersAbsent = othersAbs,
-                OthersAbPercent = othersAlloc > 0 ? Math.Round((double)othersAbs / othersAlloc * 100, 1) : 0,
+                OthersAbPercent = othersAllocatedOtherSection > 0 ? Math.Round((double)othersAbs / othersAllocatedOtherSection * 100, 1) : 0,
                 SewingHelperAllocated = sewHelpAlloc,
                 SewingHelperPresent = sewHelpPres,
                 SewingHelperAbsent = sewHelpAbs,

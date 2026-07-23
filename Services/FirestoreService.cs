@@ -67,7 +67,20 @@ namespace FactoryManagementSystem.Services
         {
             if (identityKeys.Count == 0) return new List<int>();
 
-            var distinct = identityKeys.Distinct().ToList();
+            var docKeys = identityKeys.Select(k => BuildOperationLookupKey(k)).ToList();
+
+            var seen = new HashSet<string>();
+            var uniqueDocIds = new List<string>();
+            var firstKeyForDocId = new Dictionary<string, (int, string, string, string, string)>();
+
+            for (int i = 0; i < identityKeys.Count; i++)
+            {
+                if (seen.Add(docKeys[i]))
+                {
+                    uniqueDocIds.Add(docKeys[i]);
+                    firstKeyForDocId[docKeys[i]] = identityKeys[i];
+                }
+            }
 
             return await _db.RunTransactionAsync(async transaction =>
             {
@@ -82,9 +95,8 @@ namespace FactoryManagementSystem.Services
 
                 var keyToId = new Dictionary<string, int>();
 
-                foreach (var key in distinct)
+                foreach (var docId in uniqueDocIds)
                 {
-                    var docId = BuildOperationLookupKey(key);
                     var lookupRef = OperationIdLookup.Document(docId);
                     var lookupSnap = await transaction.GetSnapshotAsync(lookupRef);
 
@@ -99,14 +111,15 @@ namespace FactoryManagementSystem.Services
                     else
                     {
                         allocated++;
+                        var key = firstKeyForDocId[docId];
                         transaction.Create(lookupRef, new Dictionary<string, object>
                         {
                             { "OperationId", allocated },
-                            { "CCId", key.ccId },
-                            { "OperationName", key.operationName },
-                            { "MachineType", key.machineType },
-                            { "OperationGrade", key.operationGrade },
-                            { "Section", key.section },
+                            { "CCId", key.Item1 },
+                            { "OperationName", key.Item2 },
+                            { "MachineType", key.Item3 },
+                            { "OperationGrade", key.Item4 },
+                            { "Section", key.Item5 },
                             { "CreatedOn", now },
                             { "LastUpdatedOn", now }
                         });
@@ -122,9 +135,9 @@ namespace FactoryManagementSystem.Services
                     });
                 }
 
-                foreach (var key in identityKeys)
+                foreach (var docId in docKeys)
                 {
-                    results.Add(keyToId[BuildOperationLookupKey(key)]);
+                    results.Add(keyToId[docId]);
                 }
 
                 return results;

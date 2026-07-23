@@ -78,8 +78,17 @@ namespace FactoryManagementSystem.Controllers
                     return BadRequest(new { Success = false, Message = "OperationName is required." });
                 if (request.CCId <= 0)
                     return BadRequest(new { Success = false, Message = "CC is required." });
+                if (request.TargetQty <= 0)
+                    return BadRequest(new { Success = false, Message = "TargetQty must be greater than 0." });
+                if (request.ActualQty < 0)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot be negative." });
+                if (request.ActualQty > request.TargetQty)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
 
                 var now = DateTime.UtcNow;
+                var eligiblePercentage = request.TargetQty > 0
+                    ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)
+                    : 0;
 
                 var existingSnapshot = await _firestore.SkillTransactions
                     .WhereEqualTo(nameof(SkillTransaction.EmployeeCode), request.EmployeeCode)
@@ -96,7 +105,10 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var doc = existingSnapshot.Documents.First();
                     var existing = doc.ConvertTo<SkillTransaction>();
-                    existing.SkillLevel = request.SkillLevel ?? string.Empty;
+                    existing.TargetQty = request.TargetQty;
+                    existing.ActualQty = request.ActualQty;
+                    existing.EligiblePercentage = eligiblePercentage;
+                    existing.Grade = request.Grade ?? string.Empty;
                     existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
                     existing.UpdatedOn = now;
                     await doc.Reference.SetAsync(existing);
@@ -121,7 +133,10 @@ namespace FactoryManagementSystem.Controllers
                         Section = string.IsNullOrWhiteSpace(request.Section) ? "MAIN" : request.Section,
                         CCId = request.CCId,
                         CCNo = request.CCNo ?? string.Empty,
-                        SkillLevel = request.SkillLevel ?? string.Empty,
+                        TargetQty = request.TargetQty,
+                        ActualQty = request.ActualQty,
+                        EligiblePercentage = eligiblePercentage,
+                        Grade = request.Grade ?? string.Empty,
                         UpdatedBy = request.UpdatedBy ?? string.Empty,
                         UpdatedOn = now,
                         IsActive = true
@@ -143,6 +158,13 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                if (request.TargetQty <= 0)
+                    return BadRequest(new { Success = false, Message = "TargetQty must be greater than 0." });
+                if (request.ActualQty < 0)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot be negative." });
+                if (request.ActualQty > request.TargetQty)
+                    return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
+
                 var snapshot = await _firestore.SkillTransactions
                     .WhereEqualTo(nameof(SkillTransaction.TransactionId), id)
                     .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
@@ -154,7 +176,12 @@ namespace FactoryManagementSystem.Controllers
                     return NotFound(new { Success = false, Message = "Skill record not found." });
 
                 var existing = doc.ConvertTo<SkillTransaction>();
-                existing.SkillLevel = request.SkillLevel ?? string.Empty;
+                existing.TargetQty = request.TargetQty;
+                existing.ActualQty = request.ActualQty;
+                existing.EligiblePercentage = request.TargetQty > 0
+                    ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)
+                    : 0;
+                existing.Grade = request.Grade ?? string.Empty;
                 existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
                 existing.UpdatedOn = DateTime.UtcNow;
 

@@ -30,7 +30,16 @@ namespace FactoryManagementSystem.Entities
         public string CCNo { get; set; } = string.Empty;
 
         [FirestoreProperty]
-        public string SkillLevel { get; set; } = string.Empty;
+        public int TargetQty { get; set; }
+
+        [FirestoreProperty]
+        public int ActualQty { get; set; }
+
+        [FirestoreProperty]
+        public int EligiblePercentage { get; set; }
+
+        [FirestoreProperty]
+        public string Grade { get; set; } = string.Empty;
 
         [FirestoreProperty]
         public string UpdatedBy { get; set; } = string.Empty;

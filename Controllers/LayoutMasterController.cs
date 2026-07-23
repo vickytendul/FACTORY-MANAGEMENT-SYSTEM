@@ -126,6 +126,8 @@ namespace FactoryManagementSystem.Controllers
 
             var operationIds = await _firestore.GetOrCreateOperationIdsAsync(identityKeys);
 
+            return Ok(new { Step = "Before GetOrCreateOperationIdsAsync" });
+
             int operationIdIndex = 0;
             var newRecordCount = 0;
             var maxExistingId = 0;

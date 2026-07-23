@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using FactoryManagementSystem.Entities;
 using Google.Cloud.Firestore;
 
@@ -173,7 +174,17 @@ public class LineStrengthReportService
             });
         }
 
+        results = results
+            .OrderBy(r => ExtractLineNumber(r.LineNo))
+            .ToList();
+
         return results;
+    }
+
+    private static int ExtractLineNumber(string lineNo)
+    {
+        var match = Regex.Match(lineNo ?? "", @"\d+");
+        return match.Success ? int.Parse(match.Value) : int.MaxValue;
     }
 
 }

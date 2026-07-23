@@ -53,10 +53,10 @@ namespace FactoryManagementSystem.Services
                     ids.Add(current + i);
                 }
 
-                transaction.Update(counterRef, new Dictionary<string, object>
+                transaction.Set(counterRef, new Dictionary<string, object>
                 {
                     { "NextOperationId", current + count }
-                });
+                }, SetOptions.MergeAll);
 
                 return ids;
             });
@@ -103,10 +103,10 @@ namespace FactoryManagementSystem.Services
                     if (lookupSnap.Exists && lookupSnap.ContainsField("OperationId"))
                     {
                         keyToId[docId] = lookupSnap.GetValue<int>("OperationId");
-                        transaction.Update(lookupRef, new Dictionary<string, object>
+                        transaction.Set(lookupRef, new Dictionary<string, object>
                         {
                             { "LastUpdatedOn", now }
-                        });
+                        }, SetOptions.MergeAll);
                     }
                     else
                     {
@@ -129,10 +129,10 @@ namespace FactoryManagementSystem.Services
 
                 if (allocated > nextId)
                 {
-                    transaction.Update(nextIdRef, new Dictionary<string, object>
+                    transaction.Set(nextIdRef, new Dictionary<string, object>
                     {
                         { "NextOperationId", allocated }
-                    });
+                    }, SetOptions.MergeAll);
                 }
 
                 foreach (var docId in docKeys)

@@ -109,6 +109,24 @@ namespace FactoryManagementSystem.Controllers
                 .ToList();
 
             var batch = _firestore.Db.StartBatch();
+
+            var identityKeys = new List<(int, string, string, string, string)>();
+            for (int i = 0; i < items.Count; i++)
+            {
+                if (i < existingDocs.Count)
+                {
+                    if (existingDocs[i].Record.OperationId == 0)
+                        identityKeys.Add((ccId, items[i].OperationName, items[i].MachineType ?? "", items[i].OperationGrade ?? "", items[i].Section ?? "MAIN"));
+                }
+                else
+                {
+                    identityKeys.Add((ccId, items[i].OperationName, items[i].MachineType ?? "", items[i].OperationGrade ?? "", items[i].Section ?? "MAIN"));
+                }
+            }
+
+            var operationIds = await _firestore.GetOrCreateOperationIdsAsync(identityKeys);
+
+            int operationIdIndex = 0;
             var newRecordCount = 0;
             var maxExistingId = 0;
 
@@ -120,7 +138,9 @@ namespace FactoryManagementSystem.Controllers
                     var existingDoc = existingDocs[i];
                     existingDoc.Record.SNo = i + 1;
                     if (existingDoc.Record.OperationId == 0)
-                        existingDoc.Record.OperationId = existingDoc.Record.Id;
+                    {
+                        existingDoc.Record.OperationId = operationIds[operationIdIndex++];
+                    }
                     existingDoc.Record.OperationName = item.OperationName;
                     existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
                     existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
@@ -159,7 +179,7 @@ namespace FactoryManagementSystem.Controllers
                         Id = generatedId,
                         CCId = ccId,
                         SNo = i + 1,
-                        OperationId = item.OperationId == 0 ? generatedId : item.OperationId,
+                        OperationId = operationIds[operationIdIndex++],
                         OperationName = item.OperationName,
                         OperationGrade = item.OperationGrade ?? string.Empty,
                         MachineType = item.MachineType ?? string.Empty,
@@ -203,6 +223,20 @@ namespace FactoryManagementSystem.Controllers
                 .ToList();
 
             var batch = _firestore.Db.StartBatch();
+
+            var requiredIds = existingDocs.Count(x => x.Record.OperationId == 0);
+
+            if (items.Count > existingDocs.Count)
+            {
+                requiredIds += items.Count - existingDocs.Count;
+            }
+
+            var operationIds = requiredIds > 0
+                ? await _firestore.GetNextOperationIdsAsync(requiredIds)
+                : new List<int>();
+
+            int operationIdIndex = 0;
+
             var newRecordCount = 0;
             var maxExistingId = 0;
 
@@ -213,7 +247,10 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var existingDoc = existingDocs[i];
                     existingDoc.Record.DisplayOrder = i + 1;
-                    existingDoc.Record.OperationId = item.OperationId;
+                    if (existingDoc.Record.OperationId == 0)
+                    {
+                        existingDoc.Record.OperationId = operationIds[operationIdIndex++];
+                    }
                     existingDoc.Record.OperationName = item.OperationName;
                     existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
                     existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
@@ -253,7 +290,7 @@ namespace FactoryManagementSystem.Controllers
                         CcId = header.CcId,
                         CcNo = header.CcNo,
                         DisplayOrder = i + 1,
-                        OperationId = item.OperationId == 0 ? generatedId : item.OperationId,
+                        OperationId = operationIds[operationIdIndex++],
                         OperationName = item.OperationName,
                         MachineType = item.MachineType ?? string.Empty,
                         OperationGrade = item.OperationGrade ?? string.Empty,

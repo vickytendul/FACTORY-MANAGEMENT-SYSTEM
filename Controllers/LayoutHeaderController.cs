@@ -298,6 +298,11 @@ namespace FactoryManagementSystem.Controllers
                     .OrderBy(x => x.DisplayOrder)
                     .ToList();
 
+                var newOperationIds = configDocs.Count > 0
+                    ? await _firestore.GetOrCreateOperationIdsAsync(
+                        configDocs.Select(c => (source.CcId, c.OperationName, c.MachineType ?? "", c.OperationGrade ?? "", c.Section ?? "MAIN")).ToList())
+                    : new List<int>();
+
                 var configCounterRef = _firestore.Counters.Document("LayoutConfigurationId");
                 var configCounterSnap = await configCounterRef.GetSnapshotAsync();
                 int nextConfigId = configCounterSnap.Exists ? configCounterSnap.GetValue<int>("Value") + 1 : 1;
@@ -314,6 +319,7 @@ namespace FactoryManagementSystem.Controllers
                         CcId = source.CcId,
                         CcNo = source.CcNo,
                         DisplayOrder = c.DisplayOrder,
+                        OperationId = newOperationIds[i],
                         OperationName = c.OperationName,
                         MachineType = c.MachineType,
                         OperationGrade = c.OperationGrade,

@@ -29,10 +29,9 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // OPTIMIZED: Query only active transactions for this specific Line + CC (not entire collection)
+                // Query active transactions for this specific Line
                 var existingSnapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
-                    .WhereEqualTo(nameof(LayoutTransaction.CCId), request.CCId)
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
                     .GetSnapshotAsync();
 

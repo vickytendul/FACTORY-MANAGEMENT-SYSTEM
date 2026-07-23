@@ -29,7 +29,119 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // Query active transactions for this specific Line
+                // Reject if existing allocations found for this line
+                var existingSnapshot = await _firestore.LayoutTransactions
+                    .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                    .GetSnapshotAsync();
+
+                if (existingSnapshot.Documents.Any())
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "This line already has allocations. Use Update to modify."
+                    });
+                }
+
+                // Build Section lookup from LayoutMaster (source of truth)
+                var sectionLookup = await BuildSectionLookupAsync(request.Items);
+
+                // Validate no cross-line duplicate employees
+                foreach (var item in request.Items.Where(i => !string.IsNullOrWhiteSpace(i.EmployeeCode)))
+                {
+                    var existingEmployee = await _firestore.LayoutTransactions
+                        .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode)
+                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                        .Limit(1)
+                        .GetSnapshotAsync();
+
+                    if (existingEmployee.Documents.Any())
+                    {
+                        var empDoc = existingEmployee.Documents.First().ConvertTo<LayoutTransaction>();
+                        if (empDoc.LineId != request.LineId || empDoc.CCId != request.CCId)
+                        {
+                            return BadRequest(new
+                            {
+                                Success = false,
+                                Message = $"Employee {item.EmployeeCode} is already allocated."
+                            });
+                        }
+                    }
+                }
+
+                // Insert all items as new documents
+                foreach (var item in request.Items)
+                {
+                    if (string.IsNullOrWhiteSpace(item.EmployeeCode))
+                        continue;
+
+                    var resolvedSection = sectionLookup.GetValueOrDefault(item.LayoutMasterId, "MAIN");
+
+                    var transaction = new LayoutTransaction
+                    {
+                        LayoutMasterId = item.LayoutMasterId,
+
+                        ZoneId = request.ZoneId,
+                        ZoneName = request.ZoneName,
+
+                        LineId = request.LineId,
+                        LineName = request.LineName,
+
+                        CCId = request.CCId,
+                        CCNo = request.CCNo,
+
+                        OperationId = item.OperationId,
+                        OperationName = item.OperationName,
+                        OperationGrade = item.OperationGrade,
+                        MachineType = item.MachineType,
+                        Section = resolvedSection,
+
+                        EmployeeCode = item.EmployeeCode,
+                        EmployeeBarcode = item.EmployeeBarcode,
+                        EmployeeName = item.EmployeeName,
+                        EmployeeGrade = item.EmployeeGrade,
+
+                        AllocationDate = DateTime.UtcNow.Date,
+                        AllocatedDateTime = DateTime.UtcNow,
+
+                        AllocatedBy = "Supervisor",
+
+                        IsActive = true
+                    };
+
+                    await _firestore.LayoutTransactions.AddAsync(transaction);
+                }
+
+                // Summary: OnEmployeeAllocated for each new allocation
+                foreach (var item in request.Items.Where(i => !string.IsNullOrWhiteSpace(i.EmployeeCode)))
+                {
+                    var emp = await _summaryService.FindEmployeeByCodeAsync(item.EmployeeCode);
+                    if (emp != null)
+                        await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation, item.EmployeeCode);
+                }
+
+                return Ok(new
+                {
+                    Success = true,
+                    Message = "Layout Allocation Saved Successfully."
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new
+                {
+                    Success = false,
+                    Message = ex.Message
+                });
+            }
+        }
+
+        [HttpPut]
+        public async Task<IActionResult> Update(LayoutTransactionRequest request)
+        {
+            try
+            {
                 var existingSnapshot = await _firestore.LayoutTransactions
                     .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
@@ -43,139 +155,85 @@ namespace FactoryManagementSystem.Controllers
                     })
                     .ToList();
 
-                // Build Section lookup from LayoutMaster (source of truth)
-                var layoutMasterIds = request.Items
-                    .Where(i => i.LayoutMasterId > 0)
-                    .Select(i => i.LayoutMasterId)
-                    .Distinct()
-                    .ToList();
-                var sectionLookup = new Dictionary<int, string>();
-                foreach (var lmId in layoutMasterIds)
+                if (!existingDocs.Any())
                 {
-                    var lmSnap = await _firestore.LayoutMasters
-                        .WhereEqualTo(nameof(LayoutMaster.Id), lmId)
-                        .Limit(1)
-                        .GetSnapshotAsync();
-                    var lmDoc = lmSnap.Documents.FirstOrDefault();
-                    sectionLookup[lmId] = lmDoc != null
-                        ? (string.IsNullOrWhiteSpace(lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
-                            ? "MAIN"
-                            : lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
-                        : "MAIN";
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "No existing allocations found for this line. Use Save for new allocations."
+                    });
                 }
+
+                // Build Section lookup from LayoutMaster (source of truth)
+                var sectionLookup = await BuildSectionLookupAsync(request.Items);
 
                 foreach (var item in request.Items)
                 {
-                    // Skip empty rows
-                    if (string.IsNullOrWhiteSpace(item.EmployeeCode))
-                        continue;
-
-                    // OPTIMIZED: Check if employee is already allocated (1 query per employee instead of reading entire collection)
-                    var existingEmployee = await _firestore.LayoutTransactions
-                        .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode)
-                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                        .Limit(1)
-                        .GetSnapshotAsync();
-
-                    if (existingEmployee.Documents.Any())
-                    {
-                        var empDoc = existingEmployee.Documents.First().ConvertTo<LayoutTransaction>();
-                        // Only block if it's a different Line + CC
-                        if (empDoc.LineId != request.LineId || empDoc.CCId != request.CCId)
-                        {
-                            return BadRequest(new
-                            {
-                                Success = false,
-                                Message = $"Employee {item.EmployeeCode} is already allocated."
-                            });
-                        }
-                    }
-
                     var resolvedSection = sectionLookup.GetValueOrDefault(item.LayoutMasterId, "MAIN");
-
-                    // Find existing transaction by LayoutMasterId for upsert
                     var existing = existingDocs.FirstOrDefault(e => e.Transaction.LayoutMasterId == item.LayoutMasterId);
 
                     if (existing != null)
                     {
-                        // Update existing document employee fields + refresh Section from LayoutMaster
+                        var oldCode = existing.Transaction.EmployeeCode ?? string.Empty;
+                        var newCode = item.EmployeeCode ?? string.Empty;
+
+                        // Update Firestore document
                         var docRef = _firestore.LayoutTransactions.Document(existing.DocId);
                         await docRef.UpdateAsync(new Dictionary<string, object>
                         {
-                            { nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode },
-                            { nameof(LayoutTransaction.EmployeeBarcode), item.EmployeeBarcode },
-                            { nameof(LayoutTransaction.EmployeeName), item.EmployeeName },
-                            { nameof(LayoutTransaction.EmployeeGrade), item.EmployeeGrade },
+                            { nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode ?? string.Empty },
+                            { nameof(LayoutTransaction.EmployeeBarcode), item.EmployeeBarcode ?? string.Empty },
+                            { nameof(LayoutTransaction.EmployeeName), item.EmployeeName ?? string.Empty },
+                            { nameof(LayoutTransaction.EmployeeGrade), item.EmployeeGrade ?? string.Empty },
                             { nameof(LayoutTransaction.Section), resolvedSection }
                         });
+
                         existingDocs.Remove(existing);
-                    }
-                    else
-                    {
-                        // Insert new document
-                        var transaction = new LayoutTransaction
+
+                        // Handle allocation changes for this row
+                        if (!string.Equals(oldCode, newCode, StringComparison.OrdinalIgnoreCase))
                         {
-                            LayoutMasterId = item.LayoutMasterId,
-
-                            ZoneId = request.ZoneId,
-                            ZoneName = request.ZoneName,
-
-                            LineId = request.LineId,
-                            LineName = request.LineName,
-
-                            CCId = request.CCId,
-                            CCNo = request.CCNo,
-
-                            OperationId = item.OperationId,
-                            OperationName = item.OperationName,
-                            OperationGrade = item.OperationGrade,
-                            MachineType = item.MachineType,
-                            Section = resolvedSection,
-
-                            EmployeeCode = item.EmployeeCode,
-                            EmployeeBarcode = item.EmployeeBarcode,
-                            EmployeeName = item.EmployeeName,
-                            EmployeeGrade = item.EmployeeGrade,
-
-                            AllocationDate = DateTime.UtcNow.Date,
-                            AllocatedDateTime = DateTime.UtcNow,
-
-                            AllocatedBy = "Supervisor",
-
-                            IsActive = true
-                        };
-
-                        await _firestore.LayoutTransactions.AddAsync(transaction);
+                            if (!string.IsNullOrWhiteSpace(oldCode))
+                            {
+                                var oldEmp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                                if (oldEmp != null)
+                                    await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation, oldCode);
+                            }
+                            if (!string.IsNullOrWhiteSpace(newCode))
+                            {
+                                var newEmp = await _summaryService.FindEmployeeByCodeAsync(newCode);
+                                if (newEmp != null)
+                                    await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation, newCode);
+                            }
+                        }
                     }
                 }
 
-                // Incremental summary: compare old vs new employee codes
-                var oldCodes = existingDocs
-                    .Where(e => !string.IsNullOrWhiteSpace(e.Transaction.EmployeeCode))
-                    .Select(e => e.Transaction.EmployeeCode)
-                    .ToHashSet();
-                var newCodes = request.Items
-                    .Where(i => !string.IsNullOrWhiteSpace(i.EmployeeCode))
-                    .Select(i => i.EmployeeCode)
-                    .ToHashSet();
+                // Handle remaining unmatched docs (rows removed from layout or reset)
+                foreach (var old in existingDocs)
+                {
+                    var oldCode = old.Transaction.EmployeeCode ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(oldCode))
+                    {
+                        var docRef = _firestore.LayoutTransactions.Document(old.DocId);
+                        await docRef.UpdateAsync(new Dictionary<string, object>
+                        {
+                            { nameof(LayoutTransaction.EmployeeCode), string.Empty },
+                            { nameof(LayoutTransaction.EmployeeBarcode), string.Empty },
+                            { nameof(LayoutTransaction.EmployeeName), string.Empty },
+                            { nameof(LayoutTransaction.EmployeeGrade), string.Empty }
+                        });
 
-                foreach (var code in oldCodes.Except(newCodes))
-                {
-                    var emp = await _summaryService.FindEmployeeByCodeAsync(code);
-                    if (emp != null)
-                        await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, code);
-                }
-                foreach (var code in newCodes.Except(oldCodes))
-                {
-                    var emp = await _summaryService.FindEmployeeByCodeAsync(code);
-                    if (emp != null)
-                        await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation, code);
+                        var emp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                        if (emp != null)
+                            await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, oldCode);
+                    }
                 }
 
                 return Ok(new
                 {
                     Success = true,
-                    Message = "Layout Allocation Saved Successfully."
+                    Message = "Layout Allocation Updated Successfully."
                 });
             }
             catch (Exception ex)
@@ -410,6 +468,33 @@ namespace FactoryManagementSystem.Controllers
                 Success = true,
                 Message = $"Migration completed. Total: {total}, Updated: {updated}, Skipped: {skipped}"
             });
+        }
+
+        private async Task<Dictionary<int, string>> BuildSectionLookupAsync(List<LayoutTransactionItem> items)
+        {
+            var layoutMasterIds = items
+                .Where(i => i.LayoutMasterId > 0)
+                .Select(i => i.LayoutMasterId)
+                .Distinct()
+                .ToList();
+
+            var sectionLookup = new Dictionary<int, string>();
+
+            foreach (var lmId in layoutMasterIds)
+            {
+                var lmSnap = await _firestore.LayoutMasters
+                    .WhereEqualTo(nameof(LayoutMaster.Id), lmId)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+                var lmDoc = lmSnap.Documents.FirstOrDefault();
+                sectionLookup[lmId] = lmDoc != null
+                    ? (string.IsNullOrWhiteSpace(lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
+                        ? "MAIN"
+                        : lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
+                    : "MAIN";
+            }
+
+            return sectionLookup;
         }
     }
 }

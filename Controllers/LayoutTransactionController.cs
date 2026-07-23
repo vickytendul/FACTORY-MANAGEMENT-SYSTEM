@@ -221,6 +221,7 @@ namespace FactoryManagementSystem.Controllers
         {
             var existingSnapshot = await _firestore.LayoutTransactions
                 .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
+                .WhereEqualTo(nameof(LayoutTransaction.CCId), request.CCId)
                 .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
                 .GetSnapshotAsync();
 
@@ -231,9 +232,6 @@ namespace FactoryManagementSystem.Controllers
             // ─── SAVE PATH ──────────────────────────────────────────────
             if (isNew)
             {
-                if (existingDocs.Any())
-                    throw new InvalidOperationException("This line already has allocations. Use Update to modify.");
-
                 var lmSnapshot = await _firestore.LayoutMasters
                     .WhereEqualTo(nameof(LayoutMaster.CCId), request.CCId)
                     .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
@@ -261,48 +259,103 @@ namespace FactoryManagementSystem.Controllers
 
                     var section = string.IsNullOrWhiteSpace(lm.Section) ? "MAIN" : lm.Section;
 
-                    var transaction = new LayoutTransaction
+                    var existing = existingDocs.FirstOrDefault(e => e.Transaction.LayoutMasterId == lm.Id);
+
+                    if (existing != null)
                     {
-                        LayoutMasterId = lm.Id,
+                        var oldCode = existing.Transaction.EmployeeCode ?? string.Empty;
+                        var newCode = item?.EmployeeCode ?? string.Empty;
 
-                        ZoneId = request.ZoneId,
-                        ZoneName = request.ZoneName,
+                        var docRef = _firestore.LayoutTransactions.Document(existing.DocId);
+                        await docRef.UpdateAsync(new Dictionary<string, object>
+                        {
+                            { nameof(LayoutTransaction.EmployeeCode), newCode },
+                            { nameof(LayoutTransaction.EmployeeBarcode), item?.EmployeeBarcode ?? string.Empty },
+                            { nameof(LayoutTransaction.EmployeeName), item?.EmployeeName ?? string.Empty },
+                            { nameof(LayoutTransaction.EmployeeGrade), item?.EmployeeGrade ?? string.Empty },
+                            { nameof(LayoutTransaction.Section), section }
+                        });
 
-                        LineId = request.LineId,
-                        LineName = request.LineName,
+                        existingDocs.Remove(existing);
 
-                        CCId = request.CCId,
-                        CCNo = request.CCNo,
+                        if (!string.Equals(oldCode, newCode, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (!string.IsNullOrWhiteSpace(oldCode))
+                            {
+                                var oldEmp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                                if (oldEmp != null)
+                                    await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation, oldCode);
+                            }
+                            if (!string.IsNullOrWhiteSpace(newCode))
+                            {
+                                var newEmp = await _summaryService.FindEmployeeByCodeAsync(newCode);
+                                if (newEmp != null)
+                                    await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation, newCode);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        var transaction = new LayoutTransaction
+                        {
+                            LayoutMasterId = lm.Id,
 
-                        OperationId = lm.OperationId,
-                        OperationName = lm.OperationName,
-                        OperationGrade = lm.OperationGrade,
-                        MachineType = lm.MachineType,
-                        Section = section,
+                            ZoneId = request.ZoneId,
+                            ZoneName = request.ZoneName,
 
-                        EmployeeCode = item?.EmployeeCode ?? string.Empty,
-                        EmployeeBarcode = item?.EmployeeBarcode ?? string.Empty,
-                        EmployeeName = item?.EmployeeName ?? string.Empty,
-                        EmployeeGrade = item?.EmployeeGrade ?? string.Empty,
+                            LineId = request.LineId,
+                            LineName = request.LineName,
 
-                        AllocationDate = DateTime.UtcNow.Date,
-                        AllocatedDateTime = DateTime.UtcNow,
-                        AllocatedBy = "Supervisor",
-                        IsActive = true
-                    };
+                            CCId = request.CCId,
+                            CCNo = request.CCNo,
 
-                    await _firestore.LayoutTransactions.AddAsync(transaction);
+                            OperationId = lm.OperationId,
+                            OperationName = lm.OperationName,
+                            OperationGrade = lm.OperationGrade,
+                            MachineType = lm.MachineType,
+                            Section = section,
+
+                            EmployeeCode = item?.EmployeeCode ?? string.Empty,
+                            EmployeeBarcode = item?.EmployeeBarcode ?? string.Empty,
+                            EmployeeName = item?.EmployeeName ?? string.Empty,
+                            EmployeeGrade = item?.EmployeeGrade ?? string.Empty,
+
+                            AllocationDate = DateTime.UtcNow.Date,
+                            AllocatedDateTime = DateTime.UtcNow,
+                            AllocatedBy = "Supervisor",
+                            IsActive = true
+                        };
+
+                        await _firestore.LayoutTransactions.AddAsync(transaction);
+
+                        if (!string.IsNullOrWhiteSpace(item?.EmployeeCode))
+                        {
+                            var emp = await _summaryService.FindEmployeeByCodeAsync(item.EmployeeCode);
+                            if (emp != null)
+                                await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation, item.EmployeeCode);
+                        }
+                    }
                 }
 
-                // Summary: OnEmployeeAllocated for each unique non-empty employee
-                var allocated = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var item in request.Items.Where(i => !string.IsNullOrWhiteSpace(i.EmployeeCode)))
+                // Handle remaining unmatched docs (orphaned LayoutMasterIds)
+                foreach (var old in existingDocs)
                 {
-                    if (!allocated.Add(item.EmployeeCode)) continue;
+                    var oldCode = old.Transaction.EmployeeCode ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(oldCode))
+                    {
+                        var docRef = _firestore.LayoutTransactions.Document(old.DocId);
+                        await docRef.UpdateAsync(new Dictionary<string, object>
+                        {
+                            { nameof(LayoutTransaction.EmployeeCode), string.Empty },
+                            { nameof(LayoutTransaction.EmployeeBarcode), string.Empty },
+                            { nameof(LayoutTransaction.EmployeeName), string.Empty },
+                            { nameof(LayoutTransaction.EmployeeGrade), string.Empty }
+                        });
 
-                    var emp = await _summaryService.FindEmployeeByCodeAsync(item.EmployeeCode);
-                    if (emp != null)
-                        await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation, item.EmployeeCode);
+                        var emp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                        if (emp != null)
+                            await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, oldCode);
+                    }
                 }
 
                 return;

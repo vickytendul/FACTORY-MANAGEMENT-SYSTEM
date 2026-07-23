@@ -12,13 +12,16 @@ namespace FactoryManagementSystem.Entities
         public string EmployeeCode { get; set; } = string.Empty;
 
         [FirestoreProperty]
-        public string EmployeeName { get; set; } = string.Empty;
-
-        [FirestoreProperty]
-        public int OperationId { get; set; }
-
-        [FirestoreProperty]
         public string OperationName { get; set; } = string.Empty;
+
+        [FirestoreProperty]
+        public string MachineType { get; set; } = string.Empty;
+
+        [FirestoreProperty]
+        public string OperationGrade { get; set; } = string.Empty;
+
+        [FirestoreProperty]
+        public string Section { get; set; } = string.Empty;
 
         [FirestoreProperty]
         public int CCId { get; set; }
@@ -27,22 +30,13 @@ namespace FactoryManagementSystem.Entities
         public string CCNo { get; set; } = string.Empty;
 
         [FirestoreProperty]
-        public int TargetQty { get; set; }
+        public string SkillLevel { get; set; } = string.Empty;
 
         [FirestoreProperty]
-        public int ActualQty { get; set; }
+        public string UpdatedBy { get; set; } = string.Empty;
 
         [FirestoreProperty]
-        public int EligiblePercentage { get; set; }
-
-        [FirestoreProperty]
-        public string Grade { get; set; } = string.Empty;
-
-        [FirestoreProperty]
-        public DateTime CreatedDate { get; set; }
-
-        [FirestoreProperty]
-        public DateTime UpdatedDate { get; set; }
+        public DateTime UpdatedOn { get; set; }
 
         [FirestoreProperty]
         public bool IsActive { get; set; } = true;

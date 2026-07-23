@@ -46,12 +46,14 @@ namespace FactoryManagementSystem.Controllers
 
                 var ops = snapshot.Documents
                     .Select(d => d.ConvertTo<LayoutMaster>())
-                    .GroupBy(x => new { x.OperationId, x.OperationName })
+                    .GroupBy(x => new { x.OperationName, x.MachineType, x.OperationGrade, x.Section })
                     .Select(g => g.First())
                     .Select(x => new
                     {
-                        operationId = x.OperationId,
-                        operationName = x.OperationName
+                        operationName = x.OperationName,
+                        machineType = x.MachineType,
+                        operationGrade = x.OperationGrade,
+                        section = x.Section
                     })
                     .ToList();
 

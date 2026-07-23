@@ -19,7 +19,6 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetAll(
             [FromQuery] string? employeeCode = null,
-            [FromQuery] int? operationId = null,
             [FromQuery] int? ccId = null)
         {
             try
@@ -29,8 +28,6 @@ namespace FactoryManagementSystem.Controllers
 
                 if (!string.IsNullOrWhiteSpace(employeeCode))
                     query = query.WhereEqualTo(nameof(SkillTransaction.EmployeeCode), employeeCode);
-                if (operationId.HasValue)
-                    query = query.WhereEqualTo(nameof(SkillTransaction.OperationId), operationId.Value);
                 if (ccId.HasValue)
                     query = query.WhereEqualTo(nameof(SkillTransaction.CCId), ccId.Value);
 
@@ -77,22 +74,19 @@ namespace FactoryManagementSystem.Controllers
             {
                 if (string.IsNullOrWhiteSpace(request.EmployeeCode))
                     return BadRequest(new { Success = false, Message = "EmployeeCode is required." });
-                if (request.OperationId <= 0)
-                    return BadRequest(new { Success = false, Message = "Operation is required." });
+                if (string.IsNullOrWhiteSpace(request.OperationName))
+                    return BadRequest(new { Success = false, Message = "OperationName is required." });
                 if (request.CCId <= 0)
                     return BadRequest(new { Success = false, Message = "CC is required." });
-                if (request.TargetQty <= 0)
-                    return BadRequest(new { Success = false, Message = "TargetQty must be greater than 0." });
-                if (request.ActualQty < 0)
-                    return BadRequest(new { Success = false, Message = "ActualQty cannot be negative." });
-                if (request.ActualQty > request.TargetQty)
-                    return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
 
                 var now = DateTime.UtcNow;
 
                 var existingSnapshot = await _firestore.SkillTransactions
                     .WhereEqualTo(nameof(SkillTransaction.EmployeeCode), request.EmployeeCode)
-                    .WhereEqualTo(nameof(SkillTransaction.OperationId), request.OperationId)
+                    .WhereEqualTo(nameof(SkillTransaction.OperationName), request.OperationName)
+                    .WhereEqualTo(nameof(SkillTransaction.MachineType), request.MachineType ?? "")
+                    .WhereEqualTo(nameof(SkillTransaction.OperationGrade), request.OperationGrade ?? "")
+                    .WhereEqualTo(nameof(SkillTransaction.Section), request.Section ?? "MAIN")
                     .WhereEqualTo(nameof(SkillTransaction.CCId), request.CCId)
                     .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
                     .Limit(1)
@@ -102,13 +96,9 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var doc = existingSnapshot.Documents.First();
                     var existing = doc.ConvertTo<SkillTransaction>();
-                    existing.TargetQty = request.TargetQty;
-                    existing.ActualQty = request.ActualQty;
-                    existing.EligiblePercentage = request.TargetQty > 0
-                        ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)
-                        : 0;
-                    existing.Grade = request.Grade;
-                    existing.UpdatedDate = now;
+                    existing.SkillLevel = request.SkillLevel ?? string.Empty;
+                    existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
+                    existing.UpdatedOn = now;
                     await doc.Reference.SetAsync(existing);
 
                     return Ok(new { Success = true, Message = "Skill record updated.", Data = existing });
@@ -125,19 +115,15 @@ namespace FactoryManagementSystem.Controllers
                     {
                         TransactionId = maxId + 1,
                         EmployeeCode = request.EmployeeCode,
-                        EmployeeName = request.EmployeeName,
-                        OperationId = request.OperationId,
                         OperationName = request.OperationName,
+                        MachineType = request.MachineType ?? string.Empty,
+                        OperationGrade = request.OperationGrade ?? string.Empty,
+                        Section = string.IsNullOrWhiteSpace(request.Section) ? "MAIN" : request.Section,
                         CCId = request.CCId,
-                        CCNo = request.CCNo,
-                        TargetQty = request.TargetQty,
-                        ActualQty = request.ActualQty,
-                        EligiblePercentage = request.TargetQty > 0
-                            ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)
-                            : 0,
-                        Grade = request.Grade,
-                        CreatedDate = now,
-                        UpdatedDate = now,
+                        CCNo = request.CCNo ?? string.Empty,
+                        SkillLevel = request.SkillLevel ?? string.Empty,
+                        UpdatedBy = request.UpdatedBy ?? string.Empty,
+                        UpdatedOn = now,
                         IsActive = true
                     };
 
@@ -157,13 +143,6 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                if (request.TargetQty <= 0)
-                    return BadRequest(new { Success = false, Message = "TargetQty must be greater than 0." });
-                if (request.ActualQty < 0)
-                    return BadRequest(new { Success = false, Message = "ActualQty cannot be negative." });
-                if (request.ActualQty > request.TargetQty)
-                    return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
-
                 var snapshot = await _firestore.SkillTransactions
                     .WhereEqualTo(nameof(SkillTransaction.TransactionId), id)
                     .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
@@ -175,16 +154,10 @@ namespace FactoryManagementSystem.Controllers
                     return NotFound(new { Success = false, Message = "Skill record not found." });
 
                 var existing = doc.ConvertTo<SkillTransaction>();
-                existing.TargetQty = request.TargetQty;
-                existing.ActualQty = request.ActualQty;
-                existing.EligiblePercentage = request.TargetQty > 0
-                    ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)
-                    : 0;
-                existing.Grade = request.Grade;
-                existing.UpdatedDate = DateTime.UtcNow;
+                existing.SkillLevel = request.SkillLevel ?? string.Empty;
+                existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
+                existing.UpdatedOn = DateTime.UtcNow;
 
-                if (!string.IsNullOrWhiteSpace(request.EmployeeName))
-                    existing.EmployeeName = request.EmployeeName;
                 if (!string.IsNullOrWhiteSpace(request.OperationName))
                     existing.OperationName = request.OperationName;
                 if (!string.IsNullOrWhiteSpace(request.CCNo))

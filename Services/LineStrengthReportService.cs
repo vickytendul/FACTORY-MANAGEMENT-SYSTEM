@@ -106,7 +106,7 @@ public class LineStrengthReportService
                         tailorAlloc++; if (isPresent) tailorPres++; if (isAbsent) tailorAbs++;
                         break;
                     case "OTHERS":
-                        othersAlloc++; if (isPresent) othersPres++; if (isAbsent) othersAbs++;
+                        if (isPresent) othersPres++; if (isAbsent) othersAbs++;
                         break;
                     case "SEWING HELPER":
                         sewHelpAlloc++; if (isPresent) sewHelpPres++; if (isAbsent) sewHelpAbs++;
@@ -124,14 +124,12 @@ public class LineStrengthReportService
                         superAlloc++; if (isPresent) superPres++; if (isAbsent) superAbs++;
                         break;
                 }
+                if (section != "MAIN") othersAlloc++;
             }
 
-            var totalAlloc = tailorAlloc + othersAlloc + sewHelpAlloc
-                             + lineLeadAlloc + checkAlloc + packHelpAlloc + superAlloc;
-            var totalPres = tailorPres + othersPres + sewHelpPres
-                            + lineLeadPres + checkPres + packHelpPres + superPres;
-            var totalAbs = tailorAbs + othersAbs + sewHelpAbs
-                           + lineLeadAbs + checkAbs + packHelpAbs + superAbs;
+            var totalAlloc = tailorAlloc + othersAlloc;
+            var totalPres = tailorPres + othersPres;
+            var totalAbs = tailorAbs + othersAbs;
 
             results.Add(new LineStrengthReportDto
             {

@@ -90,8 +90,7 @@ namespace FactoryManagementSystem.Controllers
                         TailorsPresent = 0,
                         OthersPresent = 0,
                         TotalPresent = 0,
-                        ReplacementCount = 0,
-                        Vacancy = 0
+                        ReplacementCount = 0
                     });
                 }
 
@@ -165,8 +164,6 @@ namespace FactoryManagementSystem.Controllers
 
                 int totalPresent = tailorsPresent + othersPresent;
 
-                int vacancy = layoutItems.Count(x => string.IsNullOrWhiteSpace(x.EmployeeCode));
-
                 // OPTIMIZED: Query only output for this specific line + date (1-2 reads instead of N)
                 double output = 0;
                 var outputSnapshot = await _firestore.OutputTransactions
@@ -198,7 +195,6 @@ namespace FactoryManagementSystem.Controllers
                     TotalPresent = totalPresent,
                     Absent = absent,
                     ReplacementCount = replacementCount,
-                    Vacancy = vacancy,
                     Output = output
                 };
 

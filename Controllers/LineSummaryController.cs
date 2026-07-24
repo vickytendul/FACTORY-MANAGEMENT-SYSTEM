@@ -125,7 +125,8 @@ namespace FactoryManagementSystem.Controllers
                 {
                     if (string.IsNullOrWhiteSpace(item.EmployeeCode)) continue;
 
-                    if ((item.Section ?? "").Trim().ToUpper() == "MAIN")
+                    var sec = (item.Section ?? "").Trim().ToUpper();
+                    if (sec == "MAIN" || sec == "SUPER TEAM")
                         tailorsOnRoll++;
                     else
                         othersOnRoll++;
@@ -146,13 +147,14 @@ namespace FactoryManagementSystem.Controllers
                 foreach (var item in originalAttendance)
                 {
                     var status = (item.AttendanceStatus ?? "").Trim();
-                    var section = employeeSectionMap[item.EmployeeCode];
-                    bool isMain = (section ?? "").Trim().ToUpper() == "MAIN";
+                    var empSection = employeeSectionMap[item.EmployeeCode];
+                    bool isTailor = (empSection ?? "").Trim().ToUpper() == "MAIN" ||
+                                    (empSection ?? "").Trim().ToUpper() == "SUPER TEAM";
 
                     if (status.Equals("P", StringComparison.OrdinalIgnoreCase) ||
                         status.Equals("Present", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (isMain) tailorsPresent++; else othersPresent++;
+                        if (isTailor) tailorsPresent++; else othersPresent++;
                     }
 
                     if (status.Equals("A", StringComparison.OrdinalIgnoreCase) ||

@@ -5,6 +5,8 @@
         public string CCNo { get; set; } = string.Empty;
         public double SAM { get; set; }
 
+        public int TotalPositions { get; set; }
+
         public int TailorsOnRoll { get; set; }
         public int OthersOnRoll { get; set; }
         public int TotalOnRoll { get; set; }
@@ -19,6 +21,8 @@
             TotalOnRoll == 0
                 ? 0
                 : Math.Round((decimal)Absent * 100 / TotalOnRoll, 2);
+
+        public int ReplacementCount { get; set; }
 
         public double Output { get; set; }
     }

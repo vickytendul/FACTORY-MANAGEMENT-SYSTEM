@@ -83,22 +83,39 @@ namespace FactoryManagementSystem.Controllers
                     {
                         CCNo = cc.CCNo,
                         SAM = cc.SAM,
+                        TotalPositions = 0,
                         TailorsOnRoll = 0,
                         OthersOnRoll = 0,
                         TotalOnRoll = 0,
                         TailorsPresent = 0,
                         OthersPresent = 0,
-                        TotalPresent = 0
+                        TotalPresent = 0,
+                        ReplacementCount = 0
                     });
                 }
 
-                // OPTIMIZED: Build employee code lookup - query only employees that are in the layout
-                // Instead of reading entire EmployeeMasters collection, query specific employees
-                var employeeCodes = layoutItems.Select(x => x.EmployeeCode).Distinct().ToList();
+                // Fetch attendance for today before employee lookup,
+                // so we include attendance employee codes in the designation lookup.
+                var attendanceSnapshot = await _firestore.AttendanceTransactions
+                    .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
+                    .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
+                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
+                    .GetSnapshotAsync();
+
+                var attendanceItems = attendanceSnapshot.Documents
+                    .Select(d => d.ConvertTo<AttendanceTransaction>())
+                    .ToList();
+
+                // Collect employee codes from layout and attendance for designation lookup
+                var layoutCodes = layoutItems.Select(x => x.EmployeeCode);
+                var attendanceCodes = attendanceItems.Select(x => x.EmployeeCode);
+                var employeeCodes = layoutCodes.Concat(attendanceCodes)
+                    .Where(c => !string.IsNullOrWhiteSpace(c))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
                 var employeeDesignations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                // Batch query employees by their codes (Firestore doesn't support IN queries with more than 30 items)
-                // So we query in batches of 30
                 const int batchSize = 30;
                 for (int i = 0; i < employeeCodes.Count; i += batchSize)
                 {
@@ -118,7 +135,7 @@ namespace FactoryManagementSystem.Controllers
                     }
                 }
 
-                // Calculate On Roll counts by Designation
+                // Calculate On Roll by designation using EmployeeMaster
                 int tailorsOnRoll = 0;
                 int othersOnRoll = 0;
 
@@ -135,25 +152,16 @@ namespace FactoryManagementSystem.Controllers
 
                 int totalOnRoll = tailorsOnRoll + othersOnRoll;
 
-                // OPTIMIZED: Query only attendance for this specific line + cc + date (not entire collection)
-                var attendanceSnapshot = await _firestore.AttendanceTransactions
-                    .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
-                    .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
-                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
-                    .GetSnapshotAsync();
-
-                var attendanceItems = attendanceSnapshot.Documents
-                    .Select(d => d.ConvertTo<AttendanceTransaction>())
-                    .ToList();
-
-                // Count absent tailors vs others using designation from attendance record
+                // Count absent by designation using the same EmployeeMaster lookup
                 int absentTailors = 0;
                 int absentOthers = 0;
 
                 foreach (var item in attendanceItems)
                 {
-                    var designation = (item.Designation ?? "").Trim().ToUpper();
-                    if (designation == "TAILOR")
+                    var designation = employeeDesignations.TryGetValue(item.EmployeeCode, out var des)
+                        ? des
+                        : "";
+                    if (designation.Trim().ToUpper() == "TAILOR")
                         absentTailors++;
                     else
                         absentOthers++;
@@ -178,16 +186,21 @@ namespace FactoryManagementSystem.Controllers
                     output = outputRecord.Output;
                 }
 
+                int totalPositions = layoutItems.Count;
+                int replacementCount = attendanceItems.Count(x => !string.IsNullOrWhiteSpace(x.ReplacementEmployeeCode));
+
                 var response = new LineSummaryResponse
                 {
                     CCNo = cc.CCNo,
                     SAM = cc.SAM,
+                    TotalPositions = totalPositions,
                     TailorsOnRoll = tailorsOnRoll,
                     OthersOnRoll = othersOnRoll,
                     TotalOnRoll = totalOnRoll,
                     TailorsPresent = tailorsPresent < 0 ? 0 : tailorsPresent,
                     OthersPresent = othersPresent < 0 ? 0 : othersPresent,
                     TotalPresent = totalPresent < 0 ? 0 : totalPresent,
+                    ReplacementCount = replacementCount,
                     Output = output
                 };
 

@@ -24,6 +24,8 @@
 
         public int ReplacementCount { get; set; }
 
+        public int Vacancy { get; set; }
+
         public double Output { get; set; }
     }
 }

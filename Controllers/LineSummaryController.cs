@@ -90,7 +90,8 @@ namespace FactoryManagementSystem.Controllers
                         TailorsPresent = 0,
                         OthersPresent = 0,
                         TotalPresent = 0,
-                        ReplacementCount = 0
+                        ReplacementCount = 0,
+                        Vacancy = 0
                     });
                 }
 
@@ -106,45 +107,26 @@ namespace FactoryManagementSystem.Controllers
                     .Select(d => d.ConvertTo<AttendanceTransaction>())
                     .ToList();
 
-                // Collect employee codes from layout and attendance for designation lookup
-                var layoutCodes = layoutItems.Select(x => x.EmployeeCode);
-                var attendanceCodes = attendanceItems.Select(x => x.EmployeeCode);
-                var employeeCodes = layoutCodes.Concat(attendanceCodes)
-                    .Where(c => !string.IsNullOrWhiteSpace(c))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-
-                var employeeDesignations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-                const int batchSize = 30;
-                for (int i = 0; i < employeeCodes.Count; i += batchSize)
+                // Build EmployeeCode → Section map from layout transactions
+                var employeeSectionMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var item in layoutItems)
                 {
-                    var batch = employeeCodes.Skip(i).Take(batchSize).ToList();
-                    foreach (var code in batch)
+                    if (!string.IsNullOrWhiteSpace(item.EmployeeCode) &&
+                        !employeeSectionMap.ContainsKey(item.EmployeeCode))
                     {
-                        var empSnapshot = await _firestore.EmployeeMasters
-                            .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), code)
-                            .Limit(1)
-                            .GetSnapshotAsync();
-
-                        if (empSnapshot.Documents.Any())
-                        {
-                            var emp = empSnapshot.Documents.First().ConvertTo<EmployeeMaster>();
-                            employeeDesignations[code] = emp.Designation ?? "";
-                        }
+                        employeeSectionMap[item.EmployeeCode] = item.Section;
                     }
                 }
 
-                // Calculate On Roll by designation using EmployeeMaster
+                // Calculate On Roll by Section from LayoutTransaction
                 int tailorsOnRoll = 0;
                 int othersOnRoll = 0;
 
                 foreach (var item in layoutItems)
                 {
-                    var designation = employeeDesignations.TryGetValue(item.EmployeeCode, out var des)
-                        ? des
-                        : "";
-                    if (designation.Trim().ToUpper() == "TAILOR")
+                    if (string.IsNullOrWhiteSpace(item.EmployeeCode)) continue;
+
+                    if ((item.Section ?? "").Trim().ToUpper() == "MAIN")
                         tailorsOnRoll++;
                     else
                         othersOnRoll++;
@@ -152,24 +134,24 @@ namespace FactoryManagementSystem.Controllers
 
                 int totalOnRoll = tailorsOnRoll + othersOnRoll;
 
-                // Count absent by designation using the same EmployeeMaster lookup
-                int absentTailors = 0;
-                int absentOthers = 0;
+                // Count present by Section using the employee → section map
+                int tailorsPresent = 0;
+                int othersPresent = 0;
 
                 foreach (var item in attendanceItems)
                 {
-                    var designation = employeeDesignations.TryGetValue(item.EmployeeCode, out var des)
-                        ? des
+                    var section = employeeSectionMap.TryGetValue(item.EmployeeCode, out var sec)
+                        ? sec
                         : "";
-                    if (designation.Trim().ToUpper() == "TAILOR")
-                        absentTailors++;
+                    if ((section ?? "").Trim().ToUpper() == "MAIN")
+                        tailorsPresent++;
                     else
-                        absentOthers++;
+                        othersPresent++;
                 }
 
-                int tailorsPresent = tailorsOnRoll - absentTailors;
-                int othersPresent = othersOnRoll - absentOthers;
                 int totalPresent = tailorsPresent + othersPresent;
+
+                int vacancy = layoutItems.Count(x => string.IsNullOrWhiteSpace(x.EmployeeCode));
 
                 // OPTIMIZED: Query only output for this specific line + date (1-2 reads instead of N)
                 double output = 0;
@@ -197,10 +179,11 @@ namespace FactoryManagementSystem.Controllers
                     TailorsOnRoll = tailorsOnRoll,
                     OthersOnRoll = othersOnRoll,
                     TotalOnRoll = totalOnRoll,
-                    TailorsPresent = tailorsPresent < 0 ? 0 : tailorsPresent,
-                    OthersPresent = othersPresent < 0 ? 0 : othersPresent,
-                    TotalPresent = totalPresent < 0 ? 0 : totalPresent,
+                    TailorsPresent = tailorsPresent,
+                    OthersPresent = othersPresent,
+                    TotalPresent = totalPresent,
                     ReplacementCount = replacementCount,
+                    Vacancy = vacancy,
                     Output = output
                 };
 

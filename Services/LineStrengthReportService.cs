@@ -104,14 +104,27 @@ public class LineStrengthReportService
                 switch (section)
                 {
                     case "MAIN":
-                    case "SUPER TEAM":
                         tailorAlloc++; if (isPresent) tailorPres++; if (isAbsent) tailorAbs++;
                         break;
+                    case "SUPER TEAM":
+                        tailorAlloc++; if (isPresent) tailorPres++; if (isAbsent) tailorAbs++;
+                        superAlloc++; if (isPresent) superPres++; if (isAbsent) superAbs++;
+                        break;
                     case "SEWING HELPER":
+                        othersAlloc++; if (isPresent) othersPres++; if (isAbsent) othersAbs++;
+                        sewHelpAlloc++; if (isPresent) sewHelpPres++; if (isAbsent) sewHelpAbs++;
+                        break;
                     case "LINE LEADER":
+                        othersAlloc++; if (isPresent) othersPres++; if (isAbsent) othersAbs++;
+                        lineLeadAlloc++; if (isPresent) lineLeadPres++; if (isAbsent) lineLeadAbs++;
+                        break;
                     case "PACKING HELPER":
+                        othersAlloc++; if (isPresent) othersPres++; if (isAbsent) othersAbs++;
+                        packHelpAlloc++; if (isPresent) packHelpPres++; if (isAbsent) packHelpAbs++;
+                        break;
                     case "CHECKERS":
                         othersAlloc++; if (isPresent) othersPres++; if (isAbsent) othersAbs++;
+                        checkAlloc++; if (isPresent) checkPres++; if (isAbsent) checkAbs++;
                         break;
                 }
             }

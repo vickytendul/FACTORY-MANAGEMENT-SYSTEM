@@ -15,7 +15,7 @@
         public int OthersPresent { get; set; }
         public int TotalPresent { get; set; }
 
-        public int Absent => TotalOnRoll - TotalPresent;
+        public int Absent { get; set; }
 
         public decimal Absenteeism =>
             TotalOnRoll == 0

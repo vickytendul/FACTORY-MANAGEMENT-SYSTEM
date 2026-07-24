@@ -118,7 +118,7 @@ namespace FactoryManagementSystem.Controllers
                     }
                 }
 
-                // Calculate On Roll by Section from LayoutTransaction
+                // Calculate On Roll by Section — only filled positions (non-empty EmployeeCode)
                 int tailorsOnRoll = 0;
                 int othersOnRoll = 0;
 
@@ -134,19 +134,33 @@ namespace FactoryManagementSystem.Controllers
 
                 int totalOnRoll = tailorsOnRoll + othersOnRoll;
 
-                // Count present by Section using the employee → section map
+                // Filter attendance to only original allocated employees (those in layout)
+                var originalAttendance = attendanceItems
+                    .Where(item => employeeSectionMap.ContainsKey(item.EmployeeCode))
+                    .ToList();
+
+                // Count Present/Absent by Status and Section for original employees only
                 int tailorsPresent = 0;
                 int othersPresent = 0;
+                int absent = 0;
 
-                foreach (var item in attendanceItems)
+                foreach (var item in originalAttendance)
                 {
-                    var section = employeeSectionMap.TryGetValue(item.EmployeeCode, out var sec)
-                        ? sec
-                        : "";
-                    if ((section ?? "").Trim().ToUpper() == "MAIN")
-                        tailorsPresent++;
-                    else
-                        othersPresent++;
+                    var status = (item.AttendanceStatus ?? "").Trim();
+                    var section = employeeSectionMap[item.EmployeeCode];
+                    bool isMain = (section ?? "").Trim().ToUpper() == "MAIN";
+
+                    if (status.Equals("P", StringComparison.OrdinalIgnoreCase) ||
+                        status.Equals("Present", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (isMain) tailorsPresent++; else othersPresent++;
+                    }
+
+                    if (status.Equals("A", StringComparison.OrdinalIgnoreCase) ||
+                        status.Equals("Absent", StringComparison.OrdinalIgnoreCase))
+                    {
+                        absent++;
+                    }
                 }
 
                 int totalPresent = tailorsPresent + othersPresent;
@@ -182,6 +196,7 @@ namespace FactoryManagementSystem.Controllers
                     TailorsPresent = tailorsPresent,
                     OthersPresent = othersPresent,
                     TotalPresent = totalPresent,
+                    Absent = absent,
                     ReplacementCount = replacementCount,
                     Vacancy = vacancy,
                     Output = output

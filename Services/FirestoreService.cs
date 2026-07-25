@@ -92,11 +92,20 @@ namespace FactoryManagementSystem.Services
                 int allocated = nextId;
 
                 var keyToId = new Dictionary<string, int>();
+                var lookupSnapshots = new Dictionary<string, DocumentSnapshot>();
+
+                // Firestore requires every transaction read to finish before
+                // the transaction performs its first write.
+                foreach (var docId in uniqueDocIds)
+                {
+                    var lookupRef = OperationIdLookup.Document(docId);
+                    lookupSnapshots[docId] = await transaction.GetSnapshotAsync(lookupRef);
+                }
 
                 foreach (var docId in uniqueDocIds)
                 {
                     var lookupRef = OperationIdLookup.Document(docId);
-                    var lookupSnap = await transaction.GetSnapshotAsync(lookupRef);
+                    var lookupSnap = lookupSnapshots[docId];
 
                     if (lookupSnap.Exists && lookupSnap.ContainsField("OperationId"))
                     {

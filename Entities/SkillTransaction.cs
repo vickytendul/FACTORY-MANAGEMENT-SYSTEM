@@ -9,6 +9,9 @@ namespace FactoryManagementSystem.Entities
         public int TransactionId { get; set; }
 
         [FirestoreProperty]
+        public int OperationId { get; set; }
+
+        [FirestoreProperty]
         public string EmployeeCode { get; set; } = string.Empty;
 
         [FirestoreProperty]

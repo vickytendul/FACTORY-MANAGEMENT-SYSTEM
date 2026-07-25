@@ -106,6 +106,7 @@ namespace FactoryManagementSystem.Controllers
                     var doc = existingSnapshot.Documents.First();
                     var existing = doc.ConvertTo<SkillTransaction>();
                     existing.TargetQty = request.TargetQty;
+                    existing.OperationId = request.OperationId;
                     existing.ActualQty = request.ActualQty;
                     existing.EligiblePercentage = eligiblePercentage;
                     existing.Grade = request.Grade ?? string.Empty;
@@ -126,6 +127,7 @@ namespace FactoryManagementSystem.Controllers
                     var newRecord = new SkillTransaction
                     {
                         TransactionId = maxId + 1,
+                        OperationId = request.OperationId,
                         EmployeeCode = request.EmployeeCode,
                         OperationName = request.OperationName,
                         MachineType = request.MachineType ?? string.Empty,
@@ -177,6 +179,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var existing = doc.ConvertTo<SkillTransaction>();
                 existing.TargetQty = request.TargetQty;
+                existing.OperationId = request.OperationId;
                 existing.ActualQty = request.ActualQty;
                 existing.EligiblePercentage = request.TargetQty > 0
                     ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)

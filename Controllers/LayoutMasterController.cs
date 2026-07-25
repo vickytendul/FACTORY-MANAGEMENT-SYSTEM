@@ -68,10 +68,19 @@ namespace FactoryManagementSystem.Controllers
         [HttpPut("batch")]
         public async Task<IActionResult> BatchSave(int ccId, [FromBody] List<LayoutMasterSaveRequest>? items = null)
         {
-            if (items == null || items.Count == 0)
-                return BadRequest(new { Success = false, Message = "No items provided." });
+            try
+            {
+                if (ccId <= 0)
+                    return BadRequest(new { Success = false, Message = "A valid CC is required." });
 
-            var existing = await _firestore.LayoutMasters
+                if (items == null || items.Count == 0)
+                    return BadRequest(new { Success = false, Message = "No layout operations were provided." });
+
+                var invalidItem = items.FirstOrDefault(x => string.IsNullOrWhiteSpace(x.OperationName));
+                if (invalidItem != null)
+                    return BadRequest(new { Success = false, Message = "Every layout row must have an operation name." });
+
+                var existing = await _firestore.LayoutMasters
                 .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
                 .GetSnapshotAsync();
 
@@ -167,9 +176,16 @@ namespace FactoryManagementSystem.Controllers
                 batch.Set(counterRef, new { Value = nextId + newRecordCount - 1 }, SetOptions.MergeAll);
             }
 
-            await batch.CommitAsync();
+                await batch.CommitAsync();
 
-            return Ok(new { Success = true, Message = "Layout saved successfully." });
+                return Ok(new { Success = true, Message = "Layout saved successfully." });
+            }
+            catch (Exception ex)
+            {
+                // Match the allocation API behaviour: return a usable API error
+                // rather than letting Firestore failures become an opaque 500/CORS error.
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
         }
     }
 }

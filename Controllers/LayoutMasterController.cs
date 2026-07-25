@@ -65,6 +65,78 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// <summary>
+        /// One-time repair for LayoutMaster documents created before operation
+        /// IDs were generated. Existing valid IDs are never changed.
+        /// </summary>
+        [HttpPost("migrate-operation-ids")]
+        public async Task<IActionResult> MigrateMissingOperationIds()
+        {
+            try
+            {
+                var snapshot = await _firestore.LayoutMasters.GetSnapshotAsync();
+                var missing = snapshot.Documents
+                    .Select(document => new
+                    {
+                        Reference = document.Reference,
+                        Record = document.ConvertTo<LayoutMaster>()
+                    })
+                    .Where(x => x.Record.OperationId <= 0)
+                    .ToList();
+
+                if (missing.Count == 0)
+                {
+                    return Ok(new
+                    {
+                        Success = true,
+                        Updated = 0,
+                        Message = "All layout master records already have an OperationId."
+                    });
+                }
+
+                var identityKeys = missing
+                    .Select(x => (
+                        x.Record.CCId,
+                        x.Record.OperationName ?? string.Empty,
+                        x.Record.MachineType ?? string.Empty,
+                        x.Record.OperationGrade ?? string.Empty,
+                        string.IsNullOrWhiteSpace(x.Record.Section) ? "MAIN" : x.Record.Section))
+                    .ToList();
+
+                var operationIds = await _firestore.GetOrCreateOperationIdsAsync(identityKeys);
+
+                // A Firestore batch permits at most 500 writes; use 400 so the
+                // migration remains safe as the master data grows.
+                for (var offset = 0; offset < missing.Count; offset += 400)
+                {
+                    var batch = _firestore.Db.StartBatch();
+                    var count = Math.Min(400, missing.Count - offset);
+
+                    for (var index = 0; index < count; index++)
+                    {
+                        var row = missing[offset + index];
+                        batch.Update(row.Reference, new Dictionary<string, object>
+                        {
+                            [nameof(LayoutMaster.OperationId)] = operationIds[offset + index]
+                        });
+                    }
+
+                    await batch.CommitAsync();
+                }
+
+                return Ok(new
+                {
+                    Success = true,
+                    Updated = missing.Count,
+                    Message = $"OperationId added to {missing.Count} layout master record(s)."
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         [HttpPut("batch")]
         public async Task<IActionResult> BatchSave(int ccId, [FromBody] List<LayoutMasterSaveRequest>? items = null)
         {

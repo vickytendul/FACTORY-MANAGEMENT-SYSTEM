@@ -47,13 +47,10 @@ public class LineStrengthReportService
             .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
             .GetSnapshotAsync();
 
-        var plannedByCc = lmSnap.Documents
-            .Where(d =>
-            {
-                var section = d.GetValue<string>("Section") ?? "";
-                return string.Equals(section, "MAIN", StringComparison.OrdinalIgnoreCase);
-            })
-            .GroupBy(d => d.GetValue<int>("CCId"))
+        var plannedByLayout = lmSnap.Documents
+            .Select(d => d.ConvertTo<LayoutMaster>())
+            .Where(x => string.Equals(x.Section, "MAIN", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(x => (x.CCId, NormalizeLayoutNo(x.LayoutNo)))
             .ToDictionary(g => g.Key, g => g.Count());
 
         // 4 — Group transactions by line and compute stats
@@ -71,7 +68,8 @@ public class LineStrengthReportService
             var firstTx = lineGroup.First();
             var ccId = firstTx.GetValue<int>("CCId");
             var ccNo = firstTx.GetValue<string>("CCNo") ?? "";
-            var plannedTailors = plannedByCc.GetValueOrDefault(ccId, 0);
+            var layoutNo = NormalizeLayoutNo(firstTx.ConvertTo<LayoutTransaction>().LayoutNo);
+            var plannedTailors = plannedByLayout.GetValueOrDefault((ccId, layoutNo), 0);
 
             // Per-department counters
             int tailorAlloc = 0, tailorPres = 0, tailorAbs = 0;
@@ -187,5 +185,7 @@ public class LineStrengthReportService
         var match = Regex.Match(lineNo ?? "", @"\d+");
         return match.Success ? int.Parse(match.Value) : int.MaxValue;
     }
+
+    private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
 
 }

@@ -17,7 +17,7 @@ namespace FactoryManagementSystem.Controllers
         }
 
         [HttpGet]
-        public async Task<IActionResult> GetLayoutMaster(int ccId)
+        public async Task<IActionResult> GetLayoutMaster(int ccId, int? layoutNo = null)
 
         {
            
@@ -29,9 +29,67 @@ namespace FactoryManagementSystem.Controllers
 
             var layout = snapshot.Documents
                 .Select(x => x.ConvertTo<LayoutMaster>())
+                .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                 .ToList();
 
             return Ok(layout);
+        }
+
+        [HttpPost("copy")]
+        public async Task<IActionResult> CopyLayout(int ccId, int sourceLayoutNo, int targetLayoutNo)
+        {
+            if (ccId <= 0 || sourceLayoutNo <= 0 || targetLayoutNo <= 0)
+                return BadRequest(new { Success = false, Message = "Valid CC and layout numbers are required." });
+            if (sourceLayoutNo == targetLayoutNo)
+                return BadRequest(new { Success = false, Message = "Source and target layouts must be different." });
+
+            var snapshot = await _firestore.LayoutMasters
+                .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
+                .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+                .GetSnapshotAsync();
+            var records = snapshot.Documents.Select(d => d.ConvertTo<LayoutMaster>()).ToList();
+            if (records.Any(x => NormalizeLayoutNo(x.LayoutNo) == targetLayoutNo))
+                return BadRequest(new { Success = false, Message = "The target layout number already exists." });
+            var source = records.Where(x => NormalizeLayoutNo(x.LayoutNo) == sourceLayoutNo).OrderBy(x => x.DisplayOrder).ToList();
+            if (!source.Any())
+                return NotFound(new { Success = false, Message = "Source layout was not found." });
+
+            var counterRef = _firestore.Counters.Document("LayoutMasterId");
+            var counter = await counterRef.GetSnapshotAsync();
+            var nextId = Math.Max(counter.Exists ? counter.GetValue<int>("Value") + 1 : 1, records.Max(x => x.Id) + 1);
+            var batch = _firestore.Db.StartBatch();
+            for (var i = 0; i < source.Count; i++)
+            {
+                var copy = source[i];
+                copy.Id = nextId + i;
+                copy.LayoutNo = targetLayoutNo;
+                batch.Set(_firestore.LayoutMasters.Document(), copy);
+            }
+            batch.Set(counterRef, new { Value = nextId + source.Count - 1 }, SetOptions.MergeAll);
+            await batch.CommitAsync();
+            return Ok(new { Success = true, LayoutNo = targetLayoutNo });
+        }
+
+        [HttpDelete]
+        public async Task<IActionResult> DeleteLayout(int ccId, int layoutNo)
+        {
+            if (ccId <= 0 || layoutNo <= 0)
+                return BadRequest(new { Success = false, Message = "Valid CC and layout number are required." });
+            var allocation = await _firestore.LayoutTransactions
+                .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
+                .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                .GetSnapshotAsync();
+            if (allocation.Documents.Select(d => d.ConvertTo<LayoutTransaction>()).Any(x => NormalizeLayoutNo(x.LayoutNo) == layoutNo))
+                return BadRequest(new { Success = false, Message = "This layout cannot be deleted because allocations exist." });
+
+            var master = await _firestore.LayoutMasters
+                .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
+                .GetSnapshotAsync();
+            var docs = master.Documents.Where(d => NormalizeLayoutNo(d.ConvertTo<LayoutMaster>().LayoutNo) == layoutNo).ToList();
+            var batch = _firestore.Db.StartBatch();
+            foreach (var doc in docs) batch.Delete(doc.Reference);
+            await batch.CommitAsync();
+            return Ok(new { Success = true });
         }
 
         [HttpGet("by-cc/{ccId}/operations")]
@@ -139,10 +197,11 @@ namespace FactoryManagementSystem.Controllers
         }
 
         [HttpPut("batch")]
-        public async Task<IActionResult> BatchSave(int ccId, [FromBody] List<LayoutMasterSaveRequest>? items = null)
+        public async Task<IActionResult> BatchSave(int ccId, int layoutNo = 1, [FromBody] List<LayoutMasterSaveRequest>? items = null)
         {
             try
             {
+                layoutNo = NormalizeLayoutNo(layoutNo);
                 if (ccId <= 0)
                     return BadRequest(new { Success = false, Message = "A valid CC is required." });
 
@@ -157,8 +216,9 @@ namespace FactoryManagementSystem.Controllers
                 .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
                 .GetSnapshotAsync();
 
-            var existingDocs = existing.Documents
+                var existingDocs = existing.Documents
                 .Select(d => new { DocRef = d.Reference, Record = d.ConvertTo<LayoutMaster>() })
+                .Where(x => NormalizeLayoutNo(x.Record.LayoutNo) == layoutNo)
                 .OrderBy(x => x.Record.DisplayOrder)
                 .ToList();
 
@@ -191,6 +251,7 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var existingDoc = existingDocs[i];
                     existingDoc.Record.SNo = i + 1;
+                    existingDoc.Record.LayoutNo = layoutNo;
                     if (existingDoc.Record.OperationId == 0)
                     {
                         existingDoc.Record.OperationId = operationIds[operationIdIndex++];
@@ -232,6 +293,7 @@ namespace FactoryManagementSystem.Controllers
                     {
                         Id = generatedId,
                         CCId = ccId,
+                        LayoutNo = layoutNo,
                         SNo = i + 1,
                         OperationId = operationIds[operationIdIndex++],
                         OperationName = item.OperationName,
@@ -260,5 +322,7 @@ namespace FactoryManagementSystem.Controllers
                 return BadRequest(new { Success = false, Message = ex.Message });
             }
         }
+
+        private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
     }
 }

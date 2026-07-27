@@ -11,6 +11,8 @@
         public int CCId { get; set; }
         public string CCNo { get; set; } = string.Empty;
 
+        public int LayoutNo { get; set; } = 1;
+
         public List<LayoutTransactionItem> Items { get; set; } = new();
     }
 

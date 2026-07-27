@@ -11,6 +11,11 @@ namespace FactoryManagementSystem.Entities
         [FirestoreProperty]
         public int CCId { get; set; }
 
+        // Missing on legacy Firestore documents is deserialized as 0; all
+        // consumers normalize that value to layout 1 for compatibility.
+        [FirestoreProperty]
+        public int LayoutNo { get; set; } = 1;
+
         [FirestoreProperty]
         public int SNo { get; set; }
 

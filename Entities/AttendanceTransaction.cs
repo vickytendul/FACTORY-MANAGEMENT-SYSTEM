@@ -34,6 +34,9 @@ namespace FactoryManagementSystem.Entities
         [FirestoreProperty]
         public string CCNo { get; set; } = string.Empty;
 
+        [FirestoreProperty]
+        public int LayoutNo { get; set; } = 1;
+
         // Layout
         [FirestoreProperty]
         public int LayoutMasterId { get; set; }

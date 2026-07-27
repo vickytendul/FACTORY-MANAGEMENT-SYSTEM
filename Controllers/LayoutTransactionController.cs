@@ -81,7 +81,7 @@ namespace FactoryManagementSystem.Controllers
 
         // GET: api/LayoutTransaction?lineId=1&ccId=1  (ccId optional)
         [HttpGet]
-        public async Task<IActionResult> GetAllocation(int lineId, int? ccId)
+        public async Task<IActionResult> GetAllocation(int lineId, int? ccId, int? layoutNo = null)
         {
             try
             {
@@ -99,6 +99,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var data = snapshot.Documents
                     .Select(x => x.ConvertTo<LayoutTransaction>())
+                    .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                     .ToList();
 
                 return Ok(data);
@@ -219,6 +220,7 @@ namespace FactoryManagementSystem.Controllers
 
         private async Task SyncLayoutAsync(LayoutTransactionRequest request, bool isNew)
         {
+            var layoutNo = NormalizeLayoutNo(request.LayoutNo);
             var existingSnapshot = await _firestore.LayoutTransactions
                 .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
                 .WhereEqualTo(nameof(LayoutTransaction.CCId), request.CCId)
@@ -227,6 +229,7 @@ namespace FactoryManagementSystem.Controllers
 
             var existingDocs = existingSnapshot.Documents
                 .Select(d => new { DocId = d.Id, Transaction = d.ConvertTo<LayoutTransaction>() })
+                .Where(x => NormalizeLayoutNo(x.Transaction.LayoutNo) == layoutNo)
                 .ToList();
 
             // ─── SAVE PATH ──────────────────────────────────────────────
@@ -249,6 +252,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var layoutMasters = lmSnapshot.Documents
                     .Select(d => d.ConvertTo<LayoutMaster>())
+                    .Where(x => NormalizeLayoutNo(x.LayoutNo) == layoutNo)
                     .OrderBy(lm => lm.DisplayOrder)
                     .ThenBy(lm => lm.SNo)
                     .ToList();
@@ -273,7 +277,8 @@ namespace FactoryManagementSystem.Controllers
                             { nameof(LayoutTransaction.EmployeeBarcode), item?.EmployeeBarcode ?? string.Empty },
                             { nameof(LayoutTransaction.EmployeeName), item?.EmployeeName ?? string.Empty },
                             { nameof(LayoutTransaction.EmployeeGrade), item?.EmployeeGrade ?? string.Empty },
-                            { nameof(LayoutTransaction.Section), section }
+                            { nameof(LayoutTransaction.Section), section },
+                            { nameof(LayoutTransaction.LayoutNo), layoutNo }
                         });
 
                         existingDocs.Remove(existing);
@@ -308,6 +313,7 @@ namespace FactoryManagementSystem.Controllers
 
                             CCId = request.CCId,
                             CCNo = request.CCNo,
+                            LayoutNo = layoutNo,
 
                             OperationId = lm.OperationId,
                             OperationName = lm.OperationName,
@@ -396,7 +402,8 @@ namespace FactoryManagementSystem.Controllers
                         { nameof(LayoutTransaction.EmployeeBarcode), item.EmployeeBarcode ?? string.Empty },
                         { nameof(LayoutTransaction.EmployeeName), item.EmployeeName ?? string.Empty },
                         { nameof(LayoutTransaction.EmployeeGrade), item.EmployeeGrade ?? string.Empty },
-                        { nameof(LayoutTransaction.Section), resolvedSection }
+                        { nameof(LayoutTransaction.Section), resolvedSection },
+                        { nameof(LayoutTransaction.LayoutNo), layoutNo }
                     });
 
                     existingDocs.Remove(existing);
@@ -490,6 +497,8 @@ namespace FactoryManagementSystem.Controllers
 
             return sectionLookup;
         }
+
+        private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
     }
 }
 

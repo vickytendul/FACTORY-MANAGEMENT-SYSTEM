@@ -20,7 +20,8 @@ namespace FactoryManagementSystem.Controllers
         public async Task<IActionResult> Get(
             int lineId,
             DateTime date,
-            int? ccId = null)
+            int? ccId = null,
+            int? layoutNo = null)
         {
             try
             {
@@ -38,6 +39,7 @@ namespace FactoryManagementSystem.Controllers
                     {
                         var layout = activeLayoutSnapshot.Documents.First().ConvertTo<LayoutTransaction>();
                         ccId = layout.CCId;
+                        layoutNo ??= NormalizeLayoutNo(layout.LayoutNo);
                     }
                     else
                     {
@@ -75,6 +77,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var layoutItems = layoutSnapshot.Documents
                     .Select(d => d.ConvertTo<LayoutTransaction>())
+                    .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                     .ToList();
 
                 if (layoutItems.Count == 0)
@@ -104,6 +107,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var attendanceItems = attendanceSnapshot.Documents
                     .Select(d => d.ConvertTo<AttendanceTransaction>())
+                    .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                     .ToList();
 
                 // Build EmployeeCode → Section map from layout transactions
@@ -211,5 +215,7 @@ namespace FactoryManagementSystem.Controllers
                 });
             }
         }
+
+        private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
     }
 }

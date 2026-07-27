@@ -66,7 +66,8 @@ namespace FactoryManagementSystem.Controllers
         public async Task<IActionResult> Get(
             int lineId,
             DateTime attendanceDate,
-            int? ccId = null)
+            int? ccId = null,
+            int? layoutNo = null)
         {
             try
             {
@@ -84,6 +85,7 @@ namespace FactoryManagementSystem.Controllers
                     {
                         var layout = layoutSnapshot.Documents.First().ConvertTo<LayoutTransaction>();
                         ccId = layout.CCId;
+                        layoutNo ??= NormalizeLayoutNo(layout.LayoutNo);
                     }
                     else
                     {
@@ -107,7 +109,7 @@ namespace FactoryManagementSystem.Controllers
                     var item = doc.ConvertTo<AttendanceTransaction>();
                     item.FirestoreId = doc.Id;
                     return item;
-                }).ToList();
+                }).Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value).ToList();
 
                 return Ok(data);
             }
@@ -125,19 +127,22 @@ namespace FactoryManagementSystem.Controllers
         {
             foreach (var item in request)
             {
+                item.LayoutNo = NormalizeLayoutNo(item.LayoutNo);
                 var normalizedDate = DateTime.SpecifyKind(item.AttendanceDate.Date, DateTimeKind.Utc);
 
-                var existing = await _firestore.AttendanceTransactions
+                var existingSnapshot = await _firestore.AttendanceTransactions
                     .WhereEqualTo(nameof(AttendanceTransaction.LineId), item.LineId)
                     .WhereEqualTo(nameof(AttendanceTransaction.CCId), item.CCId)
                     .WhereEqualTo(nameof(AttendanceTransaction.EmployeeCode), item.EmployeeCode)
                     .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), normalizedDate)
-                    .Limit(1)
                     .GetSnapshotAsync();
+                var existing = existingSnapshot.Documents
+                    .Where(d => NormalizeLayoutNo(d.ConvertTo<AttendanceTransaction>().LayoutNo) == item.LayoutNo)
+                    .ToList();
 
-                if (existing.Documents.Any())
+                if (existing.Any())
                 {
-                    var doc = existing.Documents.First();
+                    var doc = existing.First();
                     var docRef = _firestore.AttendanceTransactions.Document(doc.Id);
 
                     var updates = new Dictionary<string, object>
@@ -146,6 +151,7 @@ namespace FactoryManagementSystem.Controllers
                         { nameof(AttendanceTransaction.ReplacementEmployeeCode), item.ReplacementEmployeeCode },
                         { nameof(AttendanceTransaction.ReplacementEmployeeBarcode), item.ReplacementEmployeeBarcode },
                         { nameof(AttendanceTransaction.ReplacementEmployeeName), item.ReplacementEmployeeName },
+                        { nameof(AttendanceTransaction.LayoutNo), item.LayoutNo },
                         { nameof(AttendanceTransaction.MarkedDateTime), DateTime.UtcNow },
                         { nameof(AttendanceTransaction.MarkedBy), "Supervisor" }
                     };
@@ -166,5 +172,7 @@ namespace FactoryManagementSystem.Controllers
                 }
             }
         }
+
+        private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
     }
 }

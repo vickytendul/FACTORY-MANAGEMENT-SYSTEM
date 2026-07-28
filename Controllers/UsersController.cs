@@ -41,8 +41,8 @@ namespace FactoryManagementSystem.Controllers
             if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
                 return BadRequest(new { Success = false, Message = "Username and password are required." });
 
-            if (request.Role != "Admin" && request.Role != "Supervisor")
-                return BadRequest(new { Success = false, Message = "Role must be Admin or Supervisor." });
+            if (request.Role != "Admin" && request.Role != "Supervisor" && request.Role != "IE")
+                return BadRequest(new { Success = false, Message = "Role must be Admin, Supervisor, or IE." });
 
             var username = request.Username.Trim();
             var docRef = _firestore.Users.Document(username);

@@ -68,10 +68,15 @@ namespace FactoryManagementSystem.Controllers
                 var tailorPresent = attendance.Count(x => IsPresent(x) && IsTailor(x));
                 var tailorAbsent = attendance.Count(x => IsAbsent(x) && IsTailor(x));
 
-                var outputSnapshot = await _firestore.OutputTransactions.GetSnapshotAsync();
+                // Query the selected month directly. Previously this loaded every
+                // output document and filtered it in memory, so read cost grew
+                // with the entire history of the factory.
+                var outputSnapshot = await _firestore.OutputTransactions
+                    .WhereGreaterThanOrEqualTo(nameof(OutputTransaction.OutputDate), monthStart)
+                    .WhereLessThan(nameof(OutputTransaction.OutputDate), monthEnd)
+                    .GetSnapshotAsync();
                 var monthOutputs = outputSnapshot.Documents
                     .Select(d => d.ConvertTo<OutputTransaction>())
-                    .Where(x => x.OutputDate >= monthStart && x.OutputDate < monthEnd)
                     .ToList();
                 var todayOutputs = monthOutputs.Where(x => x.OutputDate.Date == selectedDate.Date).ToList();
                 var earnedMinutes = todayOutputs.Sum(x => x.Output * (ccById.TryGetValue(x.CCId, out var cc) ? cc.SAM : 0));

@@ -2,6 +2,7 @@ using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -177,6 +178,7 @@ namespace FactoryManagementSystem.Controllers
         }
 
         // POST: api/Employees
+        [Authorize(Roles = "Admin")]
         [HttpPost]
         public async Task<IActionResult> AddEmployee([FromBody] EmployeeMaster employee)
         {
@@ -248,6 +250,7 @@ namespace FactoryManagementSystem.Controllers
         }
 
         // PUT: api/Employees/5
+        [Authorize(Roles = "Admin")]
         [HttpPut("{id}")]
         public async Task<IActionResult> UpdateEmployee(int id, [FromBody] EmployeeMaster employee)
         {
@@ -323,6 +326,7 @@ namespace FactoryManagementSystem.Controllers
         }
 
         // PATCH: api/Employees/4/toggle-status
+        [Authorize(Roles = "Admin")]
         [HttpPatch("{id}/toggle-status")]
         public async Task<IActionResult> ToggleStatus(int id)
         {

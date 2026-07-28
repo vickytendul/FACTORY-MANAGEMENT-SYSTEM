@@ -4,7 +4,11 @@ using FirebaseAdmin;
 using Google.Apis.Auth.OAuth2;
 using Google.Cloud.Firestore;
 using Google.Cloud.Firestore.V1;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc.Authorization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -57,10 +61,40 @@ builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<LineStrengthReportService>();
 
 // =====================================================
+// Authentication / Authorization
+// =====================================================
+
+var jwtTokenService = new JwtTokenService(builder.Configuration, builder.Environment);
+builder.Services.AddSingleton(jwtTokenService);
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = jwtTokenService.Issuer,
+            ValidateAudience = true,
+            ValidAudience = jwtTokenService.Audience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = jwtTokenService.SigningKey,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(2)
+        };
+    });
+
+builder.Services.AddAuthorization();
+
+// =====================================================
 // Services
 // =====================================================
 
-builder.Services.AddControllers();
+// Every endpoint requires a valid JWT by default; controllers/actions opt
+// out with [AllowAnonymous] (e.g. AuthController's login/bootstrap).
+builder.Services.AddControllers(options =>
+{
+    options.Filters.Add(new AuthorizeFilter());
+});
 
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseSqlServer(
@@ -92,6 +126,7 @@ app.UseHttpsRedirection();
 
 app.UseCors("AllowFlutter");
 
+app.UseAuthentication();
 app.UseAuthorization();
 
 // Test Endpoint

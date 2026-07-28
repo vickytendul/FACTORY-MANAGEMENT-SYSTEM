@@ -1,6 +1,7 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -74,6 +75,7 @@ namespace FactoryManagementSystem.Controllers
             });
         }
 
+        [Authorize(Roles = "Admin")]
         [HttpPost]
         public async Task<IActionResult> CreateCC([FromBody] CCRequest request)
         {
@@ -125,6 +127,7 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        [Authorize(Roles = "Admin")]
         [HttpPut("{ccId}")]
         public async Task<IActionResult> UpdateCC(int ccId, [FromBody] CCRequest request)
         {
@@ -169,6 +172,7 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        [Authorize(Roles = "Admin")]
         [HttpPatch("{ccId}/toggle-status")]
         public async Task<IActionResult> ToggleStatus(int ccId)
         {
@@ -198,6 +202,7 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        [Authorize(Roles = "Admin")]
         [HttpPut("{ccId}/sam")]
         public async Task<IActionResult> UpdateSam(int ccId, [FromBody] SamUpdateRequest request)
         {

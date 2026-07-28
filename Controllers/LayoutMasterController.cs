@@ -1,6 +1,7 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -31,6 +32,7 @@ namespace FactoryManagementSystem.Controllers
             return Ok(layout);
         }
 
+        [Authorize(Roles = "Admin")]
         [HttpPost("copy")]
         public async Task<IActionResult> CopyLayout(int ccId, int sourceLayoutNo, int targetLayoutNo)
         {
@@ -67,6 +69,7 @@ namespace FactoryManagementSystem.Controllers
             return Ok(new { Success = true, LayoutNo = targetLayoutNo });
         }
 
+        [Authorize(Roles = "Admin")]
         [HttpDelete]
         public async Task<IActionResult> DeleteLayout(int ccId, int layoutNo)
         {
@@ -122,6 +125,7 @@ namespace FactoryManagementSystem.Controllers
         /// One-time repair for LayoutMaster documents created before operation
         /// IDs were generated. Existing valid IDs are never changed.
         /// </summary>
+        [Authorize(Roles = "Admin")]
         [HttpPost("migrate-operation-ids")]
         public async Task<IActionResult> MigrateMissingOperationIds()
         {
@@ -192,6 +196,7 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        [Authorize(Roles = "Admin")]
         [HttpPut("batch")]
         public async Task<IActionResult> BatchSave(int ccId, int layoutNo = 1, [FromBody] List<LayoutMasterSaveRequest>? items = null)
         {

@@ -1,6 +1,7 @@
 ﻿using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 
@@ -8,6 +9,7 @@ namespace FactoryManagementSystem.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
+    [Authorize(Roles = "Admin")]
     public class LayoutMasterMigrationController : ControllerBase
     {
         private readonly ApplicationDbContext _context;

@@ -1,10 +1,12 @@
 using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize(Roles = "Admin")]
 public class DuplicateAnalysisController : ControllerBase
 {
     private readonly FirestoreDb _firestore;

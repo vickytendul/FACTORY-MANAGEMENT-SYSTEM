@@ -41,6 +41,7 @@ namespace FactoryManagementSystem.Services
         public CollectionReference Summary => _db.Collection("Summary");
         public CollectionReference SkillTransactions => _db.Collection("SkillTransactions");
         public CollectionReference OperationIdLookup => _db.Collection("OperationIdLookup");
+        public CollectionReference Users => _db.Collection("Users");
 
         // ─── Cached reference data ───────────────────────────────────────
         // Zones/Lines/CCs/LayoutMasters change rarely but were being re-read

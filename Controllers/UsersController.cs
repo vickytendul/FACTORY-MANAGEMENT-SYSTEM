@@ -39,21 +39,34 @@ namespace FactoryManagementSystem.Controllers
         public async Task<IActionResult> CreateUser([FromBody] CreateUserRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
-                return BadRequest(new { Success = false, Message = "Username and password are required." });
+                return BadRequest(new { Success = false, Message = "Employee Code and password are required." });
 
             if (request.Role != "Admin" && request.Role != "Supervisor" && request.Role != "IE")
                 return BadRequest(new { Success = false, Message = "Role must be Admin, Supervisor, or IE." });
 
-            var username = request.Username.Trim();
-            var docRef = _firestore.Users.Document(username);
+            var employeeCode = request.Username.Trim();
+
+            // Login is tied to an existing employee record, not an arbitrary
+            // username, so every account maps 1:1 to a real Employee Code.
+            var employeeSnapshot = await _firestore.EmployeeMasters
+                .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), employeeCode)
+                .Limit(1)
+                .GetSnapshotAsync();
+            var employeeDoc = employeeSnapshot.Documents.FirstOrDefault();
+            if (employeeDoc == null)
+                return BadRequest(new { Success = false, Message = "No employee found with this Employee Code." });
+
+            var employee = employeeDoc.ConvertTo<EmployeeMaster>();
+
+            var docRef = _firestore.Users.Document(employeeCode);
             var existing = await docRef.GetSnapshotAsync();
             if (existing.Exists)
-                return BadRequest(new { Success = false, Message = "Username already exists." });
+                return BadRequest(new { Success = false, Message = "This employee already has a login." });
 
             var user = new AppUser
             {
-                Username = username,
-                DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? username : request.DisplayName,
+                Username = employeeCode,
+                DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? employee.EmployeeName : request.DisplayName,
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
                 Role = request.Role,
                 IsActive = true,

@@ -23,7 +23,7 @@ namespace FactoryManagementSystem.Controllers
         public async Task<IActionResult> Login([FromBody] LoginRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
-                return BadRequest(new { Success = false, Message = "Username and password are required." });
+                return BadRequest(new { Success = false, Message = "Employee Code and password are required." });
 
             var snapshot = await _firestore.Users
                 .WhereEqualTo(nameof(AppUser.Username), request.Username.Trim())
@@ -32,7 +32,7 @@ namespace FactoryManagementSystem.Controllers
 
             var doc = snapshot.Documents.FirstOrDefault();
             if (doc == null)
-                return Unauthorized(new { Success = false, Message = "Invalid username or password." });
+                return Unauthorized(new { Success = false, Message = "Invalid Employee Code or password." });
 
             var user = doc.ConvertTo<AppUser>();
 
@@ -40,7 +40,7 @@ namespace FactoryManagementSystem.Controllers
                 return Unauthorized(new { Success = false, Message = "This account has been deactivated." });
 
             if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
-                return Unauthorized(new { Success = false, Message = "Invalid username or password." });
+                return Unauthorized(new { Success = false, Message = "Invalid Employee Code or password." });
 
             var token = _jwt.GenerateToken(user);
 

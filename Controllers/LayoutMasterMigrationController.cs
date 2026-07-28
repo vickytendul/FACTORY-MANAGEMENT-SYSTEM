@@ -35,6 +35,8 @@ namespace FactoryManagementSystem.Controllers
                         .SetAsync(item);
                 }
 
+                _firestore.InvalidateLayoutMastersCache();
+
                 return Ok(new
                 {
                     Success = true,

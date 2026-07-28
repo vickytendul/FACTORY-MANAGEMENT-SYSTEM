@@ -235,12 +235,9 @@ namespace FactoryManagementSystem.Controllers
             // ─── SAVE PATH ──────────────────────────────────────────────
             if (isNew)
             {
-                var lmSnapshot = await _firestore.LayoutMasters
-                    .WhereEqualTo(nameof(LayoutMaster.CCId), request.CCId)
-                    .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
-                    .GetSnapshotAsync();
+                var lmRecords = await _firestore.GetActiveLayoutMastersByCcAsync(request.CCId);
 
-                if (!lmSnapshot.Documents.Any())
+                if (!lmRecords.Any())
                     throw new InvalidOperationException("No layout records found for this CC.");
 
                 var itemLookup = new Dictionary<int, LayoutTransactionItem>();
@@ -250,8 +247,13 @@ namespace FactoryManagementSystem.Controllers
 
                 await ValidateNoCrossLineDuplicatesAsync(request.Items, request.LineId, request.CCId);
 
-                var layoutMasters = lmSnapshot.Documents
-                    .Select(d => d.ConvertTo<LayoutMaster>())
+                // Batched: resolve every employee code this sync could touch in
+                // one round trip instead of one Firestore read per row.
+                var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(
+                    request.Items.Select(i => i.EmployeeCode)
+                        .Concat(existingDocs.Select(e => e.Transaction.EmployeeCode)));
+
+                var layoutMasters = lmRecords
                     .Where(x => NormalizeLayoutNo(x.LayoutNo) == layoutNo)
                     .OrderBy(lm => lm.DisplayOrder)
                     .ThenBy(lm => lm.SNo)
@@ -287,13 +289,13 @@ namespace FactoryManagementSystem.Controllers
                         {
                             if (!string.IsNullOrWhiteSpace(oldCode))
                             {
-                                var oldEmp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                                var oldEmp = employeeLookup.GetValueOrDefault(oldCode);
                                 if (oldEmp != null)
                                     await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation, oldCode);
                             }
                             if (!string.IsNullOrWhiteSpace(newCode))
                             {
-                                var newEmp = await _summaryService.FindEmployeeByCodeAsync(newCode);
+                                var newEmp = employeeLookup.GetValueOrDefault(newCode);
                                 if (newEmp != null)
                                     await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation, newCode);
                             }
@@ -336,7 +338,7 @@ namespace FactoryManagementSystem.Controllers
 
                         if (!string.IsNullOrWhiteSpace(item?.EmployeeCode))
                         {
-                            var emp = await _summaryService.FindEmployeeByCodeAsync(item.EmployeeCode);
+                            var emp = employeeLookup.GetValueOrDefault(item.EmployeeCode);
                             if (emp != null)
                                 await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation, item.EmployeeCode);
                         }
@@ -358,7 +360,7 @@ namespace FactoryManagementSystem.Controllers
                             { nameof(LayoutTransaction.EmployeeGrade), string.Empty }
                         });
 
-                        var emp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                        var emp = employeeLookup.GetValueOrDefault(oldCode);
                         if (emp != null)
                             await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, oldCode);
                     }
@@ -384,6 +386,12 @@ namespace FactoryManagementSystem.Controllers
             var sectionLookup = await BuildSectionLookupAsync(request.Items);
 
             await ValidateNoCrossLineDuplicatesAsync(request.Items, request.LineId, request.CCId);
+
+            // Batched: resolve every employee code this sync could touch in one
+            // round trip instead of one Firestore read per row.
+            var updateEmployeeLookup = await _summaryService.FindEmployeesByCodesAsync(
+                request.Items.Select(i => i.EmployeeCode)
+                    .Concat(existingDocs.Select(e => e.Transaction.EmployeeCode)));
 
             foreach (var item in request.Items)
             {
@@ -412,13 +420,13 @@ namespace FactoryManagementSystem.Controllers
                     {
                         if (!string.IsNullOrWhiteSpace(oldCode))
                         {
-                            var oldEmp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                            var oldEmp = updateEmployeeLookup.GetValueOrDefault(oldCode);
                             if (oldEmp != null)
                                 await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation, oldCode);
                         }
                         if (!string.IsNullOrWhiteSpace(newCode))
                         {
-                            var newEmp = await _summaryService.FindEmployeeByCodeAsync(newCode);
+                            var newEmp = updateEmployeeLookup.GetValueOrDefault(newCode);
                             if (newEmp != null)
                                 await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation, newCode);
                         }
@@ -441,36 +449,49 @@ namespace FactoryManagementSystem.Controllers
                         { nameof(LayoutTransaction.EmployeeGrade), string.Empty }
                     });
 
-                    var emp = await _summaryService.FindEmployeeByCodeAsync(oldCode);
+                    var emp = updateEmployeeLookup.GetValueOrDefault(oldCode);
                     if (emp != null)
                         await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, oldCode);
                 }
             }
         }
 
+        // Batched: instead of one Firestore query per employee code (N reads for
+        // an N-row layout), fetch all active allocations for the requested codes
+        // in chunks of 30 (Firestore's WhereIn limit) and check them in memory.
         private async Task ValidateNoCrossLineDuplicatesAsync(List<LayoutTransactionItem> items, int lineId, int ccId)
         {
             var processedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var codes = new List<string>();
             foreach (var item in items.Where(i => !string.IsNullOrWhiteSpace(i.EmployeeCode)))
             {
                 if (!processedCodes.Add(item.EmployeeCode))
                     throw new InvalidOperationException($"Duplicate employee {item.EmployeeCode} in request.");
+                codes.Add(item.EmployeeCode);
+            }
 
-                var existingEmployee = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode)
+            if (codes.Count == 0) return;
+
+            const int chunkSize = 30;
+            for (int i = 0; i < codes.Count; i += chunkSize)
+            {
+                var chunk = codes.Skip(i).Take(chunkSize).ToList();
+                var snapshot = await _firestore.LayoutTransactions
+                    .WhereIn(nameof(LayoutTransaction.EmployeeCode), chunk)
                     .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .Limit(1)
                     .GetSnapshotAsync();
 
-                if (existingEmployee.Documents.Any())
+                foreach (var doc in snapshot.Documents)
                 {
-                    var empDoc = existingEmployee.Documents.First().ConvertTo<LayoutTransaction>();
-                    if (empDoc.LineId != lineId || empDoc.CCId != ccId)
-                        throw new InvalidOperationException($"Employee {item.EmployeeCode} is already allocated.");
+                    var tx = doc.ConvertTo<LayoutTransaction>();
+                    if (tx.LineId != lineId || tx.CCId != ccId)
+                        throw new InvalidOperationException($"Employee {tx.EmployeeCode} is already allocated.");
                 }
             }
         }
 
+        // Batched: fetch every referenced LayoutMaster in chunks of 30 instead of
+        // one query per LayoutMasterId (N reads for an N-row layout).
         private async Task<Dictionary<int, string>> BuildSectionLookupAsync(List<LayoutTransactionItem> items)
         {
             var layoutMasterIds = items
@@ -480,20 +501,25 @@ namespace FactoryManagementSystem.Controllers
                 .ToList();
 
             var sectionLookup = new Dictionary<int, string>();
+            if (layoutMasterIds.Count == 0) return sectionLookup;
 
-            foreach (var lmId in layoutMasterIds)
+            const int chunkSize = 30;
+            for (int i = 0; i < layoutMasterIds.Count; i += chunkSize)
             {
-                var lmSnap = await _firestore.LayoutMasters
-                    .WhereEqualTo(nameof(LayoutMaster.Id), lmId)
-                    .Limit(1)
+                var chunk = layoutMasterIds.Skip(i).Take(chunkSize).Cast<object>().ToList();
+                var snapshot = await _firestore.LayoutMasters
+                    .WhereIn(nameof(LayoutMaster.Id), chunk)
                     .GetSnapshotAsync();
-                var lmDoc = lmSnap.Documents.FirstOrDefault();
-                sectionLookup[lmId] = lmDoc != null
-                    ? (string.IsNullOrWhiteSpace(lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
-                        ? "MAIN"
-                        : lmDoc.GetValue<string>(nameof(LayoutMaster.Section)))
-                    : "MAIN";
+
+                foreach (var doc in snapshot.Documents)
+                {
+                    var lm = doc.ConvertTo<LayoutMaster>();
+                    sectionLookup[lm.Id] = string.IsNullOrWhiteSpace(lm.Section) ? "MAIN" : lm.Section;
+                }
             }
+
+            foreach (var id in layoutMasterIds)
+                sectionLookup.TryAdd(id, "MAIN");
 
             return sectionLookup;
         }

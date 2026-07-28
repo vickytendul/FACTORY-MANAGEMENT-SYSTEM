@@ -234,6 +234,7 @@ namespace FactoryManagementSystem.Controllers
                     .SetAsync(employee);
 
                 await _summaryService.OnEmployeeAdded(employee.Department, employee.Designation);
+                _firestore.InvalidateEmployeesCache();
                 return Ok(employee);
             }
             catch (Exception ex)
@@ -304,6 +305,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var oldEmployee = existingDoc.ConvertTo<EmployeeMaster>();
                 await _summaryService.OnEmployeeUpdated(oldEmployee.Department, oldEmployee.Designation, employee.Department, employee.Designation);
+                _firestore.InvalidateEmployeesCache();
                 return Ok(new
                 {
                     Success = true,
@@ -349,6 +351,7 @@ namespace FactoryManagementSystem.Controllers
                 await document.Reference.SetAsync(employee);
 
                 await _summaryService.OnEmployeeToggled(employee.Department, employee.Designation, !employee.IsActive, employee.IsActive, employee.EmployeeCode);
+                _firestore.InvalidateEmployeesCache();
                 return Ok(new
                 {
                     Success = true,

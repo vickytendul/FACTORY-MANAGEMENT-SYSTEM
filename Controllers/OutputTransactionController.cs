@@ -23,13 +23,9 @@ namespace FactoryManagementSystem.Controllers
             {
                 var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
 
-                // OPTIMIZED: Query only active lines (not entire collection if there are inactive ones)
-                var lineSnapshot = await _firestore.Lines
-                    .WhereEqualTo(nameof(Line.IsActive), true)
-                    .GetSnapshotAsync();
-                var lines = lineSnapshot.Documents
-                    .Select(d => d.ConvertTo<Line>())
-                    .ToList();
+                // CACHED: Zones/Lines/CCs rarely change; avoids re-reading them from
+                // Firestore on every Output Entry screen load.
+                var lines = await _firestore.GetActiveLinesAsync();
 
                 // OPTIMIZED: Query only active layout transactions (not entire collection)
                 var layoutSnapshot = await _firestore.LayoutTransactions
@@ -39,12 +35,7 @@ namespace FactoryManagementSystem.Controllers
                     .Select(d => d.ConvertTo<LayoutTransaction>())
                     .ToList();
 
-                // OPTIMIZED: Query only active CCs (not entire collection)
-                var ccSnapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.IsActive), true)
-                    .GetSnapshotAsync();
-                var ccLookup = ccSnapshot.Documents
-                    .Select(d => d.ConvertTo<CC>())
+                var ccLookup = (await _firestore.GetActiveCCsAsync())
                     .ToDictionary(x => x.CCId, x => x.CCNo);
 
                 // Build CC lookup per line from active allocations
@@ -119,17 +110,16 @@ namespace FactoryManagementSystem.Controllers
                 }
                 else
                 {
-                    // Insert - OPTIMIZED: Use a targeted query to find max ID
-                    // We still need to read for max, but this is unavoidable for auto-increment
-                    var allSnapshot = await _firestore.OutputTransactions.GetSnapshotAsync();
-                    var maxId = allSnapshot.Documents
-                        .Select(d => d.ConvertTo<OutputTransaction>().OutputId)
-                        .DefaultIfEmpty(0)
-                        .Max();
+                    // Transactional counter: 1 read + 1 write instead of scanning
+                    // the whole (unbounded, ever-growing) OutputTransactions collection.
+                    var nextId = await _firestore.GetNextSequentialIdAsync(
+                        "OutputTransactionCounter",
+                        _firestore.OutputTransactions,
+                        d => d.ConvertTo<OutputTransaction>().OutputId);
 
                     var newRecord = new OutputTransaction
                     {
-                        OutputId = maxId + 1,
+                        OutputId = nextId,
                         LineId = request.LineId,
                         CCId = request.CCId,
                         Output = request.Output,

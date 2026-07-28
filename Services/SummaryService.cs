@@ -124,6 +124,39 @@ namespace FactoryManagementSystem.Services
             return snapshot.Documents.FirstOrDefault()?.ConvertTo<EmployeeMaster>();
         }
 
+        // Batched version of FindEmployeeByCodeAsync: fetches every code in one
+        // (chunked) round trip instead of one Firestore read per employee code,
+        // for callers that need to resolve many codes in a single request (e.g.
+        // syncing a whole layout allocation).
+        public async Task<Dictionary<string, EmployeeMaster>> FindEmployeesByCodesAsync(IEnumerable<string> employeeCodes)
+        {
+            var codes = employeeCodes
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var result = new Dictionary<string, EmployeeMaster>(StringComparer.OrdinalIgnoreCase);
+            if (codes.Count == 0) return result;
+
+            const int chunkSize = 30; // Firestore WhereIn limit
+            for (int i = 0; i < codes.Count; i += chunkSize)
+            {
+                var chunk = codes.Skip(i).Take(chunkSize).ToList();
+                var snapshot = await _firestore.EmployeeMasters
+                    .WhereIn(nameof(EmployeeMaster.EmployeeCode), chunk)
+                    .GetSnapshotAsync();
+
+                foreach (var doc in snapshot.Documents)
+                {
+                    var emp = doc.ConvertTo<EmployeeMaster>();
+                    if (!string.IsNullOrWhiteSpace(emp.EmployeeCode))
+                        result[emp.EmployeeCode] = emp;
+                }
+            }
+
+            return result;
+        }
+
         public async Task RecalculateAsync()
         {
             var empSnapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();

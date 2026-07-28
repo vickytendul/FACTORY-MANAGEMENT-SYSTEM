@@ -26,10 +26,7 @@ namespace FactoryManagementSystem.Controllers
                 var monthStart = new DateTime(selectedDate.Year, selectedDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
                 var monthEnd = monthStart.AddMonths(1);
 
-                var ccSnapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.IsActive), true)
-                    .GetSnapshotAsync();
-                var ccs = ccSnapshot.Documents.Select(d => d.ConvertTo<CC>()).ToList();
+                var ccs = await _firestore.GetActiveCCsAsync();
                 var ccById = ccs.ToDictionary(x => x.CCId);
 
                 var layoutSnapshot = await _firestore.LayoutTransactions
@@ -83,8 +80,11 @@ namespace FactoryManagementSystem.Controllers
                 var owe = totalPresent == 0 ? 0 : earnedMinutes / (totalPresent * WorkingMinutesPerDay) * 100;
                 var efficiency = tailorPresent == 0 ? 0 : earnedMinutes / (tailorPresent * WorkingMinutesPerDay) * 100;
 
-                var employeeSnapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
-                var employees = employeeSnapshot.Documents.Select(d => d.ConvertTo<EmployeeMaster>()).ToList();
+                // Attrition needs both active AND inactive tailors (inactive count
+                // vs. total), so this can't be filtered server-side by IsActive.
+                // Cached instead: EmployeeMasters changes rarely relative to how
+                // often the dashboard is loaded.
+                var employees = await _firestore.GetAllEmployeesAsync();
                 var tailors = employees.Where(x => (x.Designation ?? string.Empty).Contains("TAILOR", StringComparison.OrdinalIgnoreCase)).ToList();
 
                 var skillSnapshot = await _firestore.SkillTransactions

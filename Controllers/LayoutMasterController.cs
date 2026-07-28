@@ -21,15 +21,11 @@ namespace FactoryManagementSystem.Controllers
 
         {
            
-            var snapshot = await _firestore.LayoutMasters
-                .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
-                .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
-                .OrderBy(nameof(LayoutMaster.DisplayOrder))
-                .GetSnapshotAsync();
+            var records = await _firestore.GetActiveLayoutMastersByCcAsync(ccId);
 
-            var layout = snapshot.Documents
-                .Select(x => x.ConvertTo<LayoutMaster>())
+            var layout = records
                 .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
+                .OrderBy(x => x.DisplayOrder)
                 .ToList();
 
             return Ok(layout);
@@ -67,6 +63,7 @@ namespace FactoryManagementSystem.Controllers
             }
             batch.Set(counterRef, new { Value = nextId + source.Count - 1 }, SetOptions.MergeAll);
             await batch.CommitAsync();
+            _firestore.InvalidateLayoutMastersCache();
             return Ok(new { Success = true, LayoutNo = targetLayoutNo });
         }
 
@@ -89,6 +86,7 @@ namespace FactoryManagementSystem.Controllers
             var batch = _firestore.Db.StartBatch();
             foreach (var doc in docs) batch.Delete(doc.Reference);
             await batch.CommitAsync();
+            _firestore.InvalidateLayoutMastersCache();
             return Ok(new { Success = true });
         }
 
@@ -97,13 +95,9 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.LayoutMasters
-                    .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
-                    .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
-                    .GetSnapshotAsync();
+                var records = await _firestore.GetActiveLayoutMastersByCcAsync(ccId);
 
-                var ops = snapshot.Documents
-                    .Select(d => d.ConvertTo<LayoutMaster>())
+                var ops = records
                     .GroupBy(x => new { x.OperationId, x.OperationName, x.MachineType, x.OperationGrade, x.Section })
                     .Select(g => g.First())
                     .Select(x => new
@@ -182,6 +176,8 @@ namespace FactoryManagementSystem.Controllers
 
                     await batch.CommitAsync();
                 }
+
+                _firestore.InvalidateLayoutMastersCache();
 
                 return Ok(new
                 {
@@ -312,6 +308,7 @@ namespace FactoryManagementSystem.Controllers
             }
 
                 await batch.CommitAsync();
+                _firestore.InvalidateLayoutMastersCache();
 
                 return Ok(new { Success = true, Message = "Layout saved successfully." });
             }

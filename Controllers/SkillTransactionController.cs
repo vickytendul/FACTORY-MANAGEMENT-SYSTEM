@@ -118,15 +118,14 @@ namespace FactoryManagementSystem.Controllers
                 }
                 else
                 {
-                    var allSnapshot = await _firestore.SkillTransactions.GetSnapshotAsync();
-                    var maxId = allSnapshot.Documents
-                        .Select(d => d.ConvertTo<SkillTransaction>().TransactionId)
-                        .DefaultIfEmpty(0)
-                        .Max();
+                    var nextId = await _firestore.GetNextSequentialIdAsync(
+                        "SkillTransactionCounter",
+                        _firestore.SkillTransactions,
+                        d => d.ConvertTo<SkillTransaction>().TransactionId);
 
                     var newRecord = new SkillTransaction
                     {
-                        TransactionId = maxId + 1,
+                        TransactionId = nextId,
                         OperationId = request.OperationId,
                         EmployeeCode = request.EmployeeCode,
                         OperationName = request.OperationName,

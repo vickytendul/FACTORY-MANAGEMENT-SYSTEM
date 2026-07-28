@@ -51,6 +51,7 @@ builder.Services.AddSingleton(provider =>
     return FirestoreDb.Create("factorymanagementsystem-1ea9a", client);
 });
 
+builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<FirestoreService>();
 builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<LineStrengthReportService>();

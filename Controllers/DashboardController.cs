@@ -17,8 +17,20 @@ namespace FactoryManagementSystem.Controllers
             _firestore = firestore;
         }
 
+        // Temporarily disabled pending a rework of the whole Dashboard feature.
+        // Returns immediately so it never touches Firestore. To re-enable,
+        // rename GetOriginal back to Get and delete this stub.
         [HttpGet]
-        public async Task<IActionResult> Get(DateTime? date = null)
+        public Task<IActionResult> Get(DateTime? date = null)
+        {
+            return Task.FromResult<IActionResult>(StatusCode(503, new
+            {
+                Success = false,
+                Message = "Dashboard is temporarily disabled."
+            }));
+        }
+
+        private async Task<IActionResult> GetOriginal(DateTime? date = null)
         {
             try
             {

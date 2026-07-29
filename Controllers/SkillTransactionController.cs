@@ -319,6 +319,70 @@ namespace FactoryManagementSystem.Controllers
             public int? CurrentLayoutMasterId { get; set; }
         }
 
+        // Every distinct employee with an active skill record, plus where
+        // they're currently allocated (if anywhere). Powers the "Operators"
+        // tab on the Skill Update page.
+        [HttpGet("operators-summary")]
+        public async Task<IActionResult> GetOperatorsSummary()
+        {
+            try
+            {
+                var skillSnapshot = await _firestore.SkillTransactions
+                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
+                    .GetSnapshotAsync();
+
+                var byEmployee = skillSnapshot.Documents
+                    .Select(d => d.ConvertTo<SkillTransaction>())
+                    .Where(s => !string.IsNullOrWhiteSpace(s.EmployeeCode))
+                    .GroupBy(s => s.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+                if (byEmployee.Count == 0)
+                    return Ok(Array.Empty<object>());
+
+                var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(byEmployee.Keys);
+
+                var layoutSnapshot = await _firestore.LayoutTransactions
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                    .GetSnapshotAsync();
+                var allocationByCode = layoutSnapshot.Documents
+                    .Select(d => d.ConvertTo<LayoutTransaction>())
+                    .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                    .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+                var result = byEmployee.Select(kvp =>
+                {
+                    var code = kvp.Key;
+                    var skills = kvp.Value;
+                    var emp = employeeLookup.GetValueOrDefault(code);
+                    allocationByCode.TryGetValue(code, out var allocation);
+
+                    return new
+                    {
+                        employeeCode = code,
+                        employeeName = emp?.EmployeeName ?? "",
+                        grade = emp?.Grade ?? "",
+                        skillCount = skills.Select(s => s.OperationId).Distinct().Count(),
+                        operationNames = skills.Select(s => s.OperationName).Distinct().OrderBy(n => n).ToList(),
+                        isAllocated = allocation != null,
+                        lineId = allocation?.LineId,
+                        lineName = allocation?.LineName,
+                        ccNo = allocation?.CCNo,
+                        operationName = allocation?.OperationName
+                    };
+                })
+                .OrderBy(x => x.employeeName)
+                .ToList();
+
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         [HttpDelete("{id}")]
         public async Task<IActionResult> Delete(int id)
         {

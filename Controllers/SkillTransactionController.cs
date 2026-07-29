@@ -257,6 +257,12 @@ namespace FactoryManagementSystem.Controllers
                     foreach (var s in skilled)
                     {
                         var isAllocated = allocationByCode.TryGetValue(s.EmployeeCode, out var allocation);
+                        // Only count someone as "busy" when they're doing real MAIN
+                        // production work. Being parked in a non-MAIN slot (e.g. their
+                        // own Super Team/standby section) doesn't block them from
+                        // being suggested as a backup.
+                        var isBusyInMain = isAllocated &&
+                            string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
                         var emp = employeeLookup.GetValueOrDefault(s.EmployeeCode);
 
                         var candidate = new BackupCandidate
@@ -268,7 +274,7 @@ namespace FactoryManagementSystem.Controllers
                             Section = s.Section
                         };
 
-                        if (!isAllocated)
+                        if (!isBusyInMain)
                         {
                             if (string.Equals(s.Section, "Super Team", StringComparison.OrdinalIgnoreCase))
                                 freeSuperTeam.Add(candidate);

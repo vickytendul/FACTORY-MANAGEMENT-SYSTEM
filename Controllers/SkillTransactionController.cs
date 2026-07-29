@@ -10,10 +10,12 @@ namespace FactoryManagementSystem.Controllers
     public class SkillTransactionController : ControllerBase
     {
         private readonly FirestoreService _firestore;
+        private readonly SummaryService _summaryService;
 
-        public SkillTransactionController(FirestoreService firestore)
+        public SkillTransactionController(FirestoreService firestore, SummaryService summaryService)
         {
             _firestore = firestore;
+            _summaryService = summaryService;
         }
 
         [HttpGet]
@@ -200,6 +202,121 @@ namespace FactoryManagementSystem.Controllers
             {
                 return BadRequest(new { Success = false, Message = ex.Message });
             }
+        }
+
+        // Backup-operator suggestions for an absent operation, used by Attendance.
+        // Returns three tiers: free Super Team members skilled for this operation,
+        // free non-Super-Team skilled members (sorted by eligible%), and people
+        // currently allocated to a DIFFERENT operation on the SAME line who also
+        // have the skill (candidates to shift over, vacating their own slot).
+        [HttpGet("backup-candidates")]
+        public async Task<IActionResult> GetBackupCandidates(
+            [FromQuery] int operationId,
+            [FromQuery] int lineId,
+            [FromQuery] string? excludeEmployeeCode = null)
+        {
+            try
+            {
+                var skillSnapshot = await _firestore.SkillTransactions
+                    .WhereEqualTo(nameof(SkillTransaction.OperationId), operationId)
+                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
+                    .GetSnapshotAsync();
+
+                var skilled = skillSnapshot.Documents
+                    .Select(d => d.ConvertTo<SkillTransaction>())
+                    .Where(s => string.IsNullOrWhiteSpace(excludeEmployeeCode) ||
+                                !string.Equals(s.EmployeeCode, excludeEmployeeCode, StringComparison.OrdinalIgnoreCase))
+                    // A person can have more than one skill record for the same
+                    // operation over time; keep only their best one.
+                    .GroupBy(s => s.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g.OrderByDescending(s => s.EligiblePercentage).First())
+                    .ToList();
+
+                var freeSuperTeam = new List<BackupCandidate>();
+                var freeSkilled = new List<BackupCandidate>();
+                var shiftCandidates = new List<BackupCandidate>();
+
+                if (skilled.Count > 0)
+                {
+                    // Every currently-active allocation, factory-wide: tells us who is
+                    // "free" (Priority 1/2) vs. who could be shifted from elsewhere on
+                    // this same line (Priority 3).
+                    var layoutSnapshot = await _firestore.LayoutTransactions
+                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                        .GetSnapshotAsync();
+
+                    var allocationByCode = layoutSnapshot.Documents
+                        .Select(d => d.ConvertTo<LayoutTransaction>())
+                        .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                        .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                        .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+                    var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(
+                        skilled.Select(s => s.EmployeeCode));
+
+                    foreach (var s in skilled)
+                    {
+                        var isAllocated = allocationByCode.TryGetValue(s.EmployeeCode, out var allocation);
+                        var emp = employeeLookup.GetValueOrDefault(s.EmployeeCode);
+
+                        var candidate = new BackupCandidate
+                        {
+                            EmployeeCode = s.EmployeeCode,
+                            EmployeeName = emp?.EmployeeName ?? allocation?.EmployeeName ?? s.EmployeeCode,
+                            Grade = emp?.Grade ?? allocation?.EmployeeGrade ?? s.Grade,
+                            EligiblePercentage = s.EligiblePercentage,
+                            Section = s.Section
+                        };
+
+                        if (!isAllocated)
+                        {
+                            if (string.Equals(s.Section, "Super Team", StringComparison.OrdinalIgnoreCase))
+                                freeSuperTeam.Add(candidate);
+                            else
+                                freeSkilled.Add(candidate);
+                        }
+                        else if (allocation!.LineId == lineId && allocation.OperationId != operationId)
+                        {
+                            candidate.CurrentOperationName = allocation.OperationName;
+                            candidate.CurrentLayoutMasterId = allocation.LayoutMasterId;
+                            shiftCandidates.Add(candidate);
+                        }
+                    }
+                }
+
+                object Project(BackupCandidate c) => new
+                {
+                    employeeCode = c.EmployeeCode,
+                    employeeName = c.EmployeeName,
+                    grade = c.Grade,
+                    eligiblePercentage = c.EligiblePercentage,
+                    section = c.Section,
+                    currentOperationName = c.CurrentOperationName,
+                    currentLayoutMasterId = c.CurrentLayoutMasterId
+                };
+
+                return Ok(new
+                {
+                    freeSuperTeam = freeSuperTeam.OrderByDescending(c => c.EligiblePercentage).Select(Project),
+                    freeSkilled = freeSkilled.OrderByDescending(c => c.EligiblePercentage).Select(Project),
+                    shiftCandidates = shiftCandidates.OrderByDescending(c => c.EligiblePercentage).Select(Project)
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        private class BackupCandidate
+        {
+            public string EmployeeCode { get; set; } = string.Empty;
+            public string EmployeeName { get; set; } = string.Empty;
+            public string Grade { get; set; } = string.Empty;
+            public int EligiblePercentage { get; set; }
+            public string Section { get; set; } = string.Empty;
+            public string? CurrentOperationName { get; set; }
+            public int? CurrentLayoutMasterId { get; set; }
         }
 
         [HttpDelete("{id}")]

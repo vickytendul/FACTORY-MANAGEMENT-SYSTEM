@@ -124,6 +124,44 @@ namespace FactoryManagementSystem.Services
 
         public void InvalidateEmployeesCache() => Interlocked.Increment(ref _employeeVersion);
 
+        // Allocation/skill data changes far more often during a shift than
+        // CCs/Zones/etc., so this uses a much shorter TTL - just enough to
+        // collapse the handful of reads that happen back-to-back within one
+        // user interaction (e.g. the Attendance backup-suggestion cascade,
+        // or repeated Operators-tab refreshes), without serving stale data
+        // across genuinely separate actions.
+        private static readonly TimeSpan LiveDataTtl = TimeSpan.FromSeconds(10);
+        private int _layoutTransactionVersion;
+        private int _skillTransactionVersion;
+
+        public async Task<List<LayoutTransaction>> GetActiveLayoutTransactionsAsync()
+        {
+            var key = $"active_layout_transactions_v{Volatile.Read(ref _layoutTransactionVersion)}";
+            if (_cache.TryGetValue(key, out List<LayoutTransaction>? cached) && cached != null)
+                return cached;
+
+            var snapshot = await LayoutTransactions.WhereEqualTo(nameof(LayoutTransaction.IsActive), true).GetSnapshotAsync();
+            var result = snapshot.Documents.Select(d => d.ConvertTo<LayoutTransaction>()).ToList();
+            _cache.Set(key, result, LiveDataTtl);
+            return result;
+        }
+
+        public void InvalidateLayoutTransactionsCache() => Interlocked.Increment(ref _layoutTransactionVersion);
+
+        public async Task<List<SkillTransaction>> GetActiveSkillTransactionsAsync()
+        {
+            var key = $"active_skill_transactions_v{Volatile.Read(ref _skillTransactionVersion)}";
+            if (_cache.TryGetValue(key, out List<SkillTransaction>? cached) && cached != null)
+                return cached;
+
+            var snapshot = await SkillTransactions.WhereEqualTo(nameof(SkillTransaction.IsActive), true).GetSnapshotAsync();
+            var result = snapshot.Documents.Select(d => d.ConvertTo<SkillTransaction>()).ToList();
+            _cache.Set(key, result, LiveDataTtl);
+            return result;
+        }
+
+        public void InvalidateSkillTransactionsCache() => Interlocked.Increment(ref _skillTransactionVersion);
+
         // Generic transactional auto-increment: 1 read + 1 write instead of
         // scanning the whole collection to compute Max(id) + 1. The first
         // call ever for a given counterDocId falls back to a one-time scan

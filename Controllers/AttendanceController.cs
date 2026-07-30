@@ -125,25 +125,38 @@ namespace FactoryManagementSystem.Controllers
 
         private async Task SyncAttendanceAsync(List<AttendanceTransaction> request, bool isNew)
         {
+            if (request.Count == 0) return;
+
+            foreach (var item in request)
+                item.LayoutNo = NormalizeLayoutNo(item.LayoutNo);
+
+            // Every row in one Save/Update call is the same line+cc+date (one
+            // supervisor marking one line's attendance for one day), so a
+            // single query covers all of them - 1 read instead of one read
+            // per employee.
+            var first = request[0];
+            var normalizedDate = DateTime.SpecifyKind(first.AttendanceDate.Date, DateTimeKind.Utc);
+
+            var existingSnapshot = await _firestore.AttendanceTransactions
+                .WhereEqualTo(nameof(AttendanceTransaction.LineId), first.LineId)
+                .WhereEqualTo(nameof(AttendanceTransaction.CCId), first.CCId)
+                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), normalizedDate)
+                .GetSnapshotAsync();
+
+            var existingByKey = new Dictionary<string, string>();
+            foreach (var doc in existingSnapshot.Documents)
+            {
+                var record = doc.ConvertTo<AttendanceTransaction>();
+                existingByKey[BuildKey(record.EmployeeCode, record.LayoutNo)] = doc.Id;
+            }
+
             foreach (var item in request)
             {
-                item.LayoutNo = NormalizeLayoutNo(item.LayoutNo);
-                var normalizedDate = DateTime.SpecifyKind(item.AttendanceDate.Date, DateTimeKind.Utc);
+                var key = BuildKey(item.EmployeeCode, item.LayoutNo);
 
-                var existingSnapshot = await _firestore.AttendanceTransactions
-                    .WhereEqualTo(nameof(AttendanceTransaction.LineId), item.LineId)
-                    .WhereEqualTo(nameof(AttendanceTransaction.CCId), item.CCId)
-                    .WhereEqualTo(nameof(AttendanceTransaction.EmployeeCode), item.EmployeeCode)
-                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), normalizedDate)
-                    .GetSnapshotAsync();
-                var existing = existingSnapshot.Documents
-                    .Where(d => NormalizeLayoutNo(d.ConvertTo<AttendanceTransaction>().LayoutNo) == item.LayoutNo)
-                    .ToList();
-
-                if (existing.Any())
+                if (existingByKey.TryGetValue(key, out var docId))
                 {
-                    var doc = existing.First();
-                    var docRef = _firestore.AttendanceTransactions.Document(doc.Id);
+                    var docRef = _firestore.AttendanceTransactions.Document(docId);
 
                     var updates = new Dictionary<string, object>
                     {
@@ -172,6 +185,9 @@ namespace FactoryManagementSystem.Controllers
                 }
             }
         }
+
+        private static string BuildKey(string employeeCode, int layoutNo) =>
+            $"{(employeeCode ?? string.Empty).Trim().ToUpperInvariant()}|{NormalizeLayoutNo(layoutNo)}";
 
         private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
     }

@@ -15,21 +15,12 @@ public class LineStrengthReportService
 
     public async Task<List<LineStrengthReportDto>> GetReportAsync(DateTime date)
     {
-        // 1 — Load all active lines (1 read)
-        var linesSnap = await _firestore.Lines
-            .WhereEqualTo(nameof(Line.IsActive), true)
-            .GetSnapshotAsync();
+        // 1 — Load all active lines (cached, shared across consumers)
+        var lines = await _firestore.GetActiveLinesAsync();
 
-        var lines = linesSnap.Documents
-            .Select(d => d.ConvertTo<Line>())
-            .ToList();
-
-        // 2 — Load all active LayoutTransactions (1 read)
-        var txSnap = await _firestore.LayoutTransactions
-            .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-            .GetSnapshotAsync();
-
-        var txDocs = txSnap.Documents.ToList();
+        // 2 — Load all active LayoutTransactions (cached, shared with the
+        // Attendance backup-suggestion flow and Operator Tracking)
+        var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
 
         // Build employee attendance lookup — query once per date (1 read)
         var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
@@ -54,8 +45,8 @@ public class LineStrengthReportService
             .ToDictionary(g => g.Key, g => g.Count());
 
         // 4 — Group transactions by line and compute stats
-        var lineGroups = txDocs
-            .GroupBy(d => d.GetValue<int>("LineId"))
+        var lineGroups = layoutTransactions
+            .GroupBy(d => d.LineId)
             .ToList();
 
         var results = new List<LineStrengthReportDto>();
@@ -66,9 +57,9 @@ public class LineStrengthReportService
             if (line == null) continue;
 
             var firstTx = lineGroup.First();
-            var ccId = firstTx.GetValue<int>("CCId");
-            var ccNo = firstTx.GetValue<string>("CCNo") ?? "";
-            var layoutNo = NormalizeLayoutNo(firstTx.ConvertTo<LayoutTransaction>().LayoutNo);
+            var ccId = firstTx.CCId;
+            var ccNo = firstTx.CCNo ?? "";
+            var layoutNo = NormalizeLayoutNo(firstTx.LayoutNo);
             var plannedTailors = plannedByLayout.GetValueOrDefault((ccId, layoutNo), 0);
 
             // Per-department counters
@@ -82,10 +73,10 @@ public class LineStrengthReportService
 
             foreach (var doc in lineGroup)
             {
-                var empCode = doc.GetValue<string>("EmployeeCode") ?? "";
+                var empCode = doc.EmployeeCode ?? "";
                 if (string.IsNullOrWhiteSpace(empCode)) continue;
 
-                var section = (doc.GetValue<string>("Section") ?? "").Trim().ToUpperInvariant();
+                var section = (doc.Section ?? "").Trim().ToUpperInvariant();
 
                 var isPresent = false;
                 var isAbsent = false;

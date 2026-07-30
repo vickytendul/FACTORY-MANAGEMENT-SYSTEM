@@ -23,21 +23,14 @@ namespace FactoryManagementSystem.Controllers
             {
                 var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
 
-                // All active employees (needed for complete list)
-                var empSnapshot = await _firestore.EmployeeMasters
-                    .WhereEqualTo(nameof(EmployeeMaster.IsActive), true)
-                    .GetSnapshotAsync();
-                var employees = empSnapshot.Documents
-                    .Select(x => x.ConvertTo<EmployeeMaster>())
+                // All active employees (needed for complete list) - cached, shared
+                // with the Dashboard/Skill Update Operators tab.
+                var employees = (await _firestore.GetAllEmployeesAsync())
+                    .Where(x => x.IsActive)
                     .ToList();
 
-                // OPTIMIZED: Query only active layout transactions (already filtered)
-                var layoutSnapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-                var layoutTransactions = layoutSnapshot.Documents
-                    .Select(x => x.ConvertTo<LayoutTransaction>())
-                    .ToList();
+                // Cached, shared with the Attendance backup-suggestion flow.
+                var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
 
                 // OPTIMIZED: Query only attendance for this specific date (not entire collection)
                 var attSnapshot = await _firestore.AttendanceTransactions

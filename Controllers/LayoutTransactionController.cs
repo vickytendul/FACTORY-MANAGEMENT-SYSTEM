@@ -30,6 +30,7 @@ namespace FactoryManagementSystem.Controllers
             try
             {
                 await SyncLayoutAsync(request, isNew: true);
+                _firestore.InvalidateLayoutTransactionsCache();
                 return Ok(new { Success = true, Message = "Layout Allocation Saved Successfully." });
             }
             catch (Exception ex)
@@ -44,6 +45,7 @@ namespace FactoryManagementSystem.Controllers
             try
             {
                 await SyncLayoutAsync(request, isNew: false);
+                _firestore.InvalidateLayoutTransactionsCache();
                 return Ok(new { Success = true, Message = "Layout Allocation Updated Successfully." });
             }
             catch (Exception ex)

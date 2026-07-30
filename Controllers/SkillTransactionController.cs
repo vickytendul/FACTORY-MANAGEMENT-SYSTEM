@@ -115,6 +115,7 @@ namespace FactoryManagementSystem.Controllers
                     existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
                     existing.UpdatedOn = now;
                     await doc.Reference.SetAsync(existing);
+                    _firestore.InvalidateSkillTransactionsCache();
 
                     return Ok(new { Success = true, Message = "Skill record updated.", Data = existing });
                 }
@@ -146,6 +147,7 @@ namespace FactoryManagementSystem.Controllers
                     };
 
                     await _firestore.SkillTransactions.AddAsync(newRecord);
+                    _firestore.InvalidateSkillTransactionsCache();
 
                     return Ok(new { Success = true, Message = "Skill record created.", Data = newRecord });
                 }
@@ -195,6 +197,7 @@ namespace FactoryManagementSystem.Controllers
                     existing.CCNo = request.CCNo;
 
                 await doc.Reference.SetAsync(existing);
+                _firestore.InvalidateSkillTransactionsCache();
 
                 return Ok(new { Success = true, Message = "Skill record updated.", Data = existing });
             }
@@ -240,13 +243,11 @@ namespace FactoryManagementSystem.Controllers
                 {
                     // Every currently-active allocation, factory-wide: tells us who is
                     // "free" (Priority 1/2) vs. who could be shifted from elsewhere on
-                    // this same line (Priority 3).
-                    var layoutSnapshot = await _firestore.LayoutTransactions
-                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                        .GetSnapshotAsync();
+                    // this same line (Priority 3). Cached briefly since one Absent mark
+                    // can cascade through several of these calls back-to-back.
+                    var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
 
-                    var allocationByCode = layoutSnapshot.Documents
-                        .Select(d => d.ConvertTo<LayoutTransaction>())
+                    var allocationByCode = activeLayoutTransactions
                         .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
                         .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
                         .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
@@ -333,12 +334,9 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var skillSnapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .GetSnapshotAsync();
+                var activeSkillTransactions = await _firestore.GetActiveSkillTransactionsAsync();
 
-                var byEmployee = skillSnapshot.Documents
-                    .Select(d => d.ConvertTo<SkillTransaction>())
+                var byEmployee = activeSkillTransactions
                     .Where(s => !string.IsNullOrWhiteSpace(s.EmployeeCode))
                     .GroupBy(s => s.EmployeeCode, StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
@@ -348,11 +346,8 @@ namespace FactoryManagementSystem.Controllers
 
                 var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(byEmployee.Keys);
 
-                var layoutSnapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-                var allocationByCode = layoutSnapshot.Documents
-                    .Select(d => d.ConvertTo<LayoutTransaction>())
+                var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+                var allocationByCode = activeLayoutTransactions
                     .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
                     .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
@@ -405,6 +400,7 @@ namespace FactoryManagementSystem.Controllers
                     return NotFound(new { Success = false, Message = "Skill record not found." });
 
                 await doc.Reference.UpdateAsync(nameof(SkillTransaction.IsActive), false);
+                _firestore.InvalidateSkillTransactionsCache();
 
                 return Ok(new { Success = true, Message = "Skill record deleted." });
             }

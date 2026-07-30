@@ -397,23 +397,26 @@ namespace FactoryManagementSystem.Controllers
             [FromQuery] int operationId,
             [FromQuery] int lineId,
             [FromQuery] DateTime date,
+            [FromQuery] string? operationName = null,
             [FromQuery] string? excludeEmployeeCode = null)
         {
             try
             {
-                var skillSnapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.OperationId), operationId)
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .GetSnapshotAsync();
+                // Match by ID first. Older records may have been saved before
+                // operation IDs were aligned across layouts and the skill
+                // matrix, so also match the existing operation name after
+                // removing punctuation/case differences (e.g. "T.S" vs "TS").
+                // This reads the existing skill matrix; it does not introduce
+                // a separate skill engine.
+                var normalizedOperationName = NormalizeOperationName(operationName);
+                var matchingSkills = (await _firestore.GetActiveSkillTransactionsAsync())
+                    .Where(s => s.OperationId == operationId ||
+                        (!string.IsNullOrEmpty(normalizedOperationName) &&
+                         NormalizeOperationName(s.OperationName) == normalizedOperationName));
 
-                // Same rule as backup-candidates: a person can have more than
-                // one skill record for the same operation over time, keep
-                // only their best one. No Super-Team-specific bypass here -
-                // this view is "who has a skill record for this op," full
-                // stop; the always-eligible shortcut is specific to the
-                // backup-picking popup, not this roster.
-                var skillByCode = skillSnapshot.Documents
-                    .Select(d => d.ConvertTo<SkillTransaction>())
+                // A person can have more than one skill record for the same
+                // operation over time, so retain their best percentage.
+                var skillByCode = matchingSkills
                     .Where(s => !string.IsNullOrWhiteSpace(s.EmployeeCode) &&
                                 (string.IsNullOrWhiteSpace(excludeEmployeeCode) ||
                                  !string.Equals(s.EmployeeCode, excludeEmployeeCode, StringComparison.OrdinalIgnoreCase)))
@@ -561,6 +564,12 @@ namespace FactoryManagementSystem.Controllers
 
             return baseRank == 11 ? 12 : (hasPlus ? baseRank : baseRank + 1);
         }
+
+        private static string NormalizeOperationName(string? value) =>
+            new string((value ?? string.Empty)
+                .Where(char.IsLetterOrDigit)
+                .Select(char.ToUpperInvariant)
+                .ToArray());
 
         // Every distinct employee with an active skill record, plus where
         // they're currently allocated (if anywhere). Powers the "Operators"

@@ -22,6 +22,7 @@ namespace FactoryManagementSystem.Controllers
             try
             {
                 await SyncAttendanceAsync(request, isNew: true);
+                _firestore.InvalidateAttendanceCache();
 
                 return Ok(new
                 {
@@ -45,6 +46,7 @@ namespace FactoryManagementSystem.Controllers
             try
             {
                 await SyncAttendanceAsync(request, isNew: false);
+                _firestore.InvalidateAttendanceCache();
 
                 return Ok(new
                 {

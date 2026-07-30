@@ -208,91 +208,144 @@ namespace FactoryManagementSystem.Controllers
         }
 
         // Backup-operator suggestions for an absent operation, used by Attendance.
-        // Returns three tiers: free Super Team members skilled for this operation,
-        // free non-Super-Team skilled members (sorted by eligible%), and people
-        // currently allocated to a DIFFERENT operation on the SAME line who also
-        // have the skill (candidates to shift over, vacating their own slot).
+        // Returns three tiers: free Super Team members, free non-Super-Team
+        // skilled members (sorted by eligible%), and people currently allocated
+        // to a DIFFERENT operation on the SAME line who also have the skill
+        // (candidates to shift over, vacating their own slot).
         [HttpGet("backup-candidates")]
         public async Task<IActionResult> GetBackupCandidates(
             [FromQuery] int operationId,
             [FromQuery] int lineId,
+            [FromQuery] DateTime date,
             [FromQuery] string? excludeEmployeeCode = null)
         {
             try
             {
+                var freeSuperTeam = new List<BackupCandidate>();
+                var freeSkilled = new List<BackupCandidate>();
+                var shiftCandidates = new List<BackupCandidate>();
+                // Tracks everyone already placed in a bucket so the two passes
+                // below (Super Team business rule, then skill-based filters)
+                // never add the same person twice.
+                var addedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                bool IsExcluded(string employeeCode) =>
+                    !string.IsNullOrWhiteSpace(excludeEmployeeCode) &&
+                    string.Equals(employeeCode, excludeEmployeeCode, StringComparison.OrdinalIgnoreCase);
+
+                // Every currently-active allocation, factory-wide: tells us who is
+                // "free" (Priority 1/2) vs. who could be shifted from elsewhere on
+                // this same line (Priority 3). Cached briefly since one Absent mark
+                // can cascade through several of these calls back-to-back.
+                var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+
+                var allocationByCode = activeLayoutTransactions
+                    .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                    .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
                 var skillSnapshot = await _firestore.SkillTransactions
                     .WhereEqualTo(nameof(SkillTransaction.OperationId), operationId)
                     .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
                     .GetSnapshotAsync();
 
-                var skilled = skillSnapshot.Documents
+                var skillByCode = skillSnapshot.Documents
                     .Select(d => d.ConvertTo<SkillTransaction>())
-                    .Where(s => string.IsNullOrWhiteSpace(excludeEmployeeCode) ||
-                                !string.Equals(s.EmployeeCode, excludeEmployeeCode, StringComparison.OrdinalIgnoreCase))
+                    .Where(s => !IsExcluded(s.EmployeeCode))
                     // A person can have more than one skill record for the same
                     // operation over time; keep only their best one.
                     .GroupBy(s => s.EmployeeCode, StringComparer.OrdinalIgnoreCase)
-                    .Select(g => g.OrderByDescending(s => s.EligiblePercentage).First())
+                    .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.EligiblePercentage).First(), StringComparer.OrdinalIgnoreCase);
+
+                // Business rule: every Super Team employee who is Present today is
+                // ALWAYS offered as a backup, regardless of whether they happen to
+                // have a skill record for this exact operation, and regardless of
+                // what they're currently allocated to. Only MAIN-section employees
+                // are excluded, because they're genuinely already doing production
+                // work elsewhere.
+                var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
+                var attendanceForDate = await _firestore.GetAttendanceForDateAsync(utcDate);
+                var presentCodes = attendanceForDate
+                    .Where(a => !string.IsNullOrWhiteSpace(a.EmployeeCode) &&
+                                string.Equals(a.AttendanceStatus, "Present", StringComparison.OrdinalIgnoreCase))
+                    .Select(a => a.EmployeeCode)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                var superTeamAllocations = activeLayoutTransactions
+                    .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode) &&
+                                string.Equals(x.Section, "SUPER TEAM", StringComparison.OrdinalIgnoreCase) &&
+                                !IsExcluded(x.EmployeeCode) &&
+                                presentCodes.Contains(x.EmployeeCode))
                     .ToList();
 
-                var freeSuperTeam = new List<BackupCandidate>();
-                var freeSkilled = new List<BackupCandidate>();
-                var shiftCandidates = new List<BackupCandidate>();
+                var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(
+                    skillByCode.Keys.Concat(superTeamAllocations.Select(x => x.EmployeeCode)));
 
-                if (skilled.Count > 0)
+                foreach (var alloc in superTeamAllocations)
                 {
-                    // Every currently-active allocation, factory-wide: tells us who is
-                    // "free" (Priority 1/2) vs. who could be shifted from elsewhere on
-                    // this same line (Priority 3). Cached briefly since one Absent mark
-                    // can cascade through several of these calls back-to-back.
-                    var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+                    if (!addedCodes.Add(alloc.EmployeeCode)) continue;
 
-                    var allocationByCode = activeLayoutTransactions
-                        .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
-                        .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
-                        .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                    var emp = employeeLookup.GetValueOrDefault(alloc.EmployeeCode);
+                    var hasSkillForThisOp = skillByCode.TryGetValue(alloc.EmployeeCode, out var skillRecord);
 
-                    var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(
-                        skilled.Select(s => s.EmployeeCode));
-
-                    foreach (var s in skilled)
+                    freeSuperTeam.Add(new BackupCandidate
                     {
-                        var isAllocated = allocationByCode.TryGetValue(s.EmployeeCode, out var allocation);
-                        var isSuperTeam = string.Equals(s.Section, "Super Team", StringComparison.OrdinalIgnoreCase);
-                        // Only count someone as "busy" when they're doing real MAIN
-                        // production work. Being parked in a non-MAIN slot (e.g. their
-                        // own Super Team/standby section) doesn't block them from
-                        // being suggested as a backup.
-                        var isBusyInMain = isAllocated &&
-                            string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
-                        var emp = employeeLookup.GetValueOrDefault(s.EmployeeCode);
+                        EmployeeCode = alloc.EmployeeCode,
+                        EmployeeName = emp?.EmployeeName ?? alloc.EmployeeName,
+                        Grade = emp?.Grade ?? alloc.EmployeeGrade,
+                        // Show their real eligible% for this operation if they
+                        // happen to have one; otherwise there's no skill-match
+                        // number to show, so default to a neutral 100 rather
+                        // than a misleading 0 (they're not unqualified, just
+                        // untested on this specific operation).
+                        EligiblePercentage = hasSkillForThisOp ? skillRecord!.EligiblePercentage : 100,
+                        Section = "Super Team"
+                    });
+                }
 
-                        var candidate = new BackupCandidate
-                        {
-                            EmployeeCode = s.EmployeeCode,
-                            EmployeeName = emp?.EmployeeName ?? allocation?.EmployeeName ?? s.EmployeeCode,
-                            Grade = emp?.Grade ?? allocation?.EmployeeGrade ?? s.Grade,
-                            EligiblePercentage = s.EligiblePercentage,
-                            Section = s.Section
-                        };
+                // Existing filters for everyone else with a skill record for this
+                // specific operation, who wasn't already added above.
+                foreach (var s in skillByCode.Values)
+                {
+                    if (addedCodes.Contains(s.EmployeeCode)) continue;
 
-                        // Super Team is the flexible reserve pool - always offered as
-                        // a backup candidate no matter what they're currently doing
-                        // (even if that happens to be a MAIN-classified slot today).
-                        if (isSuperTeam)
-                        {
-                            freeSuperTeam.Add(candidate);
-                        }
-                        else if (!isBusyInMain)
-                        {
-                            freeSkilled.Add(candidate);
-                        }
-                        else if (allocation!.LineId == lineId && allocation.OperationId != operationId)
-                        {
-                            candidate.CurrentOperationName = allocation.OperationName;
-                            candidate.CurrentLayoutMasterId = allocation.LayoutMasterId;
-                            shiftCandidates.Add(candidate);
-                        }
+                    var isAllocated = allocationByCode.TryGetValue(s.EmployeeCode, out var allocation);
+                    var isSuperTeamBySkill = string.Equals(s.Section, "Super Team", StringComparison.OrdinalIgnoreCase);
+                    // Only count someone as "busy" when they're doing real MAIN
+                    // production work. Being parked in a non-MAIN slot (e.g. their
+                    // own Super Team/standby section) doesn't block them from
+                    // being suggested as a backup.
+                    var isBusyInMain = isAllocated &&
+                        string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
+                    var emp = employeeLookup.GetValueOrDefault(s.EmployeeCode);
+
+                    var candidate = new BackupCandidate
+                    {
+                        EmployeeCode = s.EmployeeCode,
+                        EmployeeName = emp?.EmployeeName ?? allocation?.EmployeeName ?? s.EmployeeCode,
+                        Grade = emp?.Grade ?? allocation?.EmployeeGrade ?? s.Grade,
+                        EligiblePercentage = s.EligiblePercentage,
+                        Section = s.Section
+                    };
+
+                    // Super Team is the flexible reserve pool - always offered as
+                    // a backup candidate no matter what they're currently doing
+                    // (even if that happens to be a MAIN-classified slot today,
+                    // or they're not marked Present in Attendance yet).
+                    if (isSuperTeamBySkill)
+                    {
+                        freeSuperTeam.Add(candidate);
+                        addedCodes.Add(s.EmployeeCode);
+                    }
+                    else if (!isBusyInMain)
+                    {
+                        freeSkilled.Add(candidate);
+                    }
+                    else if (allocation!.LineId == lineId && allocation.OperationId != operationId)
+                    {
+                        candidate.CurrentOperationName = allocation.OperationName;
+                        candidate.CurrentLayoutMasterId = allocation.LayoutMasterId;
+                        shiftCandidates.Add(candidate);
                     }
                 }
 

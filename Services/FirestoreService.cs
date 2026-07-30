@@ -133,6 +133,7 @@ namespace FactoryManagementSystem.Services
         private static readonly TimeSpan LiveDataTtl = TimeSpan.FromSeconds(10);
         private int _layoutTransactionVersion;
         private int _skillTransactionVersion;
+        private int _attendanceVersion;
 
         public async Task<List<LayoutTransaction>> GetActiveLayoutTransactionsAsync()
         {
@@ -161,6 +162,22 @@ namespace FactoryManagementSystem.Services
         }
 
         public void InvalidateSkillTransactionsCache() => Interlocked.Increment(ref _skillTransactionVersion);
+
+        public async Task<List<AttendanceTransaction>> GetAttendanceForDateAsync(DateTime utcDate)
+        {
+            var key = $"attendance_{utcDate:yyyy-MM-dd}_v{Volatile.Read(ref _attendanceVersion)}";
+            if (_cache.TryGetValue(key, out List<AttendanceTransaction>? cached) && cached != null)
+                return cached;
+
+            var snapshot = await AttendanceTransactions
+                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
+                .GetSnapshotAsync();
+            var result = snapshot.Documents.Select(d => d.ConvertTo<AttendanceTransaction>()).ToList();
+            _cache.Set(key, result, LiveDataTtl);
+            return result;
+        }
+
+        public void InvalidateAttendanceCache() => Interlocked.Increment(ref _attendanceVersion);
 
         // Generic transactional auto-increment: 1 read + 1 write instead of
         // scanning the whole collection to compute Max(id) + 1. The first

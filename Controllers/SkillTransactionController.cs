@@ -459,8 +459,8 @@ namespace FactoryManagementSystem.Controllers
 
                     var isAbsentToday = attendance != null &&
                         string.Equals(attendance.AttendanceStatus, "Absent", StringComparison.OrdinalIgnoreCase);
-                    var isSameSlot = isAllocated && allocation!.LineId == lineId && allocation.OperationId == operationId;
-                    var isBusyInMain = isAllocated && !isSameSlot &&
+                    var isSameLine = isAllocated && allocation!.LineId == lineId;
+                    var isBusyInMain = isAllocated && isSameLine &&
                         string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
 
                     string status;
@@ -473,9 +473,16 @@ namespace FactoryManagementSystem.Controllers
                         availabilityRank = 2;
                         absentCount++;
                     }
+                    else if (isAllocated && !isSameLine)
+                    {
+                        status = "Shift Required";
+                        summaryBucket = "Shift Required";
+                        availabilityRank = 1;
+                        requireMovementCount++;
+                    }
                     else if (isBusyInMain)
                     {
-                        status = allocation!.LineId == lineId ? "Move Required" : "Another Line";
+                        status = "Move Required";
                         summaryBucket = "Require Movement";
                         availabilityRank = 1;
                         requireMovementCount++;

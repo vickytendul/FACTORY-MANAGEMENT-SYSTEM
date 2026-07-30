@@ -396,7 +396,8 @@ namespace FactoryManagementSystem.Controllers
         public async Task<IActionResult> GetOperationRoster(
             [FromQuery] int operationId,
             [FromQuery] int lineId,
-            [FromQuery] DateTime date)
+            [FromQuery] DateTime date,
+            [FromQuery] string? excludeEmployeeCode = null)
         {
             try
             {
@@ -413,7 +414,9 @@ namespace FactoryManagementSystem.Controllers
                 // backup-picking popup, not this roster.
                 var skillByCode = skillSnapshot.Documents
                     .Select(d => d.ConvertTo<SkillTransaction>())
-                    .Where(s => !string.IsNullOrWhiteSpace(s.EmployeeCode))
+                    .Where(s => !string.IsNullOrWhiteSpace(s.EmployeeCode) &&
+                                (string.IsNullOrWhiteSpace(excludeEmployeeCode) ||
+                                 !string.Equals(s.EmployeeCode, excludeEmployeeCode, StringComparison.OrdinalIgnoreCase)))
                     .GroupBy(s => s.EmployeeCode, StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.EligiblePercentage).First(), StringComparer.OrdinalIgnoreCase);
 

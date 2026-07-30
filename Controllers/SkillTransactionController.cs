@@ -258,6 +258,7 @@ namespace FactoryManagementSystem.Controllers
                     foreach (var s in skilled)
                     {
                         var isAllocated = allocationByCode.TryGetValue(s.EmployeeCode, out var allocation);
+                        var isSuperTeam = string.Equals(s.Section, "Super Team", StringComparison.OrdinalIgnoreCase);
                         // Only count someone as "busy" when they're doing real MAIN
                         // production work. Being parked in a non-MAIN slot (e.g. their
                         // own Super Team/standby section) doesn't block them from
@@ -275,12 +276,16 @@ namespace FactoryManagementSystem.Controllers
                             Section = s.Section
                         };
 
-                        if (!isBusyInMain)
+                        // Super Team is the flexible reserve pool - always offered as
+                        // a backup candidate no matter what they're currently doing
+                        // (even if that happens to be a MAIN-classified slot today).
+                        if (isSuperTeam)
                         {
-                            if (string.Equals(s.Section, "Super Team", StringComparison.OrdinalIgnoreCase))
-                                freeSuperTeam.Add(candidate);
-                            else
-                                freeSkilled.Add(candidate);
+                            freeSuperTeam.Add(candidate);
+                        }
+                        else if (!isBusyInMain)
+                        {
+                            freeSkilled.Add(candidate);
                         }
                         else if (allocation!.LineId == lineId && allocation.OperationId != operationId)
                         {

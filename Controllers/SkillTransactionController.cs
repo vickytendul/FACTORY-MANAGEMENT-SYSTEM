@@ -384,6 +384,174 @@ namespace FactoryManagementSystem.Controllers
             public int? CurrentLayoutMasterId { get; set; }
         }
 
+        // Full skill roster for one operation: EVERY employee with an active
+        // skill record for it, unfiltered - classified with a status instead
+        // of being excluded, so the supervisor can see the complete picture
+        // ("who could theoretically do this job") rather than just the
+        // narrower "who's free right now" list backup-candidates returns.
+        // Reuses the exact same data sources as backup-candidates (skill
+        // records for this op, active allocations, today's attendance) -
+        // no separate skill-matching engine.
+        [HttpGet("operation-roster")]
+        public async Task<IActionResult> GetOperationRoster(
+            [FromQuery] int operationId,
+            [FromQuery] int lineId,
+            [FromQuery] DateTime date)
+        {
+            try
+            {
+                var skillSnapshot = await _firestore.SkillTransactions
+                    .WhereEqualTo(nameof(SkillTransaction.OperationId), operationId)
+                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
+                    .GetSnapshotAsync();
+
+                // Same rule as backup-candidates: a person can have more than
+                // one skill record for the same operation over time, keep
+                // only their best one. No Super-Team-specific bypass here -
+                // this view is "who has a skill record for this op," full
+                // stop; the always-eligible shortcut is specific to the
+                // backup-picking popup, not this roster.
+                var skillByCode = skillSnapshot.Documents
+                    .Select(d => d.ConvertTo<SkillTransaction>())
+                    .Where(s => !string.IsNullOrWhiteSpace(s.EmployeeCode))
+                    .GroupBy(s => s.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.OrderByDescending(s => s.EligiblePercentage).First(), StringComparer.OrdinalIgnoreCase);
+
+                if (skillByCode.Count == 0)
+                {
+                    return Ok(new
+                    {
+                        totalCount = 0,
+                        availableCount = 0,
+                        requireMovementCount = 0,
+                        absentCount = 0,
+                        employees = Array.Empty<object>()
+                    });
+                }
+
+                var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+                var allocationByCode = activeLayoutTransactions
+                    .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                    .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+                var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
+                var attendanceForDate = await _firestore.GetAttendanceForDateAsync(utcDate);
+                var attendanceByCode = attendanceForDate
+                    .Where(a => !string.IsNullOrWhiteSpace(a.EmployeeCode))
+                    .GroupBy(a => a.EmployeeCode, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+                var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(skillByCode.Keys);
+
+                var scored = new List<(object Entry, int EligiblePercentage, int GradeRank, int AvailabilityRank)>();
+                int availableCount = 0, requireMovementCount = 0, absentCount = 0;
+
+                foreach (var s in skillByCode.Values)
+                {
+                    var isAllocated = allocationByCode.TryGetValue(s.EmployeeCode, out var allocation);
+                    attendanceByCode.TryGetValue(s.EmployeeCode, out var attendance);
+                    var emp = employeeLookup.GetValueOrDefault(s.EmployeeCode);
+                    var grade = emp?.Grade ?? allocation?.EmployeeGrade ?? s.Grade;
+
+                    var isAbsentToday = attendance != null &&
+                        string.Equals(attendance.AttendanceStatus, "Absent", StringComparison.OrdinalIgnoreCase);
+                    var isSameSlot = isAllocated && allocation!.LineId == lineId && allocation.OperationId == operationId;
+                    var isBusyInMain = isAllocated && !isSameSlot &&
+                        string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
+
+                    string status;
+                    string summaryBucket;
+                    int availabilityRank;
+                    if (isAbsentToday)
+                    {
+                        status = "Absent";
+                        summaryBucket = "Absent";
+                        availabilityRank = 2;
+                        absentCount++;
+                    }
+                    else if (isBusyInMain)
+                    {
+                        status = allocation!.LineId == lineId ? "Move Required" : "Another Line";
+                        summaryBucket = "Require Movement";
+                        availabilityRank = 1;
+                        requireMovementCount++;
+                    }
+                    else
+                    {
+                        status = "Available";
+                        summaryBucket = "Available";
+                        availabilityRank = 0;
+                        availableCount++;
+                    }
+
+                    var entry = new
+                    {
+                        employeeCode = s.EmployeeCode,
+                        employeeName = emp?.EmployeeName ?? allocation?.EmployeeName ?? s.EmployeeCode,
+                        grade,
+                        eligiblePercentage = s.EligiblePercentage,
+                        currentLine = allocation?.LineName,
+                        currentSection = allocation?.Section,
+                        currentOperation = allocation?.OperationName,
+                        attendanceStatus = attendance?.AttendanceStatus,
+                        status,
+                        summaryBucket
+                    };
+
+                    scored.Add((entry, s.EligiblePercentage, GradeRank(grade), availabilityRank));
+                }
+
+                // Sort: highest skill % first, then best grade, then most
+                // available (Available before Move Required/Another Line
+                // before Absent).
+                var employees = scored
+                    .OrderByDescending(x => x.EligiblePercentage)
+                    .ThenBy(x => x.GradeRank)
+                    .ThenBy(x => x.AvailabilityRank)
+                    .Select(x => x.Entry)
+                    .ToList();
+
+                return Ok(new
+                {
+                    totalCount = skillByCode.Count,
+                    availableCount,
+                    requireMovementCount,
+                    absentCount,
+                    employees
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        // Mirrors the Dart GradeValidator ranking (lib/services/grade_validator.dart)
+        // so the roster's grade-based sort matches how grade-sufficiency is judged
+        // everywhere else in the app: A+ = 0 (best) down to F = 11, unknown = 12 (worst).
+        private static int GradeRank(string? grade)
+        {
+            var normalized = (grade ?? string.Empty).Trim().ToUpperInvariant();
+            if (normalized.Length == 0) return 12;
+
+            var letter = normalized[0];
+            var hasPlus = normalized.Length > 1 && normalized[1] == '+';
+
+            int baseRank = letter switch
+            {
+                'A' => 0,
+                'B' => 2,
+                'C' => 4,
+                'D' => 6,
+                'E' => 8,
+                'F' => 10,
+                _ => 11
+            };
+
+            return baseRank == 11 ? 12 : (hasPlus ? baseRank : baseRank + 1);
+        }
+
         // Every distinct employee with an active skill record, plus where
         // they're currently allocated (if anywhere). Powers the "Operators"
         // tab on the Skill Update page.

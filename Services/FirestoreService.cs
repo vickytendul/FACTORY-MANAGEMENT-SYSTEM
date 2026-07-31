@@ -42,6 +42,7 @@ namespace FactoryManagementSystem.Services
         public CollectionReference SkillTransactions => _db.Collection("SkillTransactions");
         public CollectionReference OperationIdLookup => _db.Collection("OperationIdLookup");
         public CollectionReference Users => _db.Collection("Users");
+        public CollectionReference Settings => _db.Collection("Settings");
 
         // ─── Cached reference data ───────────────────────────────────────
         // Zones/Lines/CCs/LayoutMasters change rarely but were being re-read
@@ -178,6 +179,33 @@ namespace FactoryManagementSystem.Services
         }
 
         public void InvalidateAttendanceCache() => Interlocked.Increment(ref _attendanceVersion);
+
+        private int _gradeRatioVersion;
+        private static readonly Dictionary<string, int> DefaultGradeRatios = new()
+        {
+            ["A+"] = 1,
+            ["A"] = 2,
+            ["B"] = 2,
+            ["C"] = 1
+        };
+
+        public async Task<Dictionary<string, int>> GetGradeRatioConfigAsync()
+        {
+            var key = $"grade_ratio_v{Volatile.Read(ref _gradeRatioVersion)}";
+            if (_cache.TryGetValue(key, out Dictionary<string, int>? cached) && cached != null)
+                return cached;
+
+            var doc = await Settings.Document("GradeRatio").GetSnapshotAsync();
+            var result = doc.Exists
+                ? doc.ConvertTo<GradeRatioConfig>().Ratios
+                : new Dictionary<string, int>(DefaultGradeRatios);
+            if (result.Count == 0) result = new Dictionary<string, int>(DefaultGradeRatios);
+
+            _cache.Set(key, result, ReferenceDataTtl);
+            return result;
+        }
+
+        public void InvalidateGradeRatioCache() => Interlocked.Increment(ref _gradeRatioVersion);
 
         // Generic transactional auto-increment: 1 read + 1 write instead of
         // scanning the whole collection to compute Max(id) + 1. The first

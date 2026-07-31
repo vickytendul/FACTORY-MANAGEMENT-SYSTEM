@@ -134,7 +134,7 @@ namespace FactoryManagementSystem.Controllers
                         grades = gradeRows
                     };
                 })
-                .OrderBy(l => l.lineName)
+                .OrderBy(l => l.lineId)
                 .ToList();
 
                 return Ok(new { grades = Grades, ratios = ratioValues, lines = result });

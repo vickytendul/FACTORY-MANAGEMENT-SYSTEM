@@ -137,7 +137,38 @@ namespace FactoryManagementSystem.Controllers
                 .OrderBy(l => l.lineId)
                 .ToList();
 
-                return Ok(new { grades = Grades, ratios = ratioValues, lines = result });
+                // Factory-wide roll-up: same ratio, applied to the sum of every
+                // line's headcount, against the sum of every line's actuals.
+                var factoryTotalHeadcount = result.Sum(l => l.total);
+                var factoryActualByGrade = Grades.ToDictionary(g => g, g => 0);
+                foreach (var line in result)
+                {
+                    foreach (var gr in line.grades)
+                    {
+                        factoryActualByGrade[gr.grade] += gr.actual;
+                    }
+                }
+
+                var factoryTargets = ComputeTargets(factoryTotalHeadcount, ratioValues);
+                var factoryGradeRows = Grades.Select((g, i) => new
+                {
+                    grade = g,
+                    ratio = ratioValues[i],
+                    target = factoryTargets[i],
+                    actual = factoryActualByGrade[g],
+                    yetToFill = factoryActualByGrade[g] - factoryTargets[i]
+                }).ToList();
+
+                var factoryTotal = new
+                {
+                    lineId = 0,
+                    lineName = "Total Factory",
+                    total = factoryTotalHeadcount,
+                    unclassified = result.Sum(l => l.unclassified),
+                    grades = factoryGradeRows
+                };
+
+                return Ok(new { grades = Grades, ratios = ratioValues, factoryTotal, lines = result });
             }
             catch (Exception ex)
             {

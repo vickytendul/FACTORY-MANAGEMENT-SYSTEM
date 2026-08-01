@@ -585,18 +585,18 @@ namespace FactoryManagementSystem.Controllers
             {
                 var layoutMasters = await _firestore.GetActiveLayoutMastersByCcAsync(ccId);
 
-                // A CC can have more than one Layout (Layout 1, Layout 2...);
-                // collapse to one row per distinct operation, keeping the
-                // earliest DisplayOrder for a stable SNo ordering.
-                var operations = layoutMasters
-                    .GroupBy(m => m.OperationId != 0
-                        ? m.OperationId.ToString()
-                        : NormalizeOperationName(m.OperationName))
-                    .Select(g => g.OrderBy(m => m.DisplayOrder).First())
-                    .OrderBy(m => m.DisplayOrder)
+                // A CC can have more than one Layout (Layout 1, Layout 2...),
+                // and legacy rows can carry mismatched/zero OperationIds for
+                // what is really the same operation (see NormalizeOperationName
+                // usage elsewhere) - so the merge key is the operation NAME,
+                // not the ID. Each group can therefore span several distinct
+                // OperationIds, all of which must be matched below.
+                var operationGroups = layoutMasters
+                    .GroupBy(m => NormalizeOperationName(m.OperationName))
+                    .OrderBy(g => g.Min(m => m.DisplayOrder))
                     .ToList();
 
-                if (operations.Count == 0)
+                if (operationGroups.Count == 0)
                 {
                     return Ok(new { ccId, operations = Array.Empty<object>() });
                 }
@@ -608,11 +608,14 @@ namespace FactoryManagementSystem.Controllers
                     .Where(s => s.CCId == ccId)
                     .ToList();
 
-                object BuildRow(LayoutMaster op)
+                var rows = operationGroups.Select(group =>
                 {
-                    var normalizedName = NormalizeOperationName(op.OperationName);
+                    var normalizedName = group.Key;
+                    var operationName = group.OrderBy(m => m.DisplayOrder).First().OperationName;
+                    var operationIds = group.Select(m => m.OperationId).Where(id => id != 0).Distinct().ToList();
+
                     bool Matches(int otherOperationId, string otherName) =>
-                        otherOperationId == op.OperationId ||
+                        operationIds.Contains(otherOperationId) ||
                         (!string.IsNullOrEmpty(normalizedName) &&
                          NormalizeOperationName(otherName) == normalizedName);
 
@@ -631,15 +634,15 @@ namespace FactoryManagementSystem.Controllers
 
                     return new
                     {
-                        operationId = op.OperationId,
-                        operationName = op.OperationName,
+                        operationId = operationIds.FirstOrDefault(),
+                        operationName,
                         requirement,
                         available,
                         backup = available - requirement
                     };
-                }
+                }).ToList();
 
-                return Ok(new { ccId, operations = operations.Select(BuildRow).ToList() });
+                return Ok(new { ccId, operations = rows });
             }
             catch (Exception ex)
             {

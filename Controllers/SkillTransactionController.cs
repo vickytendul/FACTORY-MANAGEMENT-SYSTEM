@@ -571,6 +571,82 @@ namespace FactoryManagementSystem.Controllers
                 .Select(char.ToUpperInvariant)
                 .ToArray());
 
+        // Per-CC skill backup depth: for every operation in the CC's layout,
+        // Requirement = how many lines are actually running it today (distinct
+        // LineId in active LayoutTransactions), Available = how many
+        // employees have an active skill record for it, Backup = the
+        // surplus/shortfall (Available - Requirement). Reuses the existing
+        // LayoutMaster/LayoutTransaction/SkillTransaction caches - no new
+        // skill engine.
+        [HttpGet("backup-report")]
+        public async Task<IActionResult> GetBackupReport([FromQuery] int ccId)
+        {
+            try
+            {
+                var layoutMasters = await _firestore.GetActiveLayoutMastersByCcAsync(ccId);
+
+                // A CC can have more than one Layout (Layout 1, Layout 2...);
+                // collapse to one row per distinct operation, keeping the
+                // earliest DisplayOrder for a stable SNo ordering.
+                var operations = layoutMasters
+                    .GroupBy(m => m.OperationId != 0
+                        ? m.OperationId.ToString()
+                        : NormalizeOperationName(m.OperationName))
+                    .Select(g => g.OrderBy(m => m.DisplayOrder).First())
+                    .OrderBy(m => m.DisplayOrder)
+                    .ToList();
+
+                if (operations.Count == 0)
+                {
+                    return Ok(new { ccId, operations = Array.Empty<object>() });
+                }
+
+                var ccAllocations = (await _firestore.GetActiveLayoutTransactionsAsync())
+                    .Where(t => t.CCId == ccId)
+                    .ToList();
+                var ccSkills = (await _firestore.GetActiveSkillTransactionsAsync())
+                    .Where(s => s.CCId == ccId)
+                    .ToList();
+
+                object BuildRow(LayoutMaster op)
+                {
+                    var normalizedName = NormalizeOperationName(op.OperationName);
+                    bool Matches(int otherOperationId, string otherName) =>
+                        otherOperationId == op.OperationId ||
+                        (!string.IsNullOrEmpty(normalizedName) &&
+                         NormalizeOperationName(otherName) == normalizedName);
+
+                    var requirement = ccAllocations
+                        .Where(t => Matches(t.OperationId, t.OperationName))
+                        .Select(t => t.LineId)
+                        .Distinct()
+                        .Count();
+
+                    var available = ccSkills
+                        .Where(s => Matches(s.OperationId, s.OperationName) &&
+                                    !string.IsNullOrWhiteSpace(s.EmployeeCode))
+                        .Select(s => s.EmployeeCode)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .Count();
+
+                    return new
+                    {
+                        operationId = op.OperationId,
+                        operationName = op.OperationName,
+                        requirement,
+                        available,
+                        backup = available - requirement
+                    };
+                }
+
+                return Ok(new { ccId, operations = operations.Select(BuildRow).ToList() });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // Every distinct employee with an active skill record, plus where
         // they're currently allocated (if anywhere). Powers the "Operators"
         // tab on the Skill Update page.

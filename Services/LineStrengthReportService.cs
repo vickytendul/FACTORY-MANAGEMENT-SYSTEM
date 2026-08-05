@@ -22,14 +22,12 @@ public class LineStrengthReportService
         // Attendance backup-suggestion flow and Operator Tracking)
         var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
 
-        // Build employee attendance lookup — query once per date (1 read)
+        // Build employee attendance lookup — cached, shared with Attendance/
+        // OperatorTracking/SkillTransaction instead of a fresh read here.
         var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
-        var attSnap = await _firestore.AttendanceTransactions
-            .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
-            .GetSnapshotAsync();
+        var attendanceForDate = await _firestore.GetAttendanceForDateAsync(utcDate);
 
-        var attLookup = attSnap.Documents
-            .Select(d => d.ConvertTo<AttendanceTransaction>())
+        var attLookup = attendanceForDate
             .GroupBy(a => a.EmployeeCode)
             .ToDictionary(g => g.Key, g => g.First());
 

@@ -32,13 +32,9 @@ namespace FactoryManagementSystem.Controllers
                 // Cached, shared with the Attendance backup-suggestion flow.
                 var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
 
-                // OPTIMIZED: Query only attendance for this specific date (not entire collection)
-                var attSnapshot = await _firestore.AttendanceTransactions
-                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
-                    .GetSnapshotAsync();
-                var attendanceTransactions = attSnapshot.Documents
-                    .Select(x => x.ConvertTo<AttendanceTransaction>())
-                    .ToList();
+                // Cached, shared with Attendance/LineStrengthReport/SkillTransaction
+                // instead of a fresh Firestore read on every Operator Tracking load.
+                var attendanceTransactions = await _firestore.GetAttendanceForDateAsync(utcDate);
 
                 // Build lookup by employee code
                 var layoutByEmployee = layoutTransactions

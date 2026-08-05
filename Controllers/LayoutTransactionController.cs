@@ -60,15 +60,9 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // OPTIMIZED: Filter by IsActive at Firestore level
-                var snapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-
-                var data = snapshot.Documents
-                    .Select(x => x.ConvertTo<LayoutTransaction>())
-                    .ToList();
-
+                // CACHED: same active-allocations snapshot every other consumer
+                // (Attendance, Output, SkillTransaction, LineStrengthReport) shares.
+                var data = await _firestore.GetActiveLayoutTransactionsAsync();
                 return Ok(data);
             }
             catch (Exception ex)
@@ -87,20 +81,11 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // OPTIMIZED: Filter by LineId and IsActive at Firestore level
-                Query query = _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true);
-
-                if (ccId.HasValue)
-                {
-                    query = query.WhereEqualTo(nameof(LayoutTransaction.CCId), ccId.Value);
-                }
-
-                var snapshot = await query.GetSnapshotAsync();
-
-                var data = snapshot.Documents
-                    .Select(x => x.ConvertTo<LayoutTransaction>())
+                // CACHED: filter the shared active-allocations snapshot in memory
+                // instead of a fresh Firestore query per call.
+                var data = (await _firestore.GetActiveLayoutTransactionsAsync())
+                    .Where(x => x.LineId == lineId)
+                    .Where(x => !ccId.HasValue || x.CCId == ccId.Value)
                     .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                     .ToList();
 
@@ -122,15 +107,15 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .GetSnapshotAsync();
+                // CACHED: filter the shared active-allocations snapshot in memory
+                // instead of a fresh Firestore query per call.
+                var forCc = (await _firestore.GetActiveLayoutTransactionsAsync())
+                    .Where(x => x.CCId == ccId)
+                    .ToList();
 
-                var totalRecords = snapshot.Documents.Count;
+                var totalRecords = forCc.Count;
 
-                var ops = snapshot.Documents
-                    .Select(d => d.ConvertTo<LayoutTransaction>())
+                var ops = forCc
                     .GroupBy(x => new { x.OperationId, x.OperationName })
                     .Select(g => g.First())
                     .Select(x => new

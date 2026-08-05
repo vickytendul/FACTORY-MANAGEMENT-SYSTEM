@@ -27,13 +27,10 @@ namespace FactoryManagementSystem.Controllers
                 // Firestore on every Output Entry screen load.
                 var lines = await _firestore.GetActiveLinesAsync();
 
-                // OPTIMIZED: Query only active layout transactions (not entire collection)
-                var layoutSnapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-                var layoutItems = layoutSnapshot.Documents
-                    .Select(d => d.ConvertTo<LayoutTransaction>())
-                    .ToList();
+                // CACHED: same active-allocations snapshot used everywhere else
+                // (Attendance, SkillTransaction, LineSummary) instead of a fresh
+                // uncached read on every Output Entry screen load.
+                var layoutItems = await _firestore.GetActiveLayoutTransactionsAsync();
 
                 var ccLookup = (await _firestore.GetActiveCCsAsync())
                     .ToDictionary(x => x.CCId, x => x.CCNo);

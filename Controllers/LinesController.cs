@@ -19,21 +19,13 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetLines(int? zoneId)
         {
-            // OPTIMIZED: Filter by IsActive and optional ZoneId at Firestore level
-            Query query = _firestore.Lines
-                .WhereEqualTo(nameof(Line.IsActive), true);
+            // CACHED: reuses the same 45s-TTL active-lines snapshot every other
+            // screen already reads, instead of a fresh Firestore query per call.
+            var active = await _firestore.GetActiveLinesAsync();
 
-            if (zoneId.HasValue)
-            {
-                query = query.WhereEqualTo(nameof(Line.ZoneId), zoneId.Value);
-            }
-
-            var snapshot = await query
-                .OrderBy(nameof(Line.LineId))
-                .GetSnapshotAsync();
-
-            var lines = snapshot.Documents
-                .Select(x => x.ConvertTo<Line>())
+            var lines = active
+                .Where(x => !zoneId.HasValue || x.ZoneId == zoneId.Value)
+                .OrderBy(x => x.LineId)
                 .Select(x => new
                 {
                     lineId = x.LineId,

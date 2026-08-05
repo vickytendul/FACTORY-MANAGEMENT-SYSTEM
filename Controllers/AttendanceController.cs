@@ -76,16 +76,13 @@ namespace FactoryManagementSystem.Controllers
                 // Resolve CC from active LayoutTransaction if not provided
                 if (ccId == null)
                 {
-                    // OPTIMIZED: Query only active transactions for this specific line (1-2 reads instead of N)
-                    var layoutSnapshot = await _firestore.LayoutTransactions
-                        .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
-                        .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                        .Limit(1)
-                        .GetSnapshotAsync();
+                    // CACHED: same active-allocations snapshot Output/SkillTransaction/
+                    // LineStrengthReport already share, instead of a fresh read here.
+                    var layout = (await _firestore.GetActiveLayoutTransactionsAsync())
+                        .FirstOrDefault(x => x.LineId == lineId);
 
-                    if (layoutSnapshot.Documents.Any())
+                    if (layout != null)
                     {
-                        var layout = layoutSnapshot.Documents.First().ConvertTo<LayoutTransaction>();
                         ccId = layout.CCId;
                         layoutNo ??= NormalizeLayoutNo(layout.LayoutNo);
                     }
@@ -99,19 +96,13 @@ namespace FactoryManagementSystem.Controllers
                     attendanceDate.Date,
                     DateTimeKind.Utc);
 
-                // OPTIMIZED: Query only attendance for this specific line + cc + date (not entire collection)
-                var snapshot = await _firestore.AttendanceTransactions
-                    .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
-                    .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
-                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
-                    .GetSnapshotAsync();
-
-                var data = snapshot.Documents.Select(doc =>
-                {
-                    var item = doc.ConvertTo<AttendanceTransaction>();
-                    item.FirestoreId = doc.Id;
-                    return item;
-                }).Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value).ToList();
+                // CACHED: same date-scoped attendance snapshot SkillTransaction/
+                // OperatorTracking/LineStrengthReport already share (10s TTL, tuned
+                // for exactly this cascade-of-calls-in-one-interaction pattern).
+                var data = (await _firestore.GetAttendanceForDateAsync(utcDate))
+                    .Where(x => x.LineId == lineId && x.CCId == ccId)
+                    .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
+                    .ToList();
 
                 return Ok(data);
             }
@@ -139,17 +130,15 @@ namespace FactoryManagementSystem.Controllers
             var first = request[0];
             var normalizedDate = DateTime.SpecifyKind(first.AttendanceDate.Date, DateTimeKind.Utc);
 
-            var existingSnapshot = await _firestore.AttendanceTransactions
-                .WhereEqualTo(nameof(AttendanceTransaction.LineId), first.LineId)
-                .WhereEqualTo(nameof(AttendanceTransaction.CCId), first.CCId)
-                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), normalizedDate)
-                .GetSnapshotAsync();
+            // CACHED (10s TTL): this almost always runs moments after a Get for
+            // the same line/cc/date, so the cache is warm - avoids a second
+            // fresh read of the same rows we just fetched.
+            var existingForDate = await _firestore.GetAttendanceForDateAsync(normalizedDate);
 
             var existingByKey = new Dictionary<string, string>();
-            foreach (var doc in existingSnapshot.Documents)
+            foreach (var record in existingForDate.Where(x => x.LineId == first.LineId && x.CCId == first.CCId))
             {
-                var record = doc.ConvertTo<AttendanceTransaction>();
-                existingByKey[BuildKey(record.EmployeeCode, record.LayoutNo)] = doc.Id;
+                existingByKey[BuildKey(record.EmployeeCode, record.LayoutNo)] = record.FirestoreId;
             }
 
             foreach (var item in request)

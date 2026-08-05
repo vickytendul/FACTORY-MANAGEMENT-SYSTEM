@@ -19,14 +19,10 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet]
         public async Task<IActionResult> GetZones()
         {
-            // OPTIMIZED: Filter by IsActive at Firestore level (not entire collection)
-            var snapshot = await _firestore.Zones
-                .WhereEqualTo(nameof(Zone.IsActive), true)
-                .OrderBy(nameof(Zone.ZoneId))
-                .GetSnapshotAsync();
-
-            var zones = snapshot.Documents
-                .Select(x => x.ConvertTo<Zone>())
+            // CACHED: reuses the same 45s-TTL active-zones snapshot every other
+            // screen already reads, instead of a fresh Firestore query per call.
+            var zones = (await _firestore.GetActiveZonesAsync())
+                .OrderBy(x => x.ZoneId)
                 .ToList();
 
             return Ok(zones);

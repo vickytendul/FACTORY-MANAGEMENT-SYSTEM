@@ -27,5 +27,11 @@ namespace FactoryManagementSystem.Entities
 
         public string? FailureMessage { get; set; }
         public List<string> FailedEmployeeCodes { get; set; } = new();
+
+        /// EmployeeCode values that appear more than once in the EXISTING
+        /// EmployeeMaster data itself (a data-quality issue independent of
+        /// the Company API) - populated only when Status is
+        /// VALIDATION_FAILED for this specific reason.
+        public List<string> DuplicateExistingEmployeeCodes { get; set; } = new();
     }
 }

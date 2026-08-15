@@ -138,6 +138,31 @@ namespace FactoryManagementSystem.Services
 
             _logger.LogInformation(
                 "Employee sync - EmployeeMaster loaded ({Count} existing employees)", existingEmployees.Count);
+
+            // Phase 10G: detect duplicate EmployeeCode values in the
+            // EXISTING EmployeeMaster data itself - a data-quality issue
+            // independent of the Company API - BEFORE building any lookup
+            // from it. This must run before AllocateEmployeeIdsAsync and
+            // before any write, and it must never silently pick one of the
+            // duplicates (no First()/FirstOrDefault()/"last wins") - abort
+            // the entire sync with zero writes, exactly like the existing
+            // duplicate-tno-in-the-API-response rule above.
+            var existingCodeGroups = existingEmployees
+                .GroupBy(e => e.EmployeeCode, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+                .ToList();
+
+            if (existingCodeGroups.Count > 0)
+            {
+                var duplicateCodes = existingCodeGroups.Select(g => g.Key).ToList();
+                _logger.LogError(
+                    "Employee sync aborted - EmployeeMaster contains duplicate EmployeeCode value(s): {Codes}",
+                    string.Join(", ", duplicateCodes));
+                result.DuplicateExistingEmployeeCodes = duplicateCodes;
+                return Fail(result, "VALIDATION_FAILED",
+                    "EmployeeMaster contains duplicate EmployeeCode values. Sync aborted. No EmployeeMaster writes were attempted.");
+            }
+
             var existingByCode = existingEmployees.ToDictionary(e => e.EmployeeCode, e => e, StringComparer.Ordinal);
 
             // 11: calculate CREATE / UPDATE / NO-OP entirely in memory.

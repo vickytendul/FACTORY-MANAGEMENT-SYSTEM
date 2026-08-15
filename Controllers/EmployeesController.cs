@@ -15,16 +15,43 @@ namespace FactoryManagementSystem.Controllers
         private readonly ApplicationDbContext _context;
         private readonly FirestoreService _firestore;
         private readonly SummaryService _summaryService;
-        private const string CounterDocId = "EmployeeCounter";
+        private readonly EmployeeSyncService _syncService;
 
         public EmployeesController(
             ApplicationDbContext context,
             FirestoreService firestore,
-            SummaryService summaryService)
+            SummaryService summaryService,
+            EmployeeSyncService syncService)
         {
             _context = context;
             _firestore = firestore;
             _summaryService = summaryService;
+            _syncService = syncService;
+        }
+
+        public class EmployeeSyncRequest
+        {
+            public DateTime FromDate { get; set; }
+            public DateTime ToDate { get; set; }
+        }
+
+        // POST: api/Employees/sync
+        //
+        // PHASE 10 - the only endpoint that actually writes Company API data
+        // into EmployeeMaster. Admin-only, never triggered automatically
+        // (no startup hook, no background timer, no call from any page-load
+        // path) - a human must explicitly call this.
+        [Authorize(Roles = "Admin")]
+        [HttpPost("sync")]
+        public async Task<IActionResult> SyncFromCompanyApi([FromBody] EmployeeSyncRequest request)
+        {
+            if (request.ToDate < request.FromDate)
+            {
+                return BadRequest(new { Success = false, Message = "ToDate cannot be before FromDate." });
+            }
+
+            var result = await _syncService.RunAsync(request.FromDate, request.ToDate);
+            return Ok(result);
         }
 
         // GET: api/Employees/paginated?pageSize=50&search=&activeOnly=true&lastEmployeeCode=
@@ -198,39 +225,36 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                var barcodeSnapshot = await _firestore.EmployeeMasters
-                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), employee.EmployeeBarcode)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                if (barcodeSnapshot.Documents.Any())
+                // Blank/null barcode is not a real value to deduplicate on -
+                // skip the uniqueness check entirely so multiple employees
+                // without a barcode (e.g. API-sourced employees, ahead of the
+                // Company API providing one) can all be created.
+                if (!string.IsNullOrWhiteSpace(employee.EmployeeBarcode))
                 {
-                    return BadRequest(new
+                    var barcodeSnapshot = await _firestore.EmployeeMasters
+                        .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), employee.EmployeeBarcode)
+                        .Limit(1)
+                        .GetSnapshotAsync();
+
+                    if (barcodeSnapshot.Documents.Any())
                     {
-                        Success = false,
-                        Message = "Employee Barcode already exists."
-                    });
+                        return BadRequest(new
+                        {
+                            Success = false,
+                            Message = "Employee Barcode already exists."
+                        });
+                    }
                 }
 
                 employee.IsActive = true;
 
-                var counterRef = _firestore.Counters.Document(CounterDocId);
-                var counterSnapshot = await counterRef.GetSnapshotAsync();
+                // Phase 10B: atomic allocation (Firestore transaction) - the
+                // same mechanism EmployeeSyncService uses, so a manual Add
+                // Employee here can never collide with a concurrent sync (or
+                // another concurrent Add Employee) over the same EmployeeId.
+                var allocatedIds = await _firestore.AllocateEmployeeIdsAsync(1);
+                employee.EmployeeId = allocatedIds[0];
 
-                EmployeeCounter counter;
-                if (!counterSnapshot.Exists)
-                {
-                    counter = new EmployeeCounter { LatestEmployeeId = 0 };
-                }
-                else
-                {
-                    counter = counterSnapshot.ConvertTo<EmployeeCounter>();
-                }
-
-                counter.LatestEmployeeId++;
-                employee.EmployeeId = counter.LatestEmployeeId;
-
-                await counterRef.SetAsync(counter);
                 await _firestore.EmployeeMasters
                     .Document(employee.EmployeeCode)
                     .SetAsync(employee);
@@ -287,19 +311,26 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                var barcodeSnapshot = await _firestore.EmployeeMasters
-                    .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), employee.EmployeeBarcode)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var barcodeDoc = barcodeSnapshot.Documents.FirstOrDefault();
-                if (barcodeDoc != null && barcodeDoc.ConvertTo<EmployeeMaster>().EmployeeId != id)
+                // Blank/null barcode is not a real value to deduplicate on -
+                // skip the uniqueness check entirely so multiple employees
+                // without a barcode (e.g. API-sourced employees, ahead of the
+                // Company API providing one) can all be updated/saved.
+                if (!string.IsNullOrWhiteSpace(employee.EmployeeBarcode))
                 {
-                    return BadRequest(new
+                    var barcodeSnapshot = await _firestore.EmployeeMasters
+                        .WhereEqualTo(nameof(EmployeeMaster.EmployeeBarcode), employee.EmployeeBarcode)
+                        .Limit(1)
+                        .GetSnapshotAsync();
+
+                    var barcodeDoc = barcodeSnapshot.Documents.FirstOrDefault();
+                    if (barcodeDoc != null && barcodeDoc.ConvertTo<EmployeeMaster>().EmployeeId != id)
                     {
-                        Success = false,
-                        Message = "Employee Barcode already exists."
-                    });
+                        return BadRequest(new
+                        {
+                            Success = false,
+                            Message = "Employee Barcode already exists."
+                        });
+                    }
                 }
 
                 employee.EmployeeId = id;

@@ -246,6 +246,53 @@ namespace FactoryManagementSystem.Services
             });
         }
 
+        // PHASE 10B - atomic EmployeeId range allocation. Same shape as
+        // GetNextOperationIdsAsync below: the read, the range calculation,
+        // and the counter write all happen inside one Firestore transaction,
+        // so two concurrent callers (two syncs, or a sync racing a manual
+        // AddEmployee) can never receive overlapping ranges - Firestore
+        // retries the transaction on conflict rather than letting both
+        // commit against the same starting value. This is the ONLY safe way
+        // to allocate an EmployeeId; there must be no other
+        // read-then-increment-then-separately-write path anywhere.
+        //
+        // Missing-document fallback is 0 (first allocated id = 1), matching
+        // this project's existing, already-in-production EmployeeCounter
+        // behavior (the same fallback the old AddEmployee code used) - not
+        // the unrelated "start at 1000" convention used by the
+        // LayoutMasterOperation counter below, which is a different counter
+        // for a different domain.
+        public async Task<List<int>> AllocateEmployeeIdsAsync(int count)
+        {
+            if (count <= 0) return new List<int>();
+
+            var counterRef = Counters.Document("EmployeeCounter");
+
+            return await _db.RunTransactionAsync(async transaction =>
+            {
+                // The transaction callback can run more than once on
+                // conflict - every value here is derived purely from this
+                // call's own snapshot read, nothing external is mutated.
+                var snapshot = await transaction.GetSnapshotAsync(counterRef);
+                int current = snapshot.Exists && snapshot.ContainsField("LatestEmployeeId")
+                    ? snapshot.GetValue<int>("LatestEmployeeId")
+                    : 0;
+
+                var ids = new List<int>(count);
+                for (int i = 1; i <= count; i++)
+                {
+                    ids.Add(current + i);
+                }
+
+                transaction.Set(counterRef, new Dictionary<string, object>
+                {
+                    { "LatestEmployeeId", current + count }
+                }, SetOptions.MergeAll);
+
+                return ids;
+            });
+        }
+
         public async Task<List<int>> GetNextOperationIdsAsync(int count)
         {
             var counterRef = Counters.Document("LayoutMasterOperation");

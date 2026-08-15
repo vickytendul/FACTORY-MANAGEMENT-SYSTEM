@@ -1,5 +1,4 @@
-using System.Text;
-using System.Text.Json;
+using FactoryManagementSystem.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -17,6 +16,10 @@ namespace FactoryManagementSystem.Controllers
     // relays the response back unchanged - no parsing, no business logic,
     // no change to the company API's request/response contract.
     //
+    // The actual HTTP call now lives in CompanyApiClient (Phase 10), shared
+    // with EmployeeSyncService, so there is exactly one piece of code that
+    // talks to the vendor - this action's own behavior is unchanged.
+    //
     // [AllowAnonymous] because this is called from the isolated Phase 1
     // test screen, which has no login flow of its own.
     [ApiController]
@@ -24,12 +27,12 @@ namespace FactoryManagementSystem.Controllers
     [AllowAnonymous]
     public class EmployeeApiProxyController : ControllerBase
     {
-        private static readonly HttpClient _httpClient = new HttpClient
-        {
-            Timeout = TimeSpan.FromSeconds(30)
-        };
+        private readonly CompanyApiClient _companyApiClient;
 
-        private const string CompanyApiUrl = "http://life.gainup.in:8089/api/payroll/Employee_Att";
+        public EmployeeApiProxyController(CompanyApiClient companyApiClient)
+        {
+            _companyApiClient = companyApiClient;
+        }
 
         public class FetchRequest
         {
@@ -43,23 +46,15 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var payload = JsonSerializer.Serialize(new
-                {
-                    Compcode = request.Compcode,
-                    fromdt = request.Fromdt,
-                    todt = request.Todt,
-                });
+                var (success, statusCode, body) = await _companyApiClient.FetchRawAsync(
+                    request.Compcode, request.Fromdt, request.Todt);
 
-                using var content = new StringContent(payload, Encoding.UTF8, "application/json");
-                using var response = await _httpClient.PostAsync(CompanyApiUrl, content);
-                var body = await response.Content.ReadAsStringAsync();
-
-                if (!response.IsSuccessStatusCode)
+                if (!success)
                 {
-                    return StatusCode((int)response.StatusCode, new
+                    return StatusCode(statusCode, new
                     {
                         Success = false,
-                        Message = $"Company API returned HTTP {(int)response.StatusCode}.",
+                        Message = $"Company API returned HTTP {statusCode}.",
                         Body = body
                     });
                 }

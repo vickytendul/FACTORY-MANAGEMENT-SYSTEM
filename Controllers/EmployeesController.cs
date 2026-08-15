@@ -54,6 +54,58 @@ namespace FactoryManagementSystem.Controllers
             return Ok(result);
         }
 
+        // GET: api/Employees/duplicate-codes
+        //
+        // PHASE 10J - READ ONLY DIAGNOSTIC. Groups every EmployeeMaster
+        // document by EmployeeCode using the exact same StringComparer
+        // .Ordinal comparison EmployeeSyncService uses, and reports every
+        // record belonging to a duplicated code - Firestore document ID
+        // included, so it's clear whether the duplication is two genuinely
+        // different documents or a document ID that drifted from its
+        // EmployeeCode field. Never selects a winner, never writes
+        // anything - a single read of the EmployeeMasters collection is the
+        // only Firestore access this action performs.
+        [Authorize(Roles = "Admin")]
+        [HttpGet("duplicate-codes")]
+        public async Task<IActionResult> GetDuplicateEmployeeCodes()
+        {
+            var snapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+
+            var duplicates = snapshot.Documents
+                .Select(d => new { DocumentId = d.Id, Employee = d.ConvertTo<EmployeeMaster>() })
+                .GroupBy(x => x.Employee.EmployeeCode, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+                .OrderBy(g => g.Key, StringComparer.Ordinal)
+                .Select(g => new
+                {
+                    EmployeeCode = g.Key,
+                    Count = g.Count(),
+                    Records = g.Select(x => new
+                    {
+                        x.DocumentId,
+                        x.Employee.EmployeeCode,
+                        x.Employee.EmployeeId,
+                        x.Employee.EmployeeName,
+                        x.Employee.EmployeeBarcode,
+                        x.Employee.Department,
+                        x.Employee.Designation,
+                        x.Employee.Grade,
+                        x.Employee.IsActive,
+                        x.Employee.Unit,
+                        DocumentIdMatchesEmployeeCode =
+                            string.Equals(x.DocumentId, x.Employee.EmployeeCode, StringComparison.Ordinal),
+                    }).ToList(),
+                })
+                .ToList();
+
+            return Ok(new
+            {
+                TotalEmployeeMasterDocuments = snapshot.Documents.Count,
+                DuplicateEmployeeCodeCount = duplicates.Count,
+                Duplicates = duplicates,
+            });
+        }
+
         // GET: api/Employees/paginated?pageSize=50&search=&activeOnly=true&lastEmployeeCode=
         [HttpGet("paginated")]
         public async Task<IActionResult> GetEmployeesPaginated(

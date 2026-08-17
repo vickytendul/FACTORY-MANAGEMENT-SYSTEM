@@ -82,5 +82,26 @@ namespace FactoryManagementSystem.Entities
         public string Barcode { get; set; } = string.Empty;
         public int Count { get; set; }
         public List<string> EmployeeCodes { get; set; } = new();
+
+        /// Phase 11B - full record detail for every EmployeeMaster document
+        /// sharing this Barcode, so the actual data can be inspected before
+        /// any decision is made. Derived from the same EmployeeMasters
+        /// snapshot GetIntegrityAudit() already loaded - no additional
+        /// Firestore read.
+        public List<DuplicateBarcodeMemberRecord> Records { get; set; } = new();
+    }
+
+    public class DuplicateBarcodeMemberRecord
+    {
+        public string DocumentId { get; set; } = string.Empty;
+        public string EmployeeCode { get; set; } = string.Empty;
+        public int EmployeeId { get; set; }
+        public string EmployeeName { get; set; } = string.Empty;
+        public string EmployeeBarcode { get; set; } = string.Empty;
+        public string? Department { get; set; }
+        public string? Designation { get; set; }
+        public string Grade { get; set; } = string.Empty;
+        public bool IsActive { get; set; }
+        public string? Unit { get; set; }
     }
 }

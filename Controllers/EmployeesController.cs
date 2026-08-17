@@ -214,7 +214,9 @@ namespace FactoryManagementSystem.Controllers
             result.IsActiveMismatchCount = result.IsActiveMismatches.Count;
 
             // 8. Duplicate Barcode - informational/warning only. Barcode is
-            // never treated as identity and never used as document ID.
+            // never treated as identity and never used as document ID. Full
+            // record detail (Phase 11B) is derived from the SAME `employees`
+            // list already built above - no additional Firestore read.
             result.DuplicateBarcodes = employees
                 .Where(e => !string.IsNullOrWhiteSpace(e.Employee.EmployeeBarcode))
                 .GroupBy(e => e.Employee.EmployeeBarcode, StringComparer.Ordinal)
@@ -224,6 +226,19 @@ namespace FactoryManagementSystem.Controllers
                     Barcode = g.Key,
                     Count = g.Count(),
                     EmployeeCodes = g.Select(x => x.Employee.EmployeeCode).ToList(),
+                    Records = g.Select(x => new DuplicateBarcodeMemberRecord
+                    {
+                        DocumentId = x.DocumentId,
+                        EmployeeCode = x.Employee.EmployeeCode,
+                        EmployeeId = x.Employee.EmployeeId,
+                        EmployeeName = x.Employee.EmployeeName,
+                        EmployeeBarcode = x.Employee.EmployeeBarcode,
+                        Department = x.Employee.Department,
+                        Designation = x.Employee.Designation,
+                        Grade = x.Employee.Grade,
+                        IsActive = x.Employee.IsActive,
+                        Unit = x.Employee.Unit,
+                    }).ToList(),
                 })
                 .ToList();
             result.DuplicateBarcodeCount = result.DuplicateBarcodes.Count;

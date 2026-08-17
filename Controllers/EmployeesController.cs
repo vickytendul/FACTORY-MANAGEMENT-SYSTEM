@@ -5,6 +5,7 @@ using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Text.RegularExpressions;
 
 namespace FactoryManagementSystem.Controllers
 {
@@ -104,6 +105,181 @@ namespace FactoryManagementSystem.Controllers
                 DuplicateEmployeeCodeCount = duplicates.Count,
                 Duplicates = duplicates,
             });
+        }
+
+        // GET: api/Employees/integrity-audit
+        //
+        // PHASE 11A - READ ONLY. Never creates, updates, deletes, merges, or
+        // selects a winner - this action only reads (EmployeeMaster once,
+        // each transaction collection once) and reports data-quality
+        // findings for manual review. Nothing here calls EmployeeSyncService,
+        // AllocateEmployeeIdsAsync, or InvalidateEmployeesCache.
+        [Authorize(Roles = "Admin")]
+        [HttpGet("integrity-audit")]
+        public async Task<IActionResult> GetIntegrityAudit()
+        {
+            var employeeSnapshot = await _firestore.EmployeeMasters.GetSnapshotAsync();
+            var employees = employeeSnapshot.Documents
+                .Select(d => (DocumentId: d.Id, Employee: d.ConvertTo<EmployeeMaster>()))
+                .ToList();
+
+            var result = new EmployeeIntegrityAuditResult
+            {
+                TotalEmployeeMaster = employees.Count,
+            };
+
+            // 1. Document ID vs EmployeeCode - expected: always equal.
+            result.DocumentIdMismatches = employees
+                .Where(e => !string.Equals(e.DocumentId, e.Employee.EmployeeCode, StringComparison.Ordinal))
+                .Select(e => new DocumentIdMismatchRecord
+                {
+                    DocumentId = e.DocumentId,
+                    EmployeeCode = e.Employee.EmployeeCode,
+                    EmployeeName = e.Employee.EmployeeName,
+                })
+                .ToList();
+            result.DocumentIdMismatchCount = result.DocumentIdMismatches.Count;
+
+            // 2. Duplicate EmployeeCode - same StringComparer.Ordinal grouping
+            // used by EmployeeSyncService's own validation.
+            result.DuplicateEmployeeCodes = employees
+                .GroupBy(e => e.Employee.EmployeeCode, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+                .Select(g => new DuplicateEmployeeCodeGroupRecord
+                {
+                    EmployeeCode = g.Key,
+                    Count = g.Count(),
+                    DocumentIds = g.Select(x => x.DocumentId).ToList(),
+                })
+                .ToList();
+            result.DuplicateEmployeeCodeCount = result.DuplicateEmployeeCodes.Count;
+
+            // 3. Duplicate EmployeeId.
+            result.DuplicateEmployeeIds = employees
+                .GroupBy(e => e.Employee.EmployeeId)
+                .Where(g => g.Count() > 1)
+                .Select(g => new DuplicateEmployeeIdGroupRecord
+                {
+                    EmployeeId = g.Key,
+                    Count = g.Count(),
+                    EmployeeCodes = g.Select(x => x.Employee.EmployeeCode).ToList(),
+                })
+                .ToList();
+            result.DuplicateEmployeeIdCount = result.DuplicateEmployeeIds.Count;
+
+            // 4. Empty/invalid EmployeeCode.
+            result.EmptyEmployeeCodes = employees
+                .Where(e => string.IsNullOrWhiteSpace(e.Employee.EmployeeCode))
+                .Select(e => new EmptyEmployeeCodeRecord
+                {
+                    DocumentId = e.DocumentId,
+                    EmployeeId = e.Employee.EmployeeId,
+                    EmployeeName = e.Employee.EmployeeName,
+                })
+                .ToList();
+            result.EmptyEmployeeCodeCount = result.EmptyEmployeeCodes.Count;
+
+            // 5. Grade validation - only flagged when Designation
+            // deterministically implies a grade AND the stored value
+            // disagrees. A non-matching Designation is NOT an error; Grade
+            // may legitimately be preserved for that employee.
+            result.GradeMismatches = employees
+                .Select(e => (e, expected: DeriveExpectedGrade(e.Employee.Designation)))
+                .Where(t => t.expected != null && !string.Equals(t.expected, t.e.Employee.Grade, StringComparison.Ordinal))
+                .Select(t => new GradeMismatchRecord
+                {
+                    EmployeeCode = t.e.Employee.EmployeeCode,
+                    EmployeeName = t.e.Employee.EmployeeName,
+                    Designation = t.e.Employee.Designation ?? string.Empty,
+                    StoredGrade = t.e.Employee.Grade,
+                    ExpectedGrade = t.expected!,
+                })
+                .ToList();
+            result.GradeMismatchCount = result.GradeMismatches.Count;
+
+            // 6. IsActive validation - year-only derivation from
+            // DateOfReleave, matching EmployeeSyncService's rule exactly.
+            result.IsActiveMismatches = employees
+                .Select(e => (e, expected: IsActiveFromDateOfReleave(e.Employee.DateOfReleave)))
+                .Where(t => t.expected != t.e.Employee.IsActive)
+                .Select(t => new IsActiveMismatchRecord
+                {
+                    EmployeeCode = t.e.Employee.EmployeeCode,
+                    EmployeeName = t.e.Employee.EmployeeName,
+                    DateOfReleave = t.e.Employee.DateOfReleave,
+                    StoredIsActive = t.e.Employee.IsActive,
+                    ExpectedIsActive = t.expected,
+                })
+                .ToList();
+            result.IsActiveMismatchCount = result.IsActiveMismatches.Count;
+
+            // 8. Duplicate Barcode - informational/warning only. Barcode is
+            // never treated as identity and never used as document ID.
+            result.DuplicateBarcodes = employees
+                .Where(e => !string.IsNullOrWhiteSpace(e.Employee.EmployeeBarcode))
+                .GroupBy(e => e.Employee.EmployeeBarcode, StringComparer.Ordinal)
+                .Where(g => g.Count() > 1)
+                .Select(g => new DuplicateBarcodeGroupRecord
+                {
+                    Barcode = g.Key,
+                    Count = g.Count(),
+                    EmployeeCodes = g.Select(x => x.Employee.EmployeeCode).ToList(),
+                })
+                .ToList();
+            result.DuplicateBarcodeCount = result.DuplicateBarcodes.Count;
+
+            // Phase 11A safety adjustment: the transaction reference check
+            // (Layout/Attendance/Skill orphan detection) is intentionally
+            // NOT performed in this pass - it would require 3 additional
+            // Firestore collection reads. This audit performs exactly ONE
+            // Firestore read in total (the EmployeeMasters snapshot above).
+            result.TransactionReferenceAuditIncluded = false;
+
+            return Ok(result);
+        }
+
+        // Duplicated (not extracted into a shared helper) from
+        // EmployeeSyncService's own Grade/IsActive rules deliberately - this
+        // audit avoids touching the already-approved, already-deployed sync
+        // service for a pure refactor. Both copies must stay in sync if the
+        // rule ever changes.
+        private static readonly Regex AuditGradeDesignationPattern =
+            new(@"^TAILOR\s*-\s*(A\+|A|B|C)$", RegexOptions.Compiled);
+
+        private static string? DeriveExpectedGrade(string? designation)
+        {
+            var normalized = (designation ?? string.Empty).Trim().ToUpperInvariant();
+            var match = AuditGradeDesignationPattern.Match(normalized);
+            return match.Success ? match.Groups[1].Value : null;
+        }
+
+        private static readonly string[] AuditMonthAbbr =
+        {
+            "jan", "feb", "mar", "apr", "may", "jun",
+            "jul", "aug", "sep", "oct", "nov", "dec",
+        };
+
+        private static bool IsActiveFromDateOfReleave(string? dateOfReleave)
+        {
+            var trimmed = (dateOfReleave ?? string.Empty).Trim();
+            if (trimmed.Length == 0) return true;
+            var year = ExtractAuditYear(trimmed);
+            return year == null || year == 9999;
+        }
+
+        private static int? ExtractAuditYear(string value)
+        {
+            var parts = value.Split('-');
+            if (parts.Length == 3
+                && int.TryParse(parts[0], out _)
+                && Array.IndexOf(AuditMonthAbbr, parts[1].ToLowerInvariant()) >= 0
+                && int.TryParse(parts[2], out var year))
+            {
+                return year;
+            }
+
+            var m = Regex.Match(value, @"(\d{4})");
+            return m.Success ? int.Parse(m.Groups[1].Value) : null;
         }
 
         // GET: api/Employees/paginated?pageSize=50&search=&activeOnly=true&lastEmployeeCode=

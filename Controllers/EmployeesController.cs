@@ -17,20 +17,17 @@ namespace FactoryManagementSystem.Controllers
         private readonly FirestoreService _firestore;
         private readonly SummaryService _summaryService;
         private readonly EmployeeSyncService _syncService;
-        private readonly EmployeeReplacementService _replacementService;
 
         public EmployeesController(
             ApplicationDbContext context,
             FirestoreService firestore,
             SummaryService summaryService,
-            EmployeeSyncService syncService,
-            EmployeeReplacementService replacementService)
+            EmployeeSyncService syncService)
         {
             _context = context;
             _firestore = firestore;
             _summaryService = summaryService;
             _syncService = syncService;
-            _replacementService = replacementService;
         }
 
         public class EmployeeSyncRequest
@@ -55,29 +52,6 @@ namespace FactoryManagementSystem.Controllers
             }
 
             var result = await _syncService.RunAsync(request.FromDate, request.ToDate);
-            return Ok(result);
-        }
-
-        // POST: api/Employees/replace-from-company-api
-        //
-        // PHASE 11C - FULL REPLACEMENT. Separate from /sync above and from
-        // EmployeeSyncService entirely - this is the only endpoint in the
-        // whole application allowed to delete EmployeeMaster documents, and
-        // it only ever deletes documents whose EmployeeCode the Company API
-        // no longer lists, only after the validated API dataset has already
-        // been successfully imported. Admin-only, never triggered
-        // automatically. Calling this endpoint is itself the execution of
-        // the operation - nothing in this codebase calls it on your behalf.
-        [Authorize(Roles = "Admin")]
-        [HttpPost("replace-from-company-api")]
-        public async Task<IActionResult> ReplaceFromCompanyApi([FromBody] EmployeeSyncRequest request)
-        {
-            if (request.ToDate < request.FromDate)
-            {
-                return BadRequest(new { Success = false, Message = "ToDate cannot be before FromDate." });
-            }
-
-            var result = await _replacementService.RunAsync(request.FromDate, request.ToDate);
             return Ok(result);
         }
 

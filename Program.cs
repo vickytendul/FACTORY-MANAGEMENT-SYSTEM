@@ -61,7 +61,6 @@ builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<LineStrengthReportService>();
 builder.Services.AddSingleton<CompanyApiClient>();
 builder.Services.AddSingleton<EmployeeSyncService>();
-builder.Services.AddSingleton<EmployeeReplacementService>();
 
 // =====================================================
 // Authentication / Authorization

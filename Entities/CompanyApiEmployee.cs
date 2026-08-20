@@ -40,13 +40,10 @@ namespace FactoryManagementSystem.Entities
         [JsonPropertyName("reason")]
         public string? Reason { get; set; }
 
-        /// Not yet part of the Company API contract - re-verified live
-        /// during Phase 9A/10 (the response has no barcode-like field
-        /// today). No [JsonPropertyName] is mapped here on purpose:
-        /// guessing a key name is exactly what was ruled out when this
-        /// field was prepared. Wire the real key up the moment the vendor
-        /// confirms it - nothing else needs to change.
-        [JsonIgnore]
+        /// PHASE 12D - the Company API now provides this field as
+        /// "Bar_Code" (confirmed via a live fetch), so it's wired up here
+        /// the same way as every other fixed field above.
+        [JsonPropertyName("Bar_Code")]
         public string? Barcode { get; set; }
     }
 }

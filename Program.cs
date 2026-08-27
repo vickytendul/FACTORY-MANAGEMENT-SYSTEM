@@ -105,11 +105,22 @@ builder.Services.AddDbContext<ApplicationDbContext>(options =>
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// The Flutter client is either run locally via `flutter run` (a dev
+// server on a port Flutter assigns each run, e.g. http://localhost:55957)
+// or served as the hosted Flutter Web build at the fixed Firebase Hosting
+// origin below. Allowing exactly these origins covers every legitimate
+// caller without falling back to AllowAnyOrigin() (which would also
+// accept requests from any arbitrary external website).
+const string HostedFlutterWebOrigin = "https://factorymanagementsystem-1ea9a.web.app";
+
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFlutter", policy =>
     {
-        policy.AllowAnyOrigin()
+        policy.SetIsOriginAllowed(origin =>
+                Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
+                (uri.Host == "localhost" || uri.Host == "127.0.0.1" ||
+                 origin.Equals(HostedFlutterWebOrigin, StringComparison.OrdinalIgnoreCase)))
               .AllowAnyHeader()
               .AllowAnyMethod();
     });

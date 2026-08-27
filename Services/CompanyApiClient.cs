@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FactoryManagementSystem.Entities;
@@ -34,6 +35,7 @@ namespace FactoryManagementSystem.Services
         private const string CompanyApiBaseUrl = "http://life.gainup.in:8089";
         private const string LoginUrl = CompanyApiBaseUrl + "/api/login";
         private const string CompanyApiUrl = CompanyApiBaseUrl + "/api/payroll/Employee_Att";
+        private const string SewingProdReptUrl = CompanyApiBaseUrl + "/api/woven/SewingProdRept";
 
         private static readonly string[] MonthAbbr =
         {
@@ -53,35 +55,95 @@ namespace FactoryManagementSystem.Services
             int compCode, string fromDt, string toDt)
         {
             var payload = JsonSerializer.Serialize(new { Compcode = compCode, fromdt = fromDt, todt = toDt });
+            return await SendWithAuthRetryAsync(CompanyApiUrl, payload);
+        }
 
+        /// Shared by every Company API POST endpoint (Employee_Att,
+        /// SewingProdRept, and any future one): obtains the cached token,
+        /// sends the request, and on a 401 invalidates the token (only if
+        /// it hasn't already been replaced by another caller), logs in
+        /// exactly once more, and retries exactly once. Whatever that
+        /// second attempt returns is final - no further retries. This is
+        /// the ONE authentication/retry mechanism in this class - every
+        /// caller reuses it rather than re-implementing login handling.
+        private async Task<(bool success, int statusCode, string body)> SendWithAuthRetryAsync(
+            string url, string payload, bool logDiagnostics = false)
+        {
             var token = await GetTokenAsync();
-            var result = await SendEmployeeAttAsync(payload, token);
+            if (logDiagnostics)
+            {
+                Console.WriteLine($"[SewingProdDiag] Login/token ready at (UTC): {DateTime.UtcNow:O}");
+            }
+
+            var result = await SendAuthenticatedPostAsync(url, payload, token, logDiagnostics);
 
             if (result.statusCode == 401)
             {
-                // The cached token was rejected - invalidate it (only if it
-                // hasn't already been replaced by another caller), log in
-                // exactly once more, and retry exactly once. Whatever this
-                // second attempt returns is final - no further retries.
                 await InvalidateTokenIfCurrentAsync(token);
                 token = await GetTokenAsync();
-                result = await SendEmployeeAttAsync(payload, token);
+                result = await SendAuthenticatedPostAsync(url, payload, token, logDiagnostics);
             }
 
             return result;
         }
 
-        private static async Task<(bool success, int statusCode, string body)> SendEmployeeAttAsync(
-            string payload, string token)
+        /// PHASE 12R - logDiagnostics is opt-in, defaulting to false, so
+        /// Employee_Att (FetchRawAsync) is completely unaffected - only
+        /// FetchSewingProductionReportAsync passes true. Never logs the
+        /// username, password, or raw token - only a SHA-256 fingerprint
+        /// and length, matching the same safe-logging convention already
+        /// used by LoginAsync's exception messages.
+        private static async Task<(bool success, int statusCode, string body)> SendAuthenticatedPostAsync(
+            string url, string payload, string token, bool logDiagnostics = false)
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, CompanyApiUrl)
+            using var request = new HttpRequestMessage(HttpMethod.Post, url)
             {
                 Content = new StringContent(payload, Encoding.UTF8, "application/json"),
             };
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
 
+            if (logDiagnostics)
+            {
+                var bodyBytes = Encoding.UTF8.GetBytes(payload);
+                Console.WriteLine();
+                Console.WriteLine("=== SEWING PROD DIAGNOSTIC ===");
+                Console.WriteLine($"Vendor URL: {url}");
+                Console.WriteLine("Method: POST");
+                Console.WriteLine($"Request JSON: {payload}");
+                Console.WriteLine($"Request Body SHA256: {Convert.ToHexString(SHA256.HashData(bodyBytes))}");
+                Console.WriteLine("Authorization Scheme: Bearer");
+                Console.WriteLine($"Token Length: {token.Length}");
+                Console.WriteLine($"Token SHA256: {Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)))}");
+                Console.WriteLine("Request Headers:");
+                foreach (var h in request.Headers)
+                {
+                    var val = h.Key == "Authorization" ? "Bearer <redacted>" : string.Join(",", h.Value);
+                    Console.WriteLine($"  {h.Key}: {val}");
+                }
+                foreach (var h in request.Content.Headers)
+                {
+                    Console.WriteLine($"  {h.Key}: {string.Join(",", h.Value)}");
+                }
+                Console.WriteLine($"Vendor request start (UTC): {DateTime.UtcNow:O}");
+            }
+
             using var response = await _httpClient.SendAsync(request);
-            var body = await response.Content.ReadAsStringAsync();
+            var rawBytes = await response.Content.ReadAsByteArrayAsync();
+            var body = Encoding.UTF8.GetString(rawBytes);
+
+            if (logDiagnostics)
+            {
+                Console.WriteLine($"Vendor response received (UTC): {DateTime.UtcNow:O}");
+                Console.WriteLine($"Vendor Status: {(int)response.StatusCode}");
+                Console.WriteLine($"Vendor Content-Type: {response.Content.Headers.ContentType}");
+                Console.WriteLine($"Vendor Content-Length: {response.Content.Headers.ContentLength}");
+                Console.WriteLine($"Raw Response Bytes: {rawBytes.Length}");
+                Console.WriteLine($"Raw Response SHA256: {Convert.ToHexString(SHA256.HashData(rawBytes))}");
+                Console.WriteLine($"Raw Response: {body.Substring(0, Math.Min(2000, body.Length))}");
+                Console.WriteLine("=== END DIAGNOSTIC ===");
+                Console.WriteLine();
+            }
+
             return (response.IsSuccessStatusCode, (int)response.StatusCode, body);
         }
 
@@ -206,6 +268,39 @@ namespace FactoryManagementSystem.Services
 
             return employees ?? throw new InvalidOperationException(
                 "Company API response could not be parsed as an employee list.");
+        }
+
+        /// PHASE 12J - Sewing Production Report. Reuses the exact same
+        /// SendWithAuthRetryAsync mechanism as FetchRawAsync above - no
+        /// second login/retry implementation. Throws on any failure, same
+        /// convention as FetchEmployeesAsync.
+        public async Task<List<SewingProdReptResponse>> FetchSewingProductionReportAsync(SewingProdReptRequest request)
+        {
+            var payload = JsonSerializer.Serialize(request);
+            var (success, statusCode, body) = await SendWithAuthRetryAsync(SewingProdReptUrl, payload, logDiagnostics: true);
+
+            if (!success)
+            {
+                throw new InvalidOperationException($"Company API Sewing Production Report request failed with HTTP {statusCode}.");
+            }
+
+            if (string.IsNullOrWhiteSpace(body))
+            {
+                throw new InvalidOperationException("Company API Sewing Production Report returned an empty response.");
+            }
+
+            List<SewingProdReptResponse>? report;
+            try
+            {
+                report = JsonSerializer.Deserialize<List<SewingProdReptResponse>>(body);
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException($"Company API Sewing Production Report returned invalid JSON: {ex.Message}");
+            }
+
+            return report ?? throw new InvalidOperationException(
+                "Company API Sewing Production Report response could not be parsed as a list.");
         }
 
         /// The API expects dd-MMM-yyyy, e.g. "01-Jul-2026".

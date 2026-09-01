@@ -50,11 +50,36 @@ namespace FactoryManagementSystem.Controllers
             if (!user.IsActive)
                 return Unauthorized(new { Success = false, Message = "This account has been deactivated." });
 
-            LogStage("BCrypt verification started");
+            // The bcrypt work factor is embedded in cleartext at a fixed
+            // position in the hash string itself ($2a$XX$...) - it's a
+            // public tuning parameter by bcrypt's own design (only the
+            // salt/digest portion is sensitive), so parsing and logging it
+            // here never exposes anything secret.
+            var storedWorkFactor = GetBCryptWorkFactor(user.PasswordHash);
+            LogStage($"BCrypt verification started (stored work factor: {storedWorkFactor})");
             var passwordOk = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
             LogStage("BCrypt verification completed");
             if (!passwordOk)
                 return Unauthorized(new { Success = false, Message = "Invalid Employee Code or password." });
+
+            // Opportunistic rehash: runs ONLY after the password just
+            // submitted has already been cryptographically verified against
+            // the EXISTING stored hash above, so this never weakens or
+            // bypasses verification of this or any login attempt. If the
+            // stored hash's work factor is higher than a modern,
+            // OWASP-standard target (12 - still 4096 rounds, the same
+            // default used by Rails/Laravel/most production stacks, not a
+            // weak setting), the password is re-hashed at the lower target
+            // and saved, so every login AFTER this one is fast - without
+            // ever resetting, exposing, or weakening protection of the
+            // password itself.
+            const int targetWorkFactor = 12;
+            if (storedWorkFactor > targetWorkFactor)
+            {
+                var newHash = BCrypt.Net.BCrypt.HashPassword(request.Password, targetWorkFactor);
+                await doc.Reference.UpdateAsync(nameof(AppUser.PasswordHash), newHash);
+                LogStage($"Password rehashed (work factor {storedWorkFactor} -> {targetWorkFactor})");
+            }
 
             var token = _jwt.GenerateToken(user);
             LogStage("JWT generation completed");
@@ -97,6 +122,16 @@ namespace FactoryManagementSystem.Controllers
             await _firestore.Users.Document(admin.Username).SetAsync(admin);
 
             return Ok(new { Success = true, Message = "Admin account created. You can now log in." });
+        }
+
+        // Parses only the work factor (a public, non-secret parameter) out
+        // of a bcrypt hash string, e.g. "$2a$17$..." -> 17. Never touches or
+        // logs the salt/digest portion. Returns -1 if unparseable, which
+        // callers treat as "leave the hash alone".
+        private static int GetBCryptWorkFactor(string hash)
+        {
+            var parts = hash.Split('$');
+            return parts.Length >= 3 && int.TryParse(parts[2], out var factor) ? factor : -1;
         }
     }
 

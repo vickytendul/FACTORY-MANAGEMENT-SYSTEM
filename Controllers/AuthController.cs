@@ -22,13 +22,24 @@ namespace FactoryManagementSystem.Controllers
         [HttpPost("login")]
         public async Task<IActionResult> Login([FromBody] LoginRequest request)
         {
+            // TEMPORARY diagnostic timing only - stage durations, never any
+            // secret (username, password, password hash, or JWT/token) is
+            // logged. Remove once the login-delay investigation is closed.
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            void LogStage(string stage) =>
+                Console.WriteLine($"[AuthTiming] {stage}: T+{sw.ElapsedMilliseconds}ms");
+
+            LogStage("Request received");
+
             if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
                 return BadRequest(new { Success = false, Message = "Employee Code and password are required." });
 
+            LogStage("User lookup started");
             var snapshot = await _firestore.Users
                 .WhereEqualTo(nameof(AppUser.Username), request.Username.Trim())
                 .Limit(1)
                 .GetSnapshotAsync();
+            LogStage("User lookup completed");
 
             var doc = snapshot.Documents.FirstOrDefault();
             if (doc == null)
@@ -39,12 +50,16 @@ namespace FactoryManagementSystem.Controllers
             if (!user.IsActive)
                 return Unauthorized(new { Success = false, Message = "This account has been deactivated." });
 
-            if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+            LogStage("BCrypt verification started");
+            var passwordOk = BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash);
+            LogStage("BCrypt verification completed");
+            if (!passwordOk)
                 return Unauthorized(new { Success = false, Message = "Invalid Employee Code or password." });
 
             var token = _jwt.GenerateToken(user);
+            LogStage("JWT generation completed");
 
-            return Ok(new
+            var result = Ok(new
             {
                 Success = true,
                 Token = token,
@@ -52,6 +67,8 @@ namespace FactoryManagementSystem.Controllers
                 DisplayName = user.DisplayName,
                 Role = user.Role
             });
+            LogStage("Response completed");
+            return result;
         }
 
         // One-time bootstrap: only works while the Users collection is empty,

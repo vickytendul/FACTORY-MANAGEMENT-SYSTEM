@@ -14,8 +14,13 @@ WORKDIR /app
 
 COPY --from=build /app/publish .
 
-ENV ASPNETCORE_URLS=http://+:10000
-
+# No hard-coded ASPNETCORE_URLS here - Render assigns the actual port to
+# listen on via the PORT environment variable at container start (it is
+# not a fixed value across deploys/services), and Program.cs binds to
+# whatever that is at runtime, falling back to 10000 for local/non-Render
+# use. A hard-coded port here previously caused Render's port scan to time
+# out, since the app was always bound to 10000 regardless of the port
+# Render actually wanted to route traffic to.
 EXPOSE 10000
 
 ENTRYPOINT ["dotnet", "FACTORY MANAGEMENT SYSTEM.dll"]

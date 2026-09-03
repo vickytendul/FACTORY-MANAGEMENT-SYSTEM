@@ -13,6 +13,32 @@ using Microsoft.IdentityModel.Tokens;
 var builder = WebApplication.CreateBuilder(args);
 
 // =====================================================
+// Hosting / Port Binding
+// =====================================================
+//
+// Render assigns the actual port to listen on via the PORT environment
+// variable when the container starts - this varies per deploy/service and
+// is never a value we can hard-code. Binding explicitly here (rather than
+// relying on a fixed ASPNETCORE_URLS baked into the image) is what lets
+// Render's own port scan find the app - a mismatched hard-coded port was
+// the previous cause of "Port scan timeout reached, no open ports
+// detected." Falls back to 10000 (matching the Dockerfile's EXPOSE and
+// prior local-container convention) when PORT isn't set.
+//
+// Scoped to non-Development only: `dotnet run` locally sets
+// ASPNETCORE_ENVIRONMENT=Development via Properties/launchSettings.json,
+// which has no PORT variable - if this ran unconditionally it would
+// override launchSettings.json's own applicationUrl (localhost:5271/7004)
+// and break local development. The Dockerfile's runtime image never sets
+// ASPNETCORE_ENVIRONMENT to Development, so this only ever applies to the
+// Render/container deployment, exactly where the dynamic PORT matters.
+if (!builder.Environment.IsDevelopment())
+{
+    var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
+    builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
+}
+
+// =====================================================
 // Firebase Authentication
 // Render -> Environment Variable
 // Local -> Firebase JSON File

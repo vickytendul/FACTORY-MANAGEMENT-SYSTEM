@@ -39,4 +39,15 @@
 
         public string EmployeeGrade { get; set; } = string.Empty;
     }
+
+    // Request for the explicit "CC Change" action: release every currently
+    // active allocation for LineId+OldCCId. OldCCId is required explicitly
+    // (rather than the backend inferring "whatever is currently active")
+    // so the release always targets exactly the CC the supervisor was shown
+    // and confirmed against.
+    public class ChangeCcRequest
+    {
+        public int LineId { get; set; }
+        public int OldCCId { get; set; }
+    }
 }

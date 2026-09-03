@@ -54,6 +54,35 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // POST: api/LayoutTransaction/change-cc
+        //
+        // Explicit "CC Change" action: atomically releases every currently
+        // active allocation for LineId+OldCCId (IsActive=false, never
+        // deleted - preserved as history) so those employees become FREE.
+        // This does NOT touch or create anything for a new CC - the
+        // supervisor picks the new CC afterward through the normal CC
+        // selector, and employees are allocated to it only by being
+        // individually scanned and saved through the existing Save flow,
+        // which is completely unmodified by this action.
+        [HttpPost("change-cc")]
+        public async Task<IActionResult> ChangeCc([FromBody] ChangeCcRequest request)
+        {
+            try
+            {
+                var releasedCount = await ReleaseActiveAllocationsAsync(request.LineId, request.OldCCId);
+                return Ok(new
+                {
+                    Success = true,
+                    Message = $"Released {releasedCount} employee allocation(s) from CC {request.OldCCId}.",
+                    ReleasedCount = releasedCount
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // GET: api/LayoutTransaction/all  — returns all active transactions
         [HttpGet("all")]
         public async Task<IActionResult> GetAllActive()
@@ -441,6 +470,65 @@ namespace FactoryManagementSystem.Controllers
                         await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, oldCode);
                 }
             }
+        }
+
+        // Explicit "CC Change" release: every currently active allocation for
+        // LineId+CCId is flipped to IsActive=false in ONE Firestore
+        // transaction - either all of them succeed, or (on any failure) none
+        // do, so the caller never ends up in a half-released state. Records
+        // are only ever updated, never deleted, so they remain as full
+        // history exactly as they were. This does not touch any other CC,
+        // and does not create or modify anything for a new CC - that is a
+        // separate, later Save through the normal, unmodified flow.
+        private async Task<int> ReleaseActiveAllocationsAsync(int lineId, int ccId)
+        {
+            var query = _firestore.LayoutTransactions
+                .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
+                .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
+                .WhereEqualTo(nameof(LayoutTransaction.IsActive), true);
+
+            var releasedCodes = await _firestore.Db.RunTransactionAsync(async transaction =>
+            {
+                var snapshot = await transaction.GetSnapshotAsync(query);
+                var codes = new List<string>();
+
+                foreach (var doc in snapshot.Documents)
+                {
+                    transaction.Update(doc.Reference, new Dictionary<string, object>
+                    {
+                        { nameof(LayoutTransaction.IsActive), false }
+                    });
+                    codes.Add(doc.GetValue<string>(nameof(LayoutTransaction.EmployeeCode)) ?? string.Empty);
+                }
+
+                return codes;
+            });
+
+            _firestore.InvalidateLayoutTransactionsCache();
+
+            // Headcount: unlike the old per-scan reassignment (where an
+            // employee was recreated under the new CC within the same
+            // request, so the net effect was zero), a released employee here
+            // may stay FREE indefinitely before anyone scans them again - so
+            // each one is genuinely deallocated now, the same way any other
+            // removal in this controller already updates the summary.
+            var distinctCodes = releasedCodes
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            if (distinctCodes.Count > 0)
+            {
+                var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(distinctCodes);
+                foreach (var code in distinctCodes)
+                {
+                    var emp = employeeLookup.GetValueOrDefault(code);
+                    if (emp != null)
+                        await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, code);
+                }
+            }
+
+            return releasedCodes.Count;
         }
 
         // Batched: instead of one Firestore query per employee code (N reads for

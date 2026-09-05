@@ -11,10 +11,16 @@ namespace FactoryManagementSystem.Controllers
     public class UsersController : ControllerBase
     {
         private readonly FirestoreService _firestore;
+        private readonly CompanyApiClient _companyApiClient;
 
-        public UsersController(FirestoreService firestore)
+        // Compcode 17 - the same constant EmployeeSyncService uses for every
+        // other Company API call in this backend.
+        private const int CompCode = 17;
+
+        public UsersController(FirestoreService firestore, CompanyApiClient companyApiClient)
         {
             _firestore = firestore;
+            _companyApiClient = companyApiClient;
         }
 
         [HttpGet]
@@ -47,16 +53,26 @@ namespace FactoryManagementSystem.Controllers
             var employeeCode = request.Username.Trim();
 
             // Login is tied to an existing employee record, not an arbitrary
-            // username, so every account maps 1:1 to a real Employee Code.
-            var employeeSnapshot = await _firestore.EmployeeMasters
-                .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), employeeCode)
-                .Limit(1)
-                .GetSnapshotAsync();
-            var employeeDoc = employeeSnapshot.Documents.FirstOrDefault();
-            if (employeeDoc == null)
-                return BadRequest(new { Success = false, Message = "No employee found with this Employee Code." });
+            // username, so every account maps 1:1 to a real Company API
+            // employee (tno). Only identity (existence + name for the
+            // default display name) is needed here - no Grade, no IsActive -
+            // so this reuses the existing CompanyApiClient instead of a
+            // Firestore EmployeeMasters read.
+            List<CompanyApiEmployee> companyEmployees;
+            try
+            {
+                var today = DateTime.UtcNow.Date;
+                companyEmployees = await _companyApiClient.FetchEmployeesAsync(CompCode, today, today);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = $"Could not verify Employee Code: {ex.Message}" });
+            }
 
-            var employee = employeeDoc.ConvertTo<EmployeeMaster>();
+            var employee = companyEmployees.FirstOrDefault(e =>
+                string.Equals(e.Tno?.Trim(), employeeCode, StringComparison.OrdinalIgnoreCase));
+            if (employee == null)
+                return BadRequest(new { Success = false, Message = "No employee found with this Employee Code." });
 
             var docRef = _firestore.Users.Document(employeeCode);
             var existing = await docRef.GetSnapshotAsync();
@@ -66,7 +82,7 @@ namespace FactoryManagementSystem.Controllers
             var user = new AppUser
             {
                 Username = employeeCode,
-                DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? employee.EmployeeName : request.DisplayName,
+                DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? (employee.Name ?? employeeCode) : request.DisplayName,
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
                 Role = request.Role,
                 IsActive = true,

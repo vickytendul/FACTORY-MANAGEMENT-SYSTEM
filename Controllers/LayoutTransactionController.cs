@@ -13,15 +13,22 @@ namespace FactoryManagementSystem.Controllers
         private readonly ApplicationDbContext _context;
         private readonly FirestoreService _firestore;
         private readonly SummaryService _summaryService;
+        private readonly CompanyApiClient _companyApiClient;
+
+        // Compcode 17 - the same constant EmployeeSyncService/UsersController
+        // use for every other Company API call in this backend.
+        private const int CompCode = 17;
 
         public LayoutTransactionController(
             ApplicationDbContext context,
             FirestoreService firestore,
-            SummaryService summaryService)
+            SummaryService summaryService,
+            CompanyApiClient companyApiClient)
         {
             _context = context;
             _firestore = firestore;
             _summaryService = summaryService;
+            _companyApiClient = companyApiClient;
         }
 
         [HttpPost]
@@ -263,9 +270,10 @@ namespace FactoryManagementSystem.Controllers
 
                 await ValidateNoCrossLineDuplicatesAsync(request.Items, request.LineId, request.CCId);
 
-                // Batched: resolve every employee code this sync could touch in
-                // one round trip instead of one Firestore read per row.
-                var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(
+                // PHASE A: resolve every employee code this sync could touch via
+                // the Company API (Department/Designation only - never Grade,
+                // never IsActive) instead of a Firestore EmployeeMasters read.
+                var employeeLookup = await FindCompanyEmployeesByCodesAsync(
                     request.Items.Select(i => i.EmployeeCode)
                         .Concat(existingDocs.Select(e => e.Transaction.EmployeeCode)));
 
@@ -307,13 +315,13 @@ namespace FactoryManagementSystem.Controllers
                             {
                                 var oldEmp = employeeLookup.GetValueOrDefault(oldCode);
                                 if (oldEmp != null)
-                                    await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation, oldCode);
+                                    await _summaryService.OnEmployeeDeallocated(oldEmp.DeptName, oldEmp.DesignationName, oldCode);
                             }
                             if (!string.IsNullOrWhiteSpace(newCode))
                             {
                                 var newEmp = employeeLookup.GetValueOrDefault(newCode);
                                 if (newEmp != null)
-                                    await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation, newCode);
+                                    await _summaryService.OnEmployeeAllocated(newEmp.DeptName, newEmp.DesignationName, newCode);
                             }
                         }
                     }
@@ -356,7 +364,7 @@ namespace FactoryManagementSystem.Controllers
                         {
                             var emp = employeeLookup.GetValueOrDefault(item.EmployeeCode);
                             if (emp != null)
-                                await _summaryService.OnEmployeeAllocated(emp.Department, emp.Designation, item.EmployeeCode);
+                                await _summaryService.OnEmployeeAllocated(emp.DeptName, emp.DesignationName, item.EmployeeCode);
                         }
                     }
                 }
@@ -378,7 +386,7 @@ namespace FactoryManagementSystem.Controllers
 
                         var emp = employeeLookup.GetValueOrDefault(oldCode);
                         if (emp != null)
-                            await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, oldCode);
+                            await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, oldCode);
                     }
                 }
 
@@ -403,9 +411,10 @@ namespace FactoryManagementSystem.Controllers
 
             await ValidateNoCrossLineDuplicatesAsync(request.Items, request.LineId, request.CCId);
 
-            // Batched: resolve every employee code this sync could touch in one
-            // round trip instead of one Firestore read per row.
-            var updateEmployeeLookup = await _summaryService.FindEmployeesByCodesAsync(
+            // PHASE A: resolve every employee code this sync could touch via
+            // the Company API (Department/Designation only) instead of a
+            // Firestore EmployeeMasters read.
+            var updateEmployeeLookup = await FindCompanyEmployeesByCodesAsync(
                 request.Items.Select(i => i.EmployeeCode)
                     .Concat(existingDocs.Select(e => e.Transaction.EmployeeCode)));
 
@@ -438,13 +447,13 @@ namespace FactoryManagementSystem.Controllers
                         {
                             var oldEmp = updateEmployeeLookup.GetValueOrDefault(oldCode);
                             if (oldEmp != null)
-                                await _summaryService.OnEmployeeDeallocated(oldEmp.Department, oldEmp.Designation, oldCode);
+                                await _summaryService.OnEmployeeDeallocated(oldEmp.DeptName, oldEmp.DesignationName, oldCode);
                         }
                         if (!string.IsNullOrWhiteSpace(newCode))
                         {
                             var newEmp = updateEmployeeLookup.GetValueOrDefault(newCode);
                             if (newEmp != null)
-                                await _summaryService.OnEmployeeAllocated(newEmp.Department, newEmp.Designation, newCode);
+                                await _summaryService.OnEmployeeAllocated(newEmp.DeptName, newEmp.DesignationName, newCode);
                         }
                     }
                 }
@@ -467,7 +476,7 @@ namespace FactoryManagementSystem.Controllers
 
                     var emp = updateEmployeeLookup.GetValueOrDefault(oldCode);
                     if (emp != null)
-                        await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, oldCode);
+                        await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, oldCode);
                 }
             }
         }
@@ -519,16 +528,55 @@ namespace FactoryManagementSystem.Controllers
 
             if (distinctCodes.Count > 0)
             {
-                var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(distinctCodes);
+                // PHASE A: Company API lookup (Department/Designation only)
+                // instead of a Firestore EmployeeMasters read.
+                var employeeLookup = await FindCompanyEmployeesByCodesAsync(distinctCodes);
                 foreach (var code in distinctCodes)
                 {
                     var emp = employeeLookup.GetValueOrDefault(code);
                     if (emp != null)
-                        await _summaryService.OnEmployeeDeallocated(emp.Department, emp.Designation, code);
+                        await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, code);
                 }
             }
 
             return releasedCodes.Count;
+        }
+
+        // PHASE A: Company-API-backed replacement for
+        // SummaryService.FindEmployeesByCodesAsync, used ONLY by
+        // SyncLayoutAsync and ReleaseActiveAllocationsAsync above - both
+        // callers only ever read .DeptName/.DesignationName off the result
+        // (for SummaryService.OnEmployeeAllocated/OnEmployeeDeallocated
+        // headcount bookkeeping), never Grade or IsActive, so this reuses
+        // the existing CompanyApiClient (same Singleton already used by
+        // EmployeeSyncService/UsersController) instead of a Firestore
+        // EmployeeMasters read. EmployeeSyncService copies
+        // Designation = api.DesignationName and Department = api.DeptName
+        // verbatim on every sync, so this preserves the same values Firebase
+        // would have returned. One roster fetch per call (never per
+        // employee), matched by Tno in memory - mirrors
+        // FindEmployeesByCodesAsync's case-insensitive key lookup exactly so
+        // GetValueOrDefault(code) behaves identically for callers.
+        private async Task<Dictionary<string, CompanyApiEmployee>> FindCompanyEmployeesByCodesAsync(
+            IEnumerable<string> employeeCodes)
+        {
+            var codes = new HashSet<string>(
+                employeeCodes.Where(c => !string.IsNullOrWhiteSpace(c)),
+                StringComparer.OrdinalIgnoreCase);
+
+            var result = new Dictionary<string, CompanyApiEmployee>(StringComparer.OrdinalIgnoreCase);
+            if (codes.Count == 0) return result;
+
+            var today = DateTime.UtcNow.Date;
+            var companyEmployees = await _companyApiClient.FetchEmployeesAsync(CompCode, today, today);
+
+            foreach (var emp in companyEmployees)
+            {
+                if (!string.IsNullOrWhiteSpace(emp.Tno) && codes.Contains(emp.Tno))
+                    result[emp.Tno] = emp;
+            }
+
+            return result;
         }
 
         // Batched: instead of one Firestore query per employee code (N reads for

@@ -14,13 +14,16 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly ApplicationDbContext _context;
         private readonly FirestoreService _firestore;
+        private readonly LineAllocationSummaryService _lineAllocationSummaryService;
 
         public LayoutMasterMigrationController(
             ApplicationDbContext context,
-            FirestoreService firestore)
+            FirestoreService firestore,
+            LineAllocationSummaryService lineAllocationSummaryService)
         {
             _context = context;
             _firestore = firestore;
+            _lineAllocationSummaryService = lineAllocationSummaryService;
         }
 
         [HttpPost]
@@ -38,6 +41,9 @@ namespace FactoryManagementSystem.Controllers
                 }
 
                 _firestore.InvalidateLayoutMastersCache();
+                // Source write already committed successfully above - a
+                // summary rebuild failure here must never fail this response.
+                await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
 
                 return Ok(new
                 {

@@ -85,6 +85,7 @@ builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<FirestoreService>();
 builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<LineStrengthReportService>();
+builder.Services.AddSingleton<LineAllocationSummaryService>();
 builder.Services.AddSingleton<CompanyApiClient>();
 builder.Services.AddSingleton<EmployeeSyncService>();
 

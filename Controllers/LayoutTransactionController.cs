@@ -14,6 +14,7 @@ namespace FactoryManagementSystem.Controllers
         private readonly FirestoreService _firestore;
         private readonly SummaryService _summaryService;
         private readonly CompanyApiClient _companyApiClient;
+        private readonly LineAllocationSummaryService _lineAllocationSummaryService;
 
         // Compcode 17 - the same constant EmployeeSyncService/UsersController
         // use for every other Company API call in this backend.
@@ -23,12 +24,14 @@ namespace FactoryManagementSystem.Controllers
             ApplicationDbContext context,
             FirestoreService firestore,
             SummaryService summaryService,
-            CompanyApiClient companyApiClient)
+            CompanyApiClient companyApiClient,
+            LineAllocationSummaryService lineAllocationSummaryService)
         {
             _context = context;
             _firestore = firestore;
             _summaryService = summaryService;
             _companyApiClient = companyApiClient;
+            _lineAllocationSummaryService = lineAllocationSummaryService;
         }
 
         [HttpPost]
@@ -38,6 +41,9 @@ namespace FactoryManagementSystem.Controllers
             {
                 await SyncLayoutAsync(request, isNew: true);
                 _firestore.InvalidateLayoutTransactionsCache();
+                // Source write already committed successfully above - a
+                // summary rebuild failure here must never fail this response.
+                await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
                 return Ok(new { Success = true, Message = "Layout Allocation Saved Successfully." });
             }
             catch (Exception ex)
@@ -53,6 +59,9 @@ namespace FactoryManagementSystem.Controllers
             {
                 await SyncLayoutAsync(request, isNew: false);
                 _firestore.InvalidateLayoutTransactionsCache();
+                // Source write already committed successfully above - a
+                // summary rebuild failure here must never fail this response.
+                await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
                 return Ok(new { Success = true, Message = "Layout Allocation Updated Successfully." });
             }
             catch (Exception ex)
@@ -174,6 +183,15 @@ namespace FactoryManagementSystem.Controllers
         }
 
         // One-time migration: populate Section on existing LayoutTransaction records
+        //
+        // Deliberately does NOT trigger a LineAllocationSummary rebuild:
+        // this action only ever changes the Section field, and
+        // LineAllocationSummaryService/GetAllocationSummaryAsync's
+        // allocatedCount already counts every section (not just MAIN) and
+        // never reads LayoutTransaction.Section at all - confirmed by
+        // re-reading BuildSummary before making this decision. CC/Layout
+        // derivation also never reads Section. So no summary field can
+        // possibly change as a result of this action.
         [HttpGet("migrate-section")]
         public async Task<IActionResult> MigrateSection()
         {
@@ -538,6 +556,11 @@ namespace FactoryManagementSystem.Controllers
                         await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, code);
                 }
             }
+
+            // Source write (the atomic release transaction above) already
+            // committed successfully - a summary rebuild failure here must
+            // never fail this response.
+            await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
 
             return releasedCodes.Count;
         }

@@ -11,10 +11,12 @@ namespace FactoryManagementSystem.Controllers
     public class LayoutMasterController : ControllerBase
     {
         private readonly FirestoreService _firestore;
+        private readonly LineAllocationSummaryService _lineAllocationSummaryService;
 
-        public LayoutMasterController(FirestoreService firestore)
+        public LayoutMasterController(FirestoreService firestore, LineAllocationSummaryService lineAllocationSummaryService)
         {
             _firestore = firestore;
+            _lineAllocationSummaryService = lineAllocationSummaryService;
         }
 
         [HttpGet]
@@ -66,6 +68,9 @@ namespace FactoryManagementSystem.Controllers
             batch.Set(counterRef, new { Value = nextId + source.Count - 1 }, SetOptions.MergeAll);
             await batch.CommitAsync();
             _firestore.InvalidateLayoutMastersCache();
+            // Source write already committed successfully above - a summary
+            // rebuild failure here must never fail this response.
+            await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
             return Ok(new { Success = true, LayoutNo = targetLayoutNo });
         }
 
@@ -90,6 +95,9 @@ namespace FactoryManagementSystem.Controllers
             foreach (var doc in docs) batch.Delete(doc.Reference);
             await batch.CommitAsync();
             _firestore.InvalidateLayoutMastersCache();
+            // Source write already committed successfully above - a summary
+            // rebuild failure here must never fail this response.
+            await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
             return Ok(new { Success = true });
         }
 
@@ -125,6 +133,14 @@ namespace FactoryManagementSystem.Controllers
         /// One-time repair for LayoutMaster documents created before operation
         /// IDs were generated. Existing valid IDs are never changed.
         /// </summary>
+        /// <remarks>
+        /// Deliberately does NOT trigger a LineAllocationSummary rebuild:
+        /// this action only ever writes OperationId (confirmed by re-reading
+        /// the batch.Update call below before making this decision).
+        /// requiredCount's grouping key is (CCId, LayoutNo) filtered by
+        /// IsActive/Section=="MAIN" - OperationId is not part of that
+        /// filter or grouping, so no summary field can possibly change.
+        /// </remarks>
         [Authorize(Roles = "Admin")]
         [HttpPost("migrate-operation-ids")]
         public async Task<IActionResult> MigrateMissingOperationIds()
@@ -314,6 +330,9 @@ namespace FactoryManagementSystem.Controllers
 
                 await batch.CommitAsync();
                 _firestore.InvalidateLayoutMastersCache();
+                // Source write already committed successfully above - a
+                // summary rebuild failure here must never fail this response.
+                await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
 
                 return Ok(new { Success = true, Message = "Layout saved successfully." });
             }

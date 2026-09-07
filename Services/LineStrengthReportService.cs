@@ -231,23 +231,7 @@ public class LineStrengthReportService
         var requiredCount = requiredByLayout.GetValueOrDefault((ccId, layoutNo), 0);
         var allocatedCount = transactions.Count(t => !string.IsNullOrWhiteSpace(t.EmployeeCode));
 
-        int? percentage;
-        string status;
-        if (requiredCount > 0)
-        {
-            percentage = (int)Math.Min(100, Math.Round(allocatedCount / (double)requiredCount * 100));
-            status = allocatedCount == 0
-                ? "Not Started"
-                : (allocatedCount >= requiredCount ? "Completed" : "In Progress");
-        }
-        else
-        {
-            // Required count cannot be determined for this CC/Layout (e.g.
-            // no active MAIN rows) - never manufacture a percentage or claim
-            // "Completed" against an undefined denominator.
-            percentage = null;
-            status = allocatedCount == 0 ? "Not Started" : "In Progress";
-        }
+        var (percentage, status) = ComputePercentageAndStatus(requiredCount, allocatedCount);
 
         return new LineAllocationSummaryDto
         {
@@ -261,6 +245,28 @@ public class LineStrengthReportService
             Percentage = percentage,
             Status = status
         };
+    }
+
+    // Extracted (pure refactor, no behavior change) so
+    // LineAllocationSummaryService.GetPersistedSummariesAsync can compute
+    // percentage/status from persisted RequiredCount/AllocatedCount using
+    // this EXACT same formula, instead of duplicating it - the two callers
+    // can never drift apart because there is only one copy of this logic.
+    public static (int? Percentage, string Status) ComputePercentageAndStatus(int requiredCount, int allocatedCount)
+    {
+        if (requiredCount > 0)
+        {
+            var percentage = (int)Math.Min(100, Math.Round(allocatedCount / (double)requiredCount * 100));
+            var status = allocatedCount == 0
+                ? "Not Started"
+                : (allocatedCount >= requiredCount ? "Completed" : "In Progress");
+            return (percentage, status);
+        }
+
+        // Required count cannot be determined for this CC/Layout (e.g. no
+        // active MAIN rows) - never manufacture a percentage or claim
+        // "Completed" against an undefined denominator.
+        return (null, allocatedCount == 0 ? "Not Started" : "In Progress");
     }
 
     private static int ExtractLineNumber(string lineNo)

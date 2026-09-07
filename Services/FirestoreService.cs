@@ -40,6 +40,7 @@ namespace FactoryManagementSystem.Services
         public CollectionReference Counters => _db.Collection("Counters");
         public CollectionReference Summary => _db.Collection("Summary");
         public CollectionReference SkillTransactions => _db.Collection("SkillTransactions");
+        public CollectionReference LineAllocationSummaries => _db.Collection("LineAllocationSummaries");
         public CollectionReference OperationIdLookup => _db.Collection("OperationIdLookup");
         public CollectionReference Users => _db.Collection("Users");
         public CollectionReference Settings => _db.Collection("Settings");
@@ -121,8 +122,16 @@ namespace FactoryManagementSystem.Services
             if (_cache.TryGetValue(key, out Dictionary<(int, int), int>? cached) && cached != null)
                 return cached;
 
+            // Section=="MAIN" is filtered server-side (pure equality filters,
+            // no composite index required - confirmed live before this change)
+            // instead of fetching every active LayoutMaster and discarding the
+            // non-MAIN rows in memory. The in-memory Section check is kept as
+            // a harmless defensive no-op in case a legacy document's Section
+            // casing ever differs from the exact "MAIN" stored by
+            // layout_configuration_page.dart.
             var snapshot = await LayoutMasters
                 .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+                .WhereEqualTo(nameof(LayoutMaster.Section), "MAIN")
                 .GetSnapshotAsync();
 
             var result = snapshot.Documents

@@ -169,6 +169,100 @@ public class LineStrengthReportService
         return results;
     }
 
+    // Home Screen "Allocated Lines" summary. Reuses the exact same cached
+    // sources as GetReportAsync above (GetActiveLinesAsync,
+    // GetActiveLayoutTransactionsAsync) plus one bulk cached MAIN-section
+    // LayoutMaster count (GetActiveMainLayoutMasterCountsAsync) - no
+    // per-line Firestore reads, no employee lookup of any kind.
+    //
+    // Required count: active LayoutMaster rows with Section == "MAIN",
+    // grouped by (CCId, LayoutNo) - the same rule GetReportAsync already
+    // uses for PlannedTailors. Allocated count: active LayoutTransaction
+    // rows (already IsActive==true via GetActiveLayoutTransactionsAsync)
+    // with a non-blank EmployeeCode.
+    //
+    // A Line with zero active LayoutTransaction rows has never had a
+    // CC/Layout assigned to it in this data model (LayoutMaster has no
+    // LineId, and Line itself carries no CC/Layout reference) - that state
+    // is reported as CCId/CCNo/LayoutNo/Percentage = null and
+    // Status = "Not Started", never guessed.
+    public async Task<List<LineAllocationSummaryDto>> GetAllocationSummaryAsync()
+    {
+        var lines = await _firestore.GetActiveLinesAsync();
+        var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+        var requiredByLayout = await _firestore.GetActiveMainLayoutMasterCountsAsync();
+
+        var transactionsByLine = layoutTransactions
+            .GroupBy(t => t.LineId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var results = lines
+            .Select(line => BuildSummary(line, transactionsByLine.GetValueOrDefault(line.LineId), requiredByLayout))
+            .OrderBy(r => ExtractLineNumber(r.LineName))
+            .ToList();
+
+        return results;
+    }
+
+    private static LineAllocationSummaryDto BuildSummary(
+        Line line,
+        List<LayoutTransaction>? transactions,
+        Dictionary<(int CCId, int LayoutNo), int> requiredByLayout)
+    {
+        if (transactions == null || transactions.Count == 0)
+        {
+            return new LineAllocationSummaryDto
+            {
+                LineId = line.LineId,
+                LineName = line.LineName,
+                CCId = null,
+                CCNo = null,
+                LayoutNo = null,
+                RequiredCount = 0,
+                AllocatedCount = 0,
+                Percentage = null,
+                Status = "Not Started"
+            };
+        }
+
+        var firstTx = transactions[0];
+        var ccId = firstTx.CCId;
+        var layoutNo = NormalizeLayoutNo(firstTx.LayoutNo);
+        var requiredCount = requiredByLayout.GetValueOrDefault((ccId, layoutNo), 0);
+        var allocatedCount = transactions.Count(t => !string.IsNullOrWhiteSpace(t.EmployeeCode));
+
+        int? percentage;
+        string status;
+        if (requiredCount > 0)
+        {
+            percentage = (int)Math.Min(100, Math.Round(allocatedCount / (double)requiredCount * 100));
+            status = allocatedCount == 0
+                ? "Not Started"
+                : (allocatedCount >= requiredCount ? "Completed" : "In Progress");
+        }
+        else
+        {
+            // Required count cannot be determined for this CC/Layout (e.g.
+            // no active MAIN rows) - never manufacture a percentage or claim
+            // "Completed" against an undefined denominator.
+            percentage = null;
+            status = allocatedCount == 0 ? "Not Started" : "In Progress";
+        }
+
+        return new LineAllocationSummaryDto
+        {
+            LineId = line.LineId,
+            LineName = line.LineName,
+            CCId = ccId,
+            CCNo = firstTx.CCNo,
+            LayoutNo = layoutNo,
+            RequiredCount = requiredCount,
+            AllocatedCount = allocatedCount,
+            Percentage = percentage,
+            Status = status
+        };
+    }
+
     private static int ExtractLineNumber(string lineNo)
     {
         var match = Regex.Match(lineNo ?? "", @"\d+");

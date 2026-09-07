@@ -109,6 +109,34 @@ namespace FactoryManagementSystem.Services
 
         public void InvalidateLayoutMastersCache() => Interlocked.Increment(ref _layoutMasterVersion);
 
+        // Bulk equivalent of GetActiveLayoutMastersByCcAsync for callers that
+        // need the MAIN-section "required" count for every CC/Layout at once
+        // (e.g. the Home Screen allocation summary) instead of one cached
+        // read per distinct CCId. Shares _layoutMasterVersion so it is
+        // invalidated together with the per-CC cache whenever LayoutMaster
+        // changes.
+        public async Task<Dictionary<(int CCId, int LayoutNo), int>> GetActiveMainLayoutMasterCountsAsync()
+        {
+            var key = $"active_main_layoutmaster_counts_v{Volatile.Read(ref _layoutMasterVersion)}";
+            if (_cache.TryGetValue(key, out Dictionary<(int, int), int>? cached) && cached != null)
+                return cached;
+
+            var snapshot = await LayoutMasters
+                .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+                .GetSnapshotAsync();
+
+            var result = snapshot.Documents
+                .Select(d => d.ConvertTo<LayoutMaster>())
+                .Where(x => string.Equals(x.Section, "MAIN", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(x => (x.CCId, NormalizeLayoutNo(x.LayoutNo)))
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            _cache.Set(key, result, ReferenceDataTtl);
+            return result;
+        }
+
+        private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
+
         private int _employeeVersion;
 
         public async Task<List<EmployeeMaster>> GetAllEmployeesAsync()

@@ -31,6 +31,12 @@ namespace FactoryManagementSystem.Entities
         // one existing business constant this formula depends on.
         private const double WorkingMinutesPerDay = 480;
 
+        /// Only populated by LineSummaryController.GetRange (one entry per
+        /// day in the requested range) - null/unused for the single-day Get
+        /// action, which already carries an explicit date in its own
+        /// request instead.
+        public DateTime? Date { get; set; }
+
         public string CCNo { get; set; } = string.Empty;
 
         /// Null when the CC document itself could not be resolved - the

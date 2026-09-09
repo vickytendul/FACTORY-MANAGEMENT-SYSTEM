@@ -298,6 +298,17 @@ namespace FactoryManagementSystem.Controllers
         }
 
         // GET: api/Employees/paginated?pageSize=50&search=&activeOnly=true&lastEmployeeCode=
+        //
+        // Filters the shared 45s-cached full roster (GetAllEmployeesAsync,
+        // already reused by Dashboard/OperatorTracking) in memory instead
+        // of issuing a fresh Firestore range query plus a separate Count()
+        // aggregation query on every call - this endpoint is hit on every
+        // debounced keystroke of Skill Update's employee search
+        // (skill_update_page.dart), so a warm cache turns repeated typing
+        // into 0 additional Firestore reads. Ordering/prefix-match/cursor
+        // semantics are preserved exactly (ordinal string comparison,
+        // matching Firestore's own byte-order semantics for the ASCII
+        // employee codes this app uses).
         [HttpGet("paginated")]
         public async Task<IActionResult> GetEmployeesPaginated(
             [FromQuery] int pageSize = 50,
@@ -305,55 +316,31 @@ namespace FactoryManagementSystem.Controllers
             [FromQuery] bool? activeOnly = null,
             [FromQuery] string? lastEmployeeCode = null)
         {
-            var query = _firestore.EmployeeMasters
-                .OrderBy(nameof(EmployeeMaster.EmployeeCode));
+            var all = await _firestore.GetAllEmployeesAsync();
 
+            IEnumerable<EmployeeMaster> filtered = all;
             if (activeOnly == true)
-                query = query.WhereEqualTo(nameof(EmployeeMaster.IsActive), true);
+                filtered = filtered.Where(e => e.IsActive);
 
             if (!string.IsNullOrWhiteSpace(search))
             {
                 var upper = search.ToUpperInvariant();
-                query = query
-                    .WhereGreaterThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper)
-                    .WhereLessThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper + '\uf8ff');
+                filtered = filtered.Where(e => e.EmployeeCode.StartsWith(upper, StringComparison.Ordinal));
             }
 
+            var ordered = filtered.OrderBy(e => e.EmployeeCode, StringComparer.Ordinal).ToList();
+            long totalCount = ordered.Count;
+
+            IEnumerable<EmployeeMaster> page = ordered;
             if (!string.IsNullOrWhiteSpace(lastEmployeeCode))
-                query = query.StartAfter(lastEmployeeCode);
+            {
+                page = page.Where(e => string.CompareOrdinal(e.EmployeeCode, lastEmployeeCode) > 0);
+            }
 
-            query = query.Limit(pageSize + 1);
-
-            var snapshot = await query.GetSnapshotAsync();
-
-            var employees = snapshot.Documents
-                .Take(pageSize)
-                .Select(x => x.ConvertTo<EmployeeMaster>())
-                .ToList();
-
-            var hasNextPage = snapshot.Documents.Count > pageSize;
+            var pageWithLookahead = page.Take(pageSize + 1).ToList();
+            var employees = pageWithLookahead.Take(pageSize).ToList();
+            var hasNextPage = pageWithLookahead.Count > pageSize;
             var lastCode = employees.LastOrDefault()?.EmployeeCode;
-
-            long totalCount = 0;
-            try
-            {
-                var countQuery = (Query)_firestore.EmployeeMasters;
-                if (activeOnly == true)
-                    countQuery = countQuery.WhereEqualTo(nameof(EmployeeMaster.IsActive), true);
-                if (!string.IsNullOrWhiteSpace(search))
-                {
-                    var upper = search.ToUpperInvariant();
-                    countQuery = countQuery
-                        .WhereGreaterThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper)
-                        .WhereLessThanOrEqualTo(nameof(EmployeeMaster.EmployeeCode), upper + '\uf8ff');
-                }
-                var countSnapshot = await countQuery.Count().GetSnapshotAsync();
-                totalCount = countSnapshot.Count ?? 0;
-            }
-            catch
-            {
-                totalCount = employees.Count;
-            }
 
             return Ok(new
             {

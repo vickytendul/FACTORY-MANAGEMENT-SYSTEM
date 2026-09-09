@@ -31,16 +31,11 @@ public class LineStrengthReportService
             .GroupBy(a => a.EmployeeCode)
             .ToDictionary(g => g.Key, g => g.First());
 
-        // 3 — Load all active LayoutMasters and build planned-tailors lookup by CCId (1 read)
-        var lmSnap = await _firestore.LayoutMasters
-            .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
-            .GetSnapshotAsync();
-
-        var plannedByLayout = lmSnap.Documents
-            .Select(d => d.ConvertTo<LayoutMaster>())
-            .Where(x => string.Equals(x.Section, "MAIN", StringComparison.OrdinalIgnoreCase))
-            .GroupBy(x => (x.CCId, NormalizeLayoutNo(x.LayoutNo)))
-            .ToDictionary(g => g.Key, g => g.Count());
+        // 3 — Planned-tailors lookup by (CCId, LayoutNo) - cached (shared
+        // with GetAllocationSummaryAsync below, which already used this
+        // exact same MAIN-section rule/shape via this same helper), instead
+        // of a fresh raw LayoutMasters scan on every call.
+        var plannedByLayout = await _firestore.GetActiveMainLayoutMasterCountsAsync();
 
         // 4 — Group transactions by line and compute stats
         var lineGroups = layoutTransactions

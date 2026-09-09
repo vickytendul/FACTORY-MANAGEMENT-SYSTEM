@@ -19,8 +19,17 @@ namespace FactoryManagementSystem.Controllers
     //     allocation state, not a historical timeline. On Roll/SAM/CCNo are
     //     therefore the same for every day in a GetRange response - this is
     //     a genuine limitation (not an approximation this controller can
-    //     resolve), not something to be papered over.
-    //   - CC (Firestore): SAM lookup ONLY, same as before.
+    //     resolve), not something to be papered over. Read via
+    //     FirestoreService.GetActiveLayoutTransactionsAsync() - the same
+    //     cached snapshot Attendance/Output/SkillTransaction/
+    //     LineStrengthReport/OperatorTracking already share - so this
+    //     controller costs 0 additional Firestore reads for the mapping on
+    //     a warm cache, instead of its own fresh query.
+    //   - CC (Firestore): SAM lookup ONLY, same as before - read via
+    //     FirestoreService.GetActiveCCsAsync() (same cache-sharing reasoning),
+    //     falling back to a direct lookup only for a CC that's been
+    //     deactivated after being assigned (the cache is active-only, but
+    //     this lookup itself never filtered by IsActive).
     //   - Employee_Att (Company API, via CompanyApiClient.FetchRawAsync):
     //     attendance for the mapped EmployeeCodes - ONE call for the whole
     //     requested date range (the vendor already returns one column per
@@ -264,18 +273,21 @@ namespace FactoryManagementSystem.Controllers
         /// back to whatever LayoutTransaction itself already carries / null.
         private async Task<LineContext?> ResolveLineContextAsync(int lineId, int? ccId, int? layoutNo)
         {
+            // Cached (the same shared active-allocations snapshot every
+            // other consumer already reuses - Attendance/Output/
+            // SkillTransaction/LineStrengthReport/OperatorTracking) -
+            // fetched once and reused below for both the ccId-resolution
+            // step and the Line/Employee mapping, instead of two fresh
+            // single-purpose Firestore queries on every Line Summary load.
+            var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+
             string? resolvedCcNo = null;
             if (ccId == null)
             {
-                var activeLayoutSnapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .Limit(1)
-                    .GetSnapshotAsync();
+                var layout = activeLayoutTransactions.FirstOrDefault(x => x.LineId == lineId);
 
-                if (activeLayoutSnapshot.Documents.Any())
+                if (layout != null)
                 {
-                    var layout = activeLayoutSnapshot.Documents.First().ConvertTo<LayoutTransaction>();
                     ccId = layout.CCId;
                     resolvedCcNo = layout.CCNo;
                     layoutNo ??= NormalizeLayoutNo(layout.LayoutNo);
@@ -286,27 +298,30 @@ namespace FactoryManagementSystem.Controllers
                 }
             }
 
-            // CC lookup (1 read) - SAM source only. A missing CC document
-            // must not fail the whole request - it only means SAM (and
-            // CCNo, if no other source has it) stay unavailable/null rather
-            // than fabricated as 0. No fallback CC lookup and no additional
-            // Firestore reads are added here.
-            var ccSnapshot = await _firestore.CCs
-                .WhereEqualTo(nameof(CC.CCId), ccId)
-                .Limit(1)
-                .GetSnapshotAsync();
-            var cc = ccSnapshot.Documents.FirstOrDefault()?.ConvertTo<CC>();
+            // CC lookup - cached (shared with every other consumer of
+            // active CCs) covers the common case at zero extra read cost on
+            // a warm cache. The cache is active-only, but the original
+            // lookup here never filtered by IsActive - a CC deactivated
+            // after being assigned would still need to resolve SAM/CCNo
+            // exactly as before, so a cache miss falls back to the same
+            // direct, unfiltered lookup this always used. SAM/CCNo behavior
+            // is identical to before either way, never silently changed.
+            var activeCCs = await _firestore.GetActiveCCsAsync();
+            var cc = activeCCs.FirstOrDefault(c => c.CCId == ccId);
+            if (cc == null)
+            {
+                var ccSnapshot = await _firestore.CCs
+                    .WhereEqualTo(nameof(CC.CCId), ccId)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+                cc = ccSnapshot.Documents.FirstOrDefault()?.ConvertTo<CC>();
+            }
 
-            // Line <-> Employee/Section mapping (the only other allowed
-            // Firestore read) - unchanged query/fields from before.
-            var layoutSnapshot = await _firestore.LayoutTransactions
-                .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
-                .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
-                .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                .GetSnapshotAsync();
-
-            var layoutItems = layoutSnapshot.Documents
-                .Select(d => d.ConvertTo<LayoutTransaction>())
+            // Line <-> Employee/Section mapping - filtered in memory from
+            // the same cached snapshot fetched above, instead of a second
+            // fresh Firestore query for the same collection/filter shape.
+            var layoutItems = activeLayoutTransactions
+                .Where(x => x.LineId == lineId && x.CCId == ccId)
                 .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                 .ToList();
 

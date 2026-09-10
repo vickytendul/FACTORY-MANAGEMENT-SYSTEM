@@ -412,11 +412,22 @@ namespace FactoryManagementSystem.Controllers
         }
 
         /// Classifies every mapped, on-roll EmployeeCode as Present/Absent/
-        /// Unknown - "P"/"Present" -> Present, "A"/"Absent" -> Absent,
+        /// Unknown - "P"/"Present" -> Present, "A"/"AB"/"Absent" -> Absent,
         /// anything else (including an EmployeeCode entirely missing from
         /// the Company API response for that date) -> Unknown. Never
         /// fabricates Present or Absent for a code the Company API did not
         /// clearly report either way.
+        ///
+        /// "AB" is the Company API's dominant absence code, not a rare
+        /// variant: a live 60-day, 919-employee fetch returned 4268 "AB"
+        /// against 126 "A". It was previously unrecognized here, so most
+        /// real absences fell through to Unknown and both Absent and
+        /// Absenteeism under-reported. Present counts are unaffected by
+        /// this, so Working/Available/Earned Minutes and OWE %/EFF % are
+        /// unchanged. The remaining real codes that same fetch returned -
+        /// "WO" (weekly off), "LV"/"EL"/"CL" (leave types), "OD" (on
+        /// duty), "CO" (comp off), "P*" - are deliberately still Unknown
+        /// rather than guessed into Present or Absent.
         private static (int tailorsPresent, int othersPresent, int absent, int unknown) ClassifyAttendance(
             Dictionary<string, string> employeeSectionMap, Dictionary<string, string> attendanceByCode)
         {
@@ -440,6 +451,7 @@ namespace FactoryManagementSystem.Controllers
                     if (isTailor) tailorsPresent++; else othersPresent++;
                 }
                 else if (trimmed.Equals("A", StringComparison.OrdinalIgnoreCase) ||
+                         trimmed.Equals("AB", StringComparison.OrdinalIgnoreCase) ||
                          trimmed.Equals("Absent", StringComparison.OrdinalIgnoreCase))
                 {
                     absent++;

@@ -10,10 +10,12 @@ namespace FactoryManagementSystem.Controllers
     public class OperatorTrackingController : ControllerBase
     {
         private readonly FirestoreService _firestore;
+        private readonly CompanyAttendanceService _companyAttendance;
 
-        public OperatorTrackingController(FirestoreService firestore)
+        public OperatorTrackingController(FirestoreService firestore, CompanyAttendanceService companyAttendance)
         {
             _firestore = firestore;
+            _companyAttendance = companyAttendance;
         }
 
         [HttpGet]
@@ -32,8 +34,10 @@ namespace FactoryManagementSystem.Controllers
                 // Cached, shared with the Attendance backup-suggestion flow.
                 var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
 
-                // Cached, shared with Attendance/LineStrengthReport/SkillTransaction
-                // instead of a fresh Firestore read on every Operator Tracking load.
+                // Status comes from payroll (real for everyone, every day);
+                // AttendanceTransactions is still read, but only for the one
+                // thing payroll does not know - who is covering for whom.
+                var payrollAttendance = await _companyAttendance.GetCodesForDateAsync(date);
                 var attendanceTransactions = await _firestore.GetAttendanceForDateAsync(utcDate);
 
                 // Build lookup by employee code
@@ -60,7 +64,12 @@ namespace FactoryManagementSystem.Controllers
                         Line = hasAllocation ? layout!.LineName : "-",
                         CC = hasAllocation ? layout!.CCNo : "-",
                         Operation = hasAllocation ? layout!.OperationName : "Not Allocated",
-                        AttendanceStatus = attendance?.AttendanceStatus ?? "P",
+                        // The vendor's own code ("P" / "AB" / "LV" / ...).
+                        // "-" when payroll reported nothing for them, rather
+                        // than the old blanket default of Present.
+                        AttendanceStatus = payrollAttendance.GetValueOrDefault(emp.EmployeeCode) is { Length: > 0 } code
+                            ? code
+                            : "-",
                         ReplacementEmployeeCode = attendance?.ReplacementEmployeeCode,
                         ReplacementEmployeeName = attendance?.ReplacementEmployeeName
                     };

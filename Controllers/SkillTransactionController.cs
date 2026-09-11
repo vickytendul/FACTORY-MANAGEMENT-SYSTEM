@@ -11,11 +11,16 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly FirestoreService _firestore;
         private readonly SummaryService _summaryService;
+        private readonly CompanyAttendanceService _companyAttendance;
 
-        public SkillTransactionController(FirestoreService firestore, SummaryService summaryService)
+        public SkillTransactionController(
+            FirestoreService firestore,
+            SummaryService summaryService,
+            CompanyAttendanceService companyAttendance)
         {
             _firestore = firestore;
             _summaryService = summaryService;
+            _companyAttendance = companyAttendance;
         }
 
         [HttpGet]
@@ -263,12 +268,13 @@ namespace FactoryManagementSystem.Controllers
                 // what they're currently allocated to. Only MAIN-section employees
                 // are excluded, because they're genuinely already doing production
                 // work elsewhere.
-                var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
-                var attendanceForDate = await _firestore.GetAttendanceForDateAsync(utcDate);
-                var presentCodes = attendanceForDate
-                    .Where(a => !string.IsNullOrWhiteSpace(a.EmployeeCode) &&
-                                string.Equals(a.AttendanceStatus, "Present", StringComparison.OrdinalIgnoreCase))
-                    .Select(a => a.EmployeeCode)
+                // Present per payroll, not per this app's own marking - a
+                // Super Team member was previously never offered on a day
+                // nobody had marked attendance.
+                var payrollAttendance = await _companyAttendance.GetCodesForDateAsync(date);
+                var presentCodes = payrollAttendance
+                    .Where(a => CompanyAttendanceService.IsPresent(a.Value))
+                    .Select(a => a.Key)
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
                 var superTeamAllocations = activeLayoutTransactions
@@ -441,12 +447,9 @@ namespace FactoryManagementSystem.Controllers
                     .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
-                var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
-                var attendanceForDate = await _firestore.GetAttendanceForDateAsync(utcDate);
-                var attendanceByCode = attendanceForDate
-                    .Where(a => !string.IsNullOrWhiteSpace(a.EmployeeCode))
-                    .GroupBy(a => a.EmployeeCode, StringComparer.OrdinalIgnoreCase)
-                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+                // Availability comes from payroll, so the picker knows who
+                // is actually at work today without anyone marking it.
+                var attendanceByCode = await _companyAttendance.GetCodesForDateAsync(date);
 
                 var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(skillByCode.Keys);
 
@@ -460,8 +463,10 @@ namespace FactoryManagementSystem.Controllers
                     var emp = employeeLookup.GetValueOrDefault(s.EmployeeCode);
                     var grade = emp?.Grade ?? allocation?.EmployeeGrade ?? s.Grade;
 
-                    var isAbsentToday = attendance != null &&
-                        string.Equals(attendance.AttendanceStatus, "Absent", StringComparison.OrdinalIgnoreCase);
+                    // Leave counts the same as absence here: the question
+                    // this bucket answers is "can this person cover the
+                    // operation today", and someone on LV/EL/CL cannot.
+                    var isAbsentToday = CompanyAttendanceService.IsUnavailable(attendance);
                     var isSameLine = isAllocated && allocation!.LineId == lineId;
                     var isBusyInMain = isAllocated && isSameLine &&
                         string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
@@ -507,7 +512,7 @@ namespace FactoryManagementSystem.Controllers
                         currentLine = allocation?.LineName,
                         currentSection = allocation?.Section,
                         currentOperation = allocation?.OperationName,
-                        attendanceStatus = attendance?.AttendanceStatus,
+                        attendanceStatus = attendance,
                         status,
                         summaryBucket
                     };

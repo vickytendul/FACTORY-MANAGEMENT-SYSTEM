@@ -7,10 +7,12 @@ namespace FactoryManagementSystem.Services;
 public class LineStrengthReportService
 {
     private readonly FirestoreService _firestore;
+    private readonly CompanyAttendanceService _companyAttendance;
 
-    public LineStrengthReportService(FirestoreService firestore)
+    public LineStrengthReportService(FirestoreService firestore, CompanyAttendanceService companyAttendance)
     {
         _firestore = firestore;
+        _companyAttendance = companyAttendance;
     }
 
     public async Task<List<LineStrengthReportDto>> GetReportAsync(DateTime date)
@@ -22,14 +24,11 @@ public class LineStrengthReportService
         // Attendance backup-suggestion flow and Operator Tracking)
         var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
 
-        // Build employee attendance lookup — cached, shared with Attendance/
-        // OperatorTracking/SkillTransaction instead of a fresh read here.
-        var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
-        var attendanceForDate = await _firestore.GetAttendanceForDateAsync(utcDate);
-
-        var attLookup = attendanceForDate
-            .GroupBy(a => a.EmployeeCode)
-            .ToDictionary(g => g.Key, g => g.First());
+        // Attendance comes from payroll, not this app's own
+        // AttendanceTransactions: that collection only has a status where a
+        // supervisor marked one, so on an unmarked day this report used to
+        // show every line as neither present nor absent.
+        var attLookup = await _companyAttendance.GetCodesForDateAsync(date);
 
         // 3 — Planned-tailors lookup by (CCId, LayoutNo) - cached (shared
         // with GetAllocationSummaryAsync below, which already used this
@@ -74,13 +73,13 @@ public class LineStrengthReportService
                 var isPresent = false;
                 var isAbsent = false;
 
-                if (attLookup.TryGetValue(empCode, out var att))
+                if (attLookup.TryGetValue(empCode, out var status))
                 {
-                    var status = att.AttendanceStatus ?? "";
-                    isPresent = status.Equals("P", StringComparison.OrdinalIgnoreCase)
-                                || status.Equals("Present", StringComparison.OrdinalIgnoreCase);
-                    isAbsent = status.Equals("A", StringComparison.OrdinalIgnoreCase)
-                               || status.Equals("Absent", StringComparison.OrdinalIgnoreCase);
+                    // Present/Absent only, exactly as before - a leave or
+                    // weekly-off code counts as neither, so this report's
+                    // two columns keep meaning what they always meant.
+                    isPresent = CompanyAttendanceService.IsPresent(status);
+                    isAbsent = CompanyAttendanceService.IsAbsent(status);
                 }
 
                 switch (section)

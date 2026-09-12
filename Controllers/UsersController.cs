@@ -47,8 +47,8 @@ namespace FactoryManagementSystem.Controllers
             if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
                 return BadRequest(new { Success = false, Message = "Employee Code and password are required." });
 
-            if (request.Role != "Admin" && request.Role != "Supervisor" && request.Role != "IE")
-                return BadRequest(new { Success = false, Message = "Role must be Admin, Supervisor, or IE." });
+            if (request.Role != "Admin" && request.Role != "Supervisor" && request.Role != "IE" && request.Role != "Viewer")
+                return BadRequest(new { Success = false, Message = "Role must be Admin, Supervisor, IE, or Viewer." });
 
             var employeeCode = request.Username.Trim();
 

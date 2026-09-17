@@ -12,7 +12,26 @@ public class LineAllocationSummaryDto
     public string? CCNo { get; set; }
     public int? LayoutNo { get; set; }
     public int RequiredCount { get; set; }
+
+    /// Positions actually manned today: the allocation on paper, less the
+    /// operators payroll reports away whom nobody is covering. Percentage
+    /// and Status follow this, so a line whose people did not turn up does
+    /// not keep reading as fully allocated.
     public int AllocatedCount { get; set; }
+
+    /// The allocation on paper - MAIN positions with somebody assigned,
+    /// regardless of whether they came in. This is what is persisted; the
+    /// two counts below are today's live adjustment to it.
+    public int AllocatedOnPaperCount { get; set; }
+
+    /// Allocated operators away today (absent or on leave per payroll)
+    /// with no replacement recorded - each one costs a position.
+    public int AbsentUncoveredCount { get; set; }
+
+    /// Allocated operators away today whose position somebody is covering
+    /// - these still count as manned.
+    public int CoveredCount { get; set; }
+
     public int? Percentage { get; set; }
     public string Status { get; set; } = string.Empty;
 }

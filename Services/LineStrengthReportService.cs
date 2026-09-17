@@ -180,6 +180,57 @@ public class LineStrengthReportService
     // LineId, and Line itself carries no CC/Layout reference) - that state
     // is reported as CCId/CCNo/LayoutNo/Percentage = null and
     // Status = "Not Started", never guessed.
+    /// Per line, how today's attendance changes the allocation on paper:
+    /// how many allocated MAIN operators are away with nobody covering
+    /// them, and how many are away but covered.
+    ///
+    /// "Away" is payroll's word, not this app's - an operator is only
+    /// counted away when the Company API actually reports them absent or
+    /// on leave. Reporting nothing for somebody means nothing is known, so
+    /// they are left counted as manned rather than assumed missing.
+    ///
+    /// "Covered" means a replacement was recorded against that operator on
+    /// that line for today - which is what Layout Allocation's Save Cover
+    /// and the Attendance page both write.
+    public async Task<Dictionary<int, (int AbsentUncovered, int Covered)>> GetAbsenceAdjustmentAsync()
+    {
+        var result = new Dictionary<int, (int AbsentUncovered, int Covered)>();
+
+        var today = DateTime.Today;
+        var payroll = await _companyAttendance.GetCodesForDateAsync(today);
+        if (payroll.Count == 0) return result;
+
+        var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+        var attendance = await _firestore.GetAttendanceForDateAsync(
+            DateTime.SpecifyKind(today, DateTimeKind.Utc));
+
+        // EmployeeCode -> whether somebody is standing in for them today.
+        var coveredCodes = attendance
+            .Where(a => !string.IsNullOrWhiteSpace(a.EmployeeCode) &&
+                        !string.IsNullOrWhiteSpace(a.ReplacementEmployeeCode))
+            .Select(a => a.EmployeeCode.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var tx in layoutTransactions)
+        {
+            if (tx.LineId <= 0) continue;
+            if (!string.Equals(tx.Section, "MAIN", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var code = (tx.EmployeeCode ?? string.Empty).Trim();
+            if (code.Length == 0) continue;
+
+            if (!payroll.TryGetValue(code, out var status)) continue;
+            if (!CompanyAttendanceService.IsUnavailable(status)) continue;
+
+            var current = result.GetValueOrDefault(tx.LineId);
+            result[tx.LineId] = coveredCodes.Contains(code)
+                ? (current.AbsentUncovered, current.Covered + 1)
+                : (current.AbsentUncovered + 1, current.Covered);
+        }
+
+        return result;
+    }
+
     public async Task<List<LineAllocationSummaryDto>> GetAllocationSummaryAsync()
     {
         var lines = await _firestore.GetActiveLinesAsync();
@@ -223,7 +274,17 @@ public class LineStrengthReportService
         var ccId = firstTx.CCId;
         var layoutNo = NormalizeLayoutNo(firstTx.LayoutNo);
         var requiredCount = requiredByLayout.GetValueOrDefault((ccId, layoutNo), 0);
-        var allocatedCount = transactions.Count(t => !string.IsNullOrWhiteSpace(t.EmployeeCode));
+
+        // Both halves of this ratio must describe the same population.
+        // Required counts MAIN LayoutMasters only, so allocated counts MAIN
+        // transactions only - it used to count every section, which quietly
+        // filled the gap left by unallocated MAIN operations with people
+        // standing in Checkers, Helpers or Super Team. Line 1 read 33 of 36
+        // while 7 of its MAIN operations had nobody on them, and Line 12
+        // read 41 of 36 - more allocated than the layout even has.
+        var allocatedCount = transactions.Count(t =>
+            !string.IsNullOrWhiteSpace(t.EmployeeCode) &&
+            string.Equals(t.Section, "MAIN", StringComparison.OrdinalIgnoreCase));
 
         var (percentage, status) = ComputePercentageAndStatus(requiredCount, allocatedCount);
 

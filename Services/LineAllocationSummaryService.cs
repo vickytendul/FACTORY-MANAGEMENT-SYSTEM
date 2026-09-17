@@ -176,11 +176,23 @@ public class LineAllocationSummaryService
             _cache.Set(key, docs, SummaryCacheTtl);
         }
 
+        // Who is actually in today. Deliberately NOT persisted with the
+        // rest: the allocation on paper changes when someone edits a
+        // layout, but absence changes every day and again every time a
+        // cover is recorded, so a stored copy would show yesterday's
+        // picture. Both sources are already cached, so reading them here
+        // costs nothing extra on a warm cache.
+        var absence = await _reportService.GetAbsenceAdjustmentAsync();
+
         return docs
             .Select(doc =>
             {
-                var (percentage, status) = LineStrengthReportService.ComputePercentageAndStatus(
-                    doc.RequiredCount, doc.AllocatedCount);
+                var adjustment = absence.GetValueOrDefault(doc.LineId);
+                var manned = doc.AllocatedCount - adjustment.AbsentUncovered;
+                if (manned < 0) manned = 0;
+
+                var (percentage, status) =
+                    LineStrengthReportService.ComputePercentageAndStatus(doc.RequiredCount, manned);
 
                 return new LineAllocationSummaryDto
                 {
@@ -190,7 +202,10 @@ public class LineAllocationSummaryService
                     CCNo = doc.CCNo,
                     LayoutNo = doc.LayoutNo,
                     RequiredCount = doc.RequiredCount,
-                    AllocatedCount = doc.AllocatedCount,
+                    AllocatedCount = manned,
+                    AllocatedOnPaperCount = doc.AllocatedCount,
+                    AbsentUncoveredCount = adjustment.AbsentUncovered,
+                    CoveredCount = adjustment.Covered,
                     Percentage = percentage,
                     Status = status
                 };

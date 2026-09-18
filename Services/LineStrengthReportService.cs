@@ -8,11 +8,16 @@ public class LineStrengthReportService
 {
     private readonly FirestoreService _firestore;
     private readonly CompanyAttendanceService _companyAttendance;
+    private readonly ProductionLineService _productionLines;
 
-    public LineStrengthReportService(FirestoreService firestore, CompanyAttendanceService companyAttendance)
+    public LineStrengthReportService(
+        FirestoreService firestore,
+        CompanyAttendanceService companyAttendance,
+        ProductionLineService productionLines)
     {
         _firestore = firestore;
         _companyAttendance = companyAttendance;
+        _productionLines = productionLines;
     }
 
     public async Task<List<LineStrengthReportDto>> GetReportAsync(DateTime date)
@@ -231,9 +236,38 @@ public class LineStrengthReportService
         return result;
     }
 
+    /// The lines the Home Screen should show one card each for.
+    ///
+    /// The production API decides WHICH lines exist - it reports what the
+    /// floor actually runs, where Firestore's Lines collection is hand-kept
+    /// master data that drifts (it currently knows 19 of the 25 the floor
+    /// reports). Firestore still supplies the NAME wherever it knows the
+    /// line, so nothing that was already named is renamed; a line only the
+    /// production API knows about is named after its number.
+    ///
+    /// If the production API is unavailable the Firestore list is used
+    /// as-is, so the dashboard degrades to what it showed before rather
+    /// than emptying out.
+    private async Task<List<Line>> ResolveLinesAsync()
+    {
+        var firestoreLines = await _firestore.GetActiveLinesAsync();
+        var productionLineNumbers = await _productionLines.GetLineNumbersAsync(DateTime.Today);
+
+        if (productionLineNumbers.Count == 0) return firestoreLines;
+
+        var knownById = new Dictionary<int, Line>();
+        foreach (var line in firestoreLines) knownById[line.LineId] = line;
+
+        return productionLineNumbers
+            .Select(no => knownById.TryGetValue(no, out var known)
+                ? known
+                : new Line { LineId = no, LineName = $"Line {no}", IsActive = true })
+            .ToList();
+    }
+
     public async Task<List<LineAllocationSummaryDto>> GetAllocationSummaryAsync()
     {
-        var lines = await _firestore.GetActiveLinesAsync();
+        var lines = await ResolveLinesAsync();
         var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
         var requiredByLayout = await _firestore.GetActiveMainLayoutMasterCountsAsync();
 

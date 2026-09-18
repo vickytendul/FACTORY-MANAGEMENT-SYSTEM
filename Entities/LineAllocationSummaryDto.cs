@@ -32,6 +32,13 @@ public class LineAllocationSummaryDto
     /// - these still count as manned.
     public int CoveredCount { get; set; }
 
+    /// What this line has produced today, per the Company production API.
+    /// Live, never persisted - it climbs all day.
+    public double Output { get; set; }
+
+    /// Rejects today, from the same report.
+    public double Rejects { get; set; }
+
     public int? Percentage { get; set; }
     public string Status { get; set; } = string.Empty;
 }

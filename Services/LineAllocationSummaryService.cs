@@ -32,6 +32,7 @@ public class LineAllocationSummaryService
 {
     private readonly FirestoreService _firestore;
     private readonly LineStrengthReportService _reportService;
+    private readonly ProductionLineService _productionLines;
     private readonly IMemoryCache _cache;
 
     // Single fixed document ID within the existing LineAllocationSummaries
@@ -51,10 +52,15 @@ public class LineAllocationSummaryService
     private static readonly TimeSpan SummaryCacheTtl = TimeSpan.FromSeconds(45);
     private int _summaryVersion;
 
-    public LineAllocationSummaryService(FirestoreService firestore, LineStrengthReportService reportService, IMemoryCache cache)
+    public LineAllocationSummaryService(
+        FirestoreService firestore,
+        LineStrengthReportService reportService,
+        ProductionLineService productionLines,
+        IMemoryCache cache)
     {
         _firestore = firestore;
         _reportService = reportService;
+        _productionLines = productionLines;
         _cache = cache;
     }
 
@@ -184,10 +190,18 @@ public class LineAllocationSummaryService
         // costs nothing extra on a warm cache.
         var absence = await _reportService.GetAbsenceAdjustmentAsync();
 
+        // Today's output, for the same reason: it climbs through the day,
+        // so storing it would mean showing a figure from whenever a layout
+        // was last saved.
+        var production = await _productionLines.GetProductionAsync(DateTime.Today);
+
         return docs
             .Select(doc =>
             {
                 var adjustment = absence.GetValueOrDefault(doc.LineId);
+                var made = production.TryGetValue(doc.LineId, out var p)
+                    ? p
+                    : default;
                 var manned = doc.AllocatedCount - adjustment.AbsentUncovered;
                 if (manned < 0) manned = 0;
 
@@ -206,6 +220,8 @@ public class LineAllocationSummaryService
                     AllocatedOnPaperCount = doc.AllocatedCount,
                     AbsentUncoveredCount = adjustment.AbsentUncovered,
                     CoveredCount = adjustment.Covered,
+                    Output = made.Output,
+                    Rejects = made.Rejects,
                     Percentage = percentage,
                     Status = status
                 };

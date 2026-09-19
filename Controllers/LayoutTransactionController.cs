@@ -631,9 +631,33 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var tx = doc.ConvertTo<LayoutTransaction>();
                     if (tx.LineId != lineId || tx.CCId != ccId)
-                        throw new InvalidOperationException($"Employee {tx.EmployeeCode} is already allocated.");
+                        throw new InvalidOperationException(DescribeExistingAllocation(tx));
                 }
             }
+        }
+
+        // Says WHERE the employee already is, not just that they are somewhere.
+        // The supervisor hitting this has to go and free that allocation before
+        // they can save; "is already allocated" left them to search every line
+        // for it, and the document that blocked the save already carries the
+        // line, the CC and the operation. Each part is only added when the
+        // stored document actually has it - a record written before a field
+        // existed must not turn into "allocated to  (CC )".
+        private static string DescribeExistingAllocation(LayoutTransaction tx)
+        {
+            var who = string.IsNullOrWhiteSpace(tx.EmployeeName)
+                ? tx.EmployeeCode
+                : $"{tx.EmployeeName} ({tx.EmployeeCode})";
+
+            var where = new List<string>();
+            if (!string.IsNullOrWhiteSpace(tx.LineName)) where.Add(tx.LineName);
+            if (!string.IsNullOrWhiteSpace(tx.CCNo)) where.Add($"CC {tx.CCNo}");
+            if (!string.IsNullOrWhiteSpace(tx.OperationName)) where.Add(tx.OperationName);
+
+            return where.Count == 0
+                ? $"{who} is already allocated."
+                : $"{who} is already allocated to {string.Join(" - ", where)}. " +
+                  "Remove them there first, or pick a different operator.";
         }
 
         // Batched: fetch every referenced LayoutMaster in chunks of 30 instead of

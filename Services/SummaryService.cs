@@ -255,7 +255,13 @@ namespace FactoryManagementSystem.Services
             if (dept.StartsWith("TAILOR") || desig.StartsWith("TAILOR")) return "Tailor";
             if (dept == "QUALITY") return "Quality Checking";
             if (dept == "PACKING" && desig.Contains("HELPER")) return "Packing Helper";
-            if (dept == "STORE" && desig.Contains("HELPER")) return "Store Helper";
+            // "STORES" as well as "STORE": the Company API sends the plural,
+            // so this rule had never once matched and every store helper was
+            // counted in the total while belonging to no category. Measured
+            // live - 10 active employees in STORES/HELPER, none in STORE.
+            // Both spellings are accepted rather than just swapping to the
+            // plural, so the rule keeps working whichever the vendor sends.
+            if ((dept == "STORE" || dept == "STORES") && desig.Contains("HELPER")) return "Store Helper";
             if (dept == "SEWING" && desig.Contains("HELPER")) return "Sewing Helper";
             if (dept == "SEWING" && (desig.Contains("LEADER") || desig.Contains("LEADEAR"))) return "Sewing Leader";
             return null;

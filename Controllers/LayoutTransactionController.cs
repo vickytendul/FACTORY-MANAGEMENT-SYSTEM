@@ -120,6 +120,53 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // GET: api/LayoutTransaction/allocation-for?employeeCode=GUL2212
+        //
+        // Where this ONE employee is currently allocated, or null. Exists so
+        // the Layout Allocation screen can warn at scan time without pulling
+        // every active allocation: it used to answer this from
+        // GET /all, which reads the whole collection (132 documents per call
+        // in production telemetry, and ~950 once every line is allocated) to
+        // answer a question about a single person.
+        //
+        // Uses the same EmployeeCode + IsActive shape as
+        // ValidateNoCrossLineDuplicatesAsync, which the deployed composite
+        // index already covers, so this is one document read.
+        [HttpGet("allocation-for")]
+        public async Task<IActionResult> GetAllocationForEmployee([FromQuery] string employeeCode)
+        {
+            try
+            {
+                var code = (employeeCode ?? string.Empty).Trim();
+                if (code.Length == 0) return Ok(new { Found = false });
+
+                var snapshot = await _firestore.LayoutTransactions
+                    .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), code)
+                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
+                    .Limit(1)
+                    .GetSnapshotAsync();
+
+                if (snapshot.Documents.Count == 0) return Ok(new { Found = false });
+
+                var tx = snapshot.Documents[0].ConvertTo<LayoutTransaction>();
+                return Ok(new
+                {
+                    Found = true,
+                    tx.LineId,
+                    tx.LineName,
+                    tx.CCId,
+                    tx.CCNo,
+                    tx.OperationName,
+                    tx.EmployeeCode,
+                    tx.EmployeeName,
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // GET: api/LayoutTransaction?lineId=1&ccId=1  (ccId optional)
         [HttpGet]
         public async Task<IActionResult> GetAllocation(int lineId, int? ccId, int? layoutNo = null)

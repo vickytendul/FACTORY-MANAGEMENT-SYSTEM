@@ -19,10 +19,22 @@ namespace FactoryManagementSystem.Services
         private int _lineVersion;
         private int _layoutMasterVersion;
 
-        public FirestoreService(FirestoreDb db, IMemoryCache cache)
+        public FirestoreService(FirestoreDb db, IMemoryCache cache, IConfiguration? configuration = null)
         {
             _db = db;
             _cache = cache;
+
+            // Tunable without a code change, because the right value depends
+            // on how this is deployed rather than on anything in the code:
+            // with a single instance every write invalidates the cache
+            // immediately, so a long TTL costs nothing; with several
+            // instances one instance's write does not reach another's cache,
+            // and the TTL becomes the worst-case staleness window. Set
+            // Firestore__LiveDataTtlSeconds to lower it if that ever applies.
+            var configured = configuration?["Firestore:LiveDataTtlSeconds"];
+            _liveDataTtl = int.TryParse(configured, out var seconds) && seconds > 0
+                ? TimeSpan.FromSeconds(seconds)
+                : DefaultLiveDataTtl;
         }
 
         public FirestoreDb Db => _db;
@@ -162,13 +174,24 @@ namespace FactoryManagementSystem.Services
 
         public void InvalidateEmployeesCache() => Interlocked.Increment(ref _employeeVersion);
 
-        // Allocation/skill data changes far more often during a shift than
-        // CCs/Zones/etc., so this uses a much shorter TTL - just enough to
-        // collapse the handful of reads that happen back-to-back within one
-        // user interaction (e.g. the Attendance backup-suggestion cascade,
-        // or repeated Operators-tab refreshes), without serving stale data
-        // across genuinely separate actions.
-        private static readonly TimeSpan LiveDataTtl = TimeSpan.FromSeconds(10);
+        // Allocation/skill data changes during a shift, so this is shorter
+        // than the reference-data TTL above.
+        //
+        // It was 10 seconds, which turned out to be far too short to be
+        // worth anything: Firestore telemetry showed 240 executions of the
+        // LayoutTransactions query reading 132 documents each - 31,692
+        // reads - because almost every request arrived after the previous
+        // entry had already expired. 60 seconds collapses those repeats
+        // without risking stale data, because this is a safety net rather
+        // than the consistency mechanism: EVERY write path calls the
+        // matching Invalidate*Cache(), which bumps a version counter and
+        // makes the next read miss immediately regardless of the TTL.
+        //
+        // The TTL therefore only bounds staleness for changes this process
+        // did not make - a direct console edit, or another instance's
+        // write. See the constructor for how to lower it if that applies.
+        private static readonly TimeSpan DefaultLiveDataTtl = TimeSpan.FromSeconds(60);
+        private readonly TimeSpan _liveDataTtl;
         private int _layoutTransactionVersion;
         private int _skillTransactionVersion;
         private int _attendanceVersion;
@@ -181,7 +204,7 @@ namespace FactoryManagementSystem.Services
 
             var snapshot = await LayoutTransactions.WhereEqualTo(nameof(LayoutTransaction.IsActive), true).GetSnapshotAsync();
             var result = snapshot.Documents.Select(d => d.ConvertTo<LayoutTransaction>()).ToList();
-            _cache.Set(key, result, LiveDataTtl);
+            _cache.Set(key, result, _liveDataTtl);
             return result;
         }
 
@@ -195,7 +218,7 @@ namespace FactoryManagementSystem.Services
 
             var snapshot = await SkillTransactions.WhereEqualTo(nameof(SkillTransaction.IsActive), true).GetSnapshotAsync();
             var result = snapshot.Documents.Select(d => d.ConvertTo<SkillTransaction>()).ToList();
-            _cache.Set(key, result, LiveDataTtl);
+            _cache.Set(key, result, _liveDataTtl);
             return result;
         }
 
@@ -211,7 +234,7 @@ namespace FactoryManagementSystem.Services
                 .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
                 .GetSnapshotAsync();
             var result = snapshot.Documents.Select(d => d.ConvertTo<AttendanceTransaction>()).ToList();
-            _cache.Set(key, result, LiveDataTtl);
+            _cache.Set(key, result, _liveDataTtl);
             return result;
         }
 

@@ -1,6 +1,7 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -119,6 +120,8 @@ namespace FactoryManagementSystem.Controllers
                     existing.Grade = request.Grade ?? string.Empty;
                     existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
                     existing.UpdatedOn = now;
+                    existing.NormalizedOperationName =
+                        SkillTransaction.Normalize(existing.OperationName);
                     await doc.Reference.SetAsync(existing);
                     _firestore.InvalidateSkillTransactionsCache();
 
@@ -137,6 +140,8 @@ namespace FactoryManagementSystem.Controllers
                         OperationId = request.OperationId,
                         EmployeeCode = request.EmployeeCode,
                         OperationName = request.OperationName,
+                        NormalizedOperationName =
+                            SkillTransaction.Normalize(request.OperationName),
                         MachineType = request.MachineType ?? string.Empty,
                         OperationGrade = request.OperationGrade ?? string.Empty,
                         Section = string.IsNullOrWhiteSpace(request.Section) ? "MAIN" : request.Section,
@@ -200,6 +205,13 @@ namespace FactoryManagementSystem.Controllers
                     existing.OperationName = request.OperationName;
                 if (!string.IsNullOrWhiteSpace(request.CCNo))
                     existing.CCNo = request.CCNo;
+
+                // Kept in step with OperationName on every write, including
+                // the case where the name was not part of this request - an
+                // older document reaching this path gets the field filled in
+                // rather than staying unqueryable.
+                existing.NormalizedOperationName =
+                    SkillTransaction.Normalize(existing.OperationName);
 
                 await doc.Reference.SetAsync(existing);
                 _firestore.InvalidateSkillTransactionsCache();
@@ -414,11 +426,15 @@ namespace FactoryManagementSystem.Controllers
                 // removing punctuation/case differences (e.g. "T.S" vs "TS").
                 // This reads the existing skill matrix; it does not introduce
                 // a separate skill engine.
-                var normalizedOperationName = NormalizeOperationName(operationName);
-                var matchingSkills = (await _firestore.GetActiveSkillTransactionsAsync())
-                    .Where(s => s.OperationId == operationId ||
-                        (!string.IsNullOrEmpty(normalizedOperationName) &&
-                         NormalizeOperationName(s.OperationName) == normalizedOperationName));
+                //
+                // Both halves are now Firestore queries rather than a scan of
+                // every skill record. The rule is identical - id OR normalised
+                // name - but where finding ~6 matching records used to cost a
+                // read of all 242 (and would cost ~4,900 once every employee
+                // has a skill profile), it now costs the matches themselves.
+                var normalizedOperationName = SkillTransaction.Normalize(operationName);
+                var matchingSkills =
+                    await FetchSkillsForOperationAsync(operationId, normalizedOperationName);
 
                 // A person can have more than one skill record for the same
                 // operation over time, so retain their best percentage.
@@ -568,6 +584,110 @@ namespace FactoryManagementSystem.Controllers
             };
 
             return baseRank == 11 ? 12 : (hasPlus ? baseRank : baseRank + 1);
+        }
+
+        // POST: api/SkillTransaction/migrate-normalized-names
+        //
+        // One-time backfill of NormalizedOperationName onto records written
+        // before the field existed. Until this has run, the roster's
+        // name-matched half finds nothing, and a backup operator whose skill
+        // record has a mismatched OperationId would not be suggested -
+        // exactly the case the name match exists to cover.
+        //
+        // Safe to run repeatedly: it only writes documents whose stored value
+        // differs from the derived one, so a second run writes nothing. It
+        // changes no other field, deactivates nothing, and deletes nothing.
+        [Authorize(Roles = "Admin")]
+        [HttpPost("migrate-normalized-names")]
+        public async Task<IActionResult> MigrateNormalizedOperationNames()
+        {
+            try
+            {
+                var snapshot = await _firestore.SkillTransactions.GetSnapshotAsync();
+
+                var pending = new List<(DocumentReference Ref, string Value)>();
+                foreach (var doc in snapshot.Documents)
+                {
+                    var skill = doc.ConvertTo<SkillTransaction>();
+                    var expected = SkillTransaction.Normalize(skill.OperationName);
+                    if (!string.Equals(skill.NormalizedOperationName, expected, StringComparison.Ordinal))
+                        pending.Add((doc.Reference, expected));
+                }
+
+                var written = 0;
+                foreach (var chunk in pending.Chunk(500))
+                {
+                    var batch = _firestore.Db.StartBatch();
+                    foreach (var (reference, value) in chunk)
+                    {
+                        batch.Update(reference, new Dictionary<string, object>
+                        {
+                            [nameof(SkillTransaction.NormalizedOperationName)] = value,
+                        });
+                    }
+                    await batch.CommitAsync();
+                    written += chunk.Length;
+                }
+
+                if (written > 0) _firestore.InvalidateSkillTransactionsCache();
+
+                return Ok(new
+                {
+                    Success = true,
+                    TotalDocuments = snapshot.Documents.Count,
+                    AlreadyCorrect = snapshot.Documents.Count - pending.Count,
+                    Updated = written,
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        // The skill records for one operation, matched by id OR by normalised
+        // name - the same disjunction the in-memory version applied, run as
+        // two targeted Firestore queries and merged.
+        //
+        // Two queries rather than one Filter.Or: both halves are plain
+        // equality, which Firestore serves from the single-field indexes it
+        // maintains automatically, so neither needs a composite index and
+        // neither can fail with a missing-index error in production. A
+        // disjunction would also have to be de-duplicated afterwards anyway,
+        // since a record usually matches both halves.
+        //
+        // De-duplication is by document path, not by any field, so a record
+        // returned by both queries is counted once and one that genuinely
+        // exists twice is still counted twice - preserving the "keep the best
+        // percentage" rule downstream.
+        //
+        // Documents written before NormalizedOperationName existed are not
+        // found by the second query. That is what MigrateNormalizedOperationNames
+        // below is for; until it has run, such records are still found
+        // whenever their OperationId matches.
+        private async Task<List<SkillTransaction>> FetchSkillsForOperationAsync(
+            int operationId, string normalizedOperationName)
+        {
+            var found = new Dictionary<string, SkillTransaction>(StringComparer.Ordinal);
+
+            var byId = await _firestore.SkillTransactions
+                .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
+                .WhereEqualTo(nameof(SkillTransaction.OperationId), operationId)
+                .GetSnapshotAsync();
+            foreach (var doc in byId.Documents)
+                found[doc.Reference.Path] = doc.ConvertTo<SkillTransaction>();
+
+            if (!string.IsNullOrEmpty(normalizedOperationName))
+            {
+                var byName = await _firestore.SkillTransactions
+                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
+                    .WhereEqualTo(nameof(SkillTransaction.NormalizedOperationName), normalizedOperationName)
+                    .GetSnapshotAsync();
+                foreach (var doc in byName.Documents)
+                    found[doc.Reference.Path] = doc.ConvertTo<SkillTransaction>();
+            }
+
+            return found.Values.ToList();
         }
 
         private static string NormalizeOperationName(string? value) =>

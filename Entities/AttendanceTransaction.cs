@@ -70,6 +70,26 @@ namespace FactoryManagementSystem.Entities
         [FirestoreProperty]
         public string? ReplacementEmployeeName { get; set; }
 
+        // Line balancing: which layout rows this operator is covering today
+        // on top of their own. Recorded against SUPER TEAM operators, who
+        // are on the line without a fixed operation of their own - this is
+        // what says why they are there.
+        //
+        // Stored per day alongside attendance rather than on the layout,
+        // because it is a decision taken each morning and is expected to be
+        // different tomorrow.
+        //
+        // Layout row ids, not operation ids: the same operation can appear
+        // twice in one layout (FR PKT ZIPPER ATTACH is on two rows in the
+        // live data), so an operation id would not say which one.
+        [FirestoreProperty]
+        public List<int> BalancingLayoutMasterIds { get; set; } = new();
+
+        // Denormalised for display, the same way EmployeeName already is, so
+        // showing the note costs no extra read of the layout.
+        [FirestoreProperty]
+        public List<string> BalancingOperationNames { get; set; } = new();
+
         // Audit
         [FirestoreProperty]
         public DateTime AttendanceDate { get; set; }

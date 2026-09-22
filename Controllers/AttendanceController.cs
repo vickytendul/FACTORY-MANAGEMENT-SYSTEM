@@ -156,6 +156,11 @@ namespace FactoryManagementSystem.Controllers
                         { nameof(AttendanceTransaction.ReplacementEmployeeBarcode), item.ReplacementEmployeeBarcode },
                         { nameof(AttendanceTransaction.ReplacementEmployeeName), item.ReplacementEmployeeName },
                         { nameof(AttendanceTransaction.LayoutNo), item.LayoutNo },
+                        // Written on every save, including when the list is
+                        // empty: clearing somebody's balancing has to erase
+                        // it, not leave yesterday's entry in place.
+                        { nameof(AttendanceTransaction.BalancingLayoutMasterIds), item.BalancingLayoutMasterIds },
+                        { nameof(AttendanceTransaction.BalancingOperationNames), item.BalancingOperationNames },
                         { nameof(AttendanceTransaction.MarkedDateTime), DateTime.UtcNow },
                         { nameof(AttendanceTransaction.MarkedBy), "Supervisor" }
                     };

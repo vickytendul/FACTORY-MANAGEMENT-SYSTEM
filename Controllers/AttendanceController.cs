@@ -64,6 +64,82 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // GET: api/Attendance/deployed-elsewhere
+        //         ?attendanceDate=2026-09-22&excludeLineId=1&employeeCodes=A,B,C
+        //
+        // Where these employees are working today, when that is a line other
+        // than their own. Answers the question a supervisor is left with
+        // after lending an idle super team member out: they are marked
+        // present on this line, but they are not on it.
+        //
+        // Nothing new is recorded to make this work. Covering an absent
+        // operator on another line already writes that line's attendance row
+        // with ReplacementEmployeeCode set to whoever covered - this just
+        // reads those rows back from the other direction.
+        //
+        // Rows from excludeLineId are dropped: somebody covering on their
+        // own line is a same-line replacement, which the layout already
+        // shows as such.
+        [HttpGet("deployed-elsewhere")]
+        public async Task<IActionResult> GetDeployedElsewhere(
+            DateTime attendanceDate,
+            int excludeLineId,
+            string employeeCodes)
+        {
+            try
+            {
+                var codes = (employeeCodes ?? string.Empty)
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (codes.Count == 0) return Ok(Array.Empty<object>());
+
+                var date = DateTime.SpecifyKind(attendanceDate.Date, DateTimeKind.Utc);
+                var found = new List<object>();
+
+                // Chunked at Firestore's WhereIn limit, the same shape
+                // ValidateNoCrossLineDuplicatesAsync already uses. A line has
+                // a handful of super team members, so this is one chunk in
+                // practice - and it reads only the matching rows rather than
+                // the whole day.
+                const int chunkSize = 30;
+                for (int i = 0; i < codes.Count; i += chunkSize)
+                {
+                    var chunk = codes.Skip(i).Take(chunkSize).Cast<object>().ToList();
+                    var snapshot = await _firestore.AttendanceTransactions
+                        .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), date)
+                        .WhereIn(nameof(AttendanceTransaction.ReplacementEmployeeCode), chunk)
+                        .GetSnapshotAsync();
+
+                    foreach (var doc in snapshot.Documents)
+                    {
+                        var tx = doc.ConvertTo<AttendanceTransaction>();
+                        if (tx.LineId == excludeLineId) continue;
+                        found.Add(new
+                        {
+                            EmployeeCode = tx.ReplacementEmployeeCode,
+                            tx.LineId,
+                            tx.LineName,
+                            tx.CCNo,
+                            tx.OperationName,
+                            // Who they are standing in for, so the lending
+                            // supervisor can see it is a real absence being
+                            // covered rather than a spare pair of hands.
+                            CoveringForCode = tx.EmployeeCode,
+                            CoveringForName = tx.EmployeeName,
+                        });
+                    }
+                }
+
+                return Ok(found);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         [HttpGet]
         public async Task<IActionResult> Get(
             int lineId,

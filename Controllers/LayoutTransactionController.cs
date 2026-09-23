@@ -157,6 +157,12 @@ namespace FactoryManagementSystem.Controllers
                     tx.CCId,
                     tx.CCNo,
                     tx.OperationName,
+                    // Which part of that line they belong to (MAIN, SUPER
+                    // TEAM, BACKUP...). A borrowed operator's home section
+                    // is what tells the receiving supervisor whether they
+                    // took a spare pair of hands or somebody's regular
+                    // operator - read from the same document, no extra cost.
+                    tx.Section,
                     tx.EmployeeCode,
                     tx.EmployeeName,
                 });

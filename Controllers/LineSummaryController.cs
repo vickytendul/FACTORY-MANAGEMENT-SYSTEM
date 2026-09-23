@@ -115,11 +115,19 @@ namespace FactoryManagementSystem.Controllers
                 // Employee_Att (Company API) - attendance for the mapped
                 // EmployeeCodes on the selected date only. Replaces the old
                 // AttendanceTransactions Firestore read.
-                var attendanceByDate = await FetchAttendanceRangeAsync(dateOnly, dateOnly, context.EmployeeSectionMap.Keys);
+                // Who was lent out and borrowed in today - resolved BEFORE
+                // the payroll fetch, because a borrowed operator's code has
+                // to be in the set it asks about or their status comes back
+                // missing and they are silently dropped.
+                var loans = await FetchDayLoansAsync(lineId, dateOnly, context);
+                var codesToAsk = context.EmployeeSectionMap.Keys
+                    .Concat(loans.BorrowedIn.Keys);
+
+                var attendanceByDate = await FetchAttendanceRangeAsync(dateOnly, dateOnly, codesToAsk);
                 var attendanceByCode = attendanceByDate.TryGetValue(dateOnly, out var m) ? m : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                var (tailorsPresent, othersPresent, absent, unknown) =
-                    ClassifyAttendance(context.EmployeeSectionMap, attendanceByCode);
+                var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
+                    ClassifyAttendance(context.EmployeeSectionMap, attendanceByCode, loans);
 
                 int totalPresent = tailorsPresent + othersPresent;
 
@@ -142,6 +150,8 @@ namespace FactoryManagementSystem.Controllers
                     TotalPresent = totalPresent,
                     Absent = absent,
                     UnknownAttendance = unknown,
+                    LentOut = lentOut,
+                    BorrowedIn = borrowedIn,
                     Output = output,
                     Rej = rej
                 };
@@ -211,7 +221,21 @@ namespace FactoryManagementSystem.Controllers
                     return Ok(emptyResults);
                 }
 
-                var attendanceByDate = await FetchAttendanceRangeAsync(from, to, context.EmployeeSectionMap.Keys);
+                // One lending picture per day - lending is a daily decision,
+                // so a range cannot resolve it once and reuse it. Resolved
+                // before the payroll fetch so every borrowed operator's code
+                // is in the set it asks about.
+                var loansByDate = new Dictionary<DateTime, DayLoans>();
+                var borrowedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (var d = from; d <= to; d = d.AddDays(1))
+                {
+                    var dayLoans = await FetchDayLoansAsync(lineId, d, context);
+                    loansByDate[d] = dayLoans;
+                    foreach (var code in dayLoans.BorrowedIn.Keys) borrowedCodes.Add(code);
+                }
+
+                var attendanceByDate = await FetchAttendanceRangeAsync(
+                    from, to, context.EmployeeSectionMap.Keys.Concat(borrowedCodes));
                 var outputByDate = await FetchOutputAndRejRangeAsync(lineId, from, to);
 
                 var results = new List<LineSummaryResponse>();
@@ -220,8 +244,8 @@ namespace FactoryManagementSystem.Controllers
                     var attendanceForDay = attendanceByDate.TryGetValue(d, out var m)
                         ? m
                         : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    var (tailorsPresent, othersPresent, absent, unknown) =
-                        ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay);
+                    var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
+                        ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d]);
                     var (output, rej) = outputByDate.TryGetValue(d, out var o) ? o : (0, 0);
 
                     results.Add(new LineSummaryResponse
@@ -238,6 +262,8 @@ namespace FactoryManagementSystem.Controllers
                         TotalPresent = tailorsPresent + othersPresent,
                         Absent = absent,
                         UnknownAttendance = unknown,
+                        LentOut = lentOut,
+                        BorrowedIn = borrowedIn,
                         Output = output,
                         Rej = rej
                     });
@@ -428,15 +454,107 @@ namespace FactoryManagementSystem.Controllers
         /// "WO" (weekly off), "LV"/"EL"/"CL" (leave types), "OD" (on
         /// duty), "CO" (comp off), "P*" - are deliberately still Unknown
         /// rather than guessed into Present or Absent.
-        private static (int tailorsPresent, int othersPresent, int absent, int unknown) ClassifyAttendance(
-            Dictionary<string, string> employeeSectionMap, Dictionary<string, string> attendanceByCode)
+        /// Who this line lent out and who it borrowed in on one date.
+        ///
+        /// Lending is recorded nowhere of its own: covering an absent
+        /// operator on another line already writes that line's attendance
+        /// row with ReplacementEmployeeCode set, so both directions are read
+        /// back out of those rows.
+        private sealed record DayLoans(
+            // This line's people who spent the day covering on another line.
+            HashSet<string> LentOut,
+            // People from elsewhere who spent the day covering on this line,
+            // mapped to the SECTION of the operation they covered - what
+            // they actually did here, which is what decides whether their
+            // minutes belong in the tailor pool.
+            Dictionary<string, string> BorrowedIn);
+
+        /// Reads both directions of lending for one line on one date.
+        ///
+        /// Without this a lent-out operator is counted present on the line
+        /// they left - inflating its Available Minutes for work it never
+        /// received - while the line that actually got them counts their
+        /// output without their minutes. Both figures are wrong, in
+        /// opposite directions.
+        private async Task<DayLoans> FetchDayLoansAsync(
+            int lineId, DateTime date, LineContext context)
+        {
+            var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
+            var lentOut = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var borrowedIn = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            // Borrowed in: this line's own attendance rows for the date. A
+            // replacement whose code is NOT on this line's layout came from
+            // somewhere else; one that IS on it is an ordinary same-line
+            // cover and is already counted through the layout.
+            var mine = await _firestore.AttendanceTransactions
+                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
+                .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
+                .GetSnapshotAsync();
+
+            foreach (var doc in mine.Documents)
+            {
+                var tx = doc.ConvertTo<AttendanceTransaction>();
+                var code = (tx.ReplacementEmployeeCode ?? "").Trim();
+                if (code.Length == 0) continue;
+                if (context.EmployeeSectionMap.ContainsKey(code)) continue;
+
+                // The section of the row they covered, found in the layout
+                // this request already loaded - no extra read.
+                var covered = context.LayoutItems
+                    .FirstOrDefault(x => x.LayoutMasterId == tx.LayoutMasterId);
+                borrowedIn[code] = covered?.Section ?? "MAIN";
+            }
+
+            // Lent out: rows on ANY line naming one of this line's people as
+            // the replacement. Chunked at Firestore's WhereIn limit, the
+            // same shape ValidateNoCrossLineDuplicatesAsync uses.
+            var codes = context.EmployeeSectionMap.Keys.ToList();
+            const int chunkSize = 30;
+            for (int i = 0; i < codes.Count; i += chunkSize)
+            {
+                var chunk = codes.Skip(i).Take(chunkSize).Cast<object>().ToList();
+                var snapshot = await _firestore.AttendanceTransactions
+                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
+                    .WhereIn(nameof(AttendanceTransaction.ReplacementEmployeeCode), chunk)
+                    .GetSnapshotAsync();
+
+                foreach (var doc in snapshot.Documents)
+                {
+                    var tx = doc.ConvertTo<AttendanceTransaction>();
+                    // Covering on their own line is not lending - they are
+                    // still here, just on a different operation.
+                    if (tx.LineId == lineId) continue;
+                    var code = (tx.ReplacementEmployeeCode ?? "").Trim();
+                    if (code.Length > 0) lentOut.Add(code);
+                }
+            }
+
+            return new DayLoans(lentOut, borrowedIn);
+        }
+
+        private static (int tailorsPresent, int othersPresent, int absent, int unknown, int lentOut, int borrowedIn) ClassifyAttendance(
+            Dictionary<string, string> employeeSectionMap,
+            Dictionary<string, string> attendanceByCode,
+            DayLoans? loans = null)
         {
             int tailorsPresent = 0, othersPresent = 0, absent = 0, unknown = 0;
+            int lentOutCount = 0, borrowedInCount = 0;
 
             foreach (var (employeeCode, section) in employeeSectionMap)
             {
                 var sec = (section ?? "").Trim().ToUpper();
                 bool isTailor = sec == "MAIN" || sec == "SUPER TEAM";
+
+                // Spent the day on another line. Counted separately rather
+                // than as present here (their minutes were not worked on
+                // this line) or as absent (they did turn up) - either would
+                // be a lie, and On Roll still has to add up.
+                if (loans != null && loans.LentOut.Contains(employeeCode))
+                {
+                    lentOutCount++;
+                    continue;
+                }
 
                 if (!attendanceByCode.TryGetValue(employeeCode, out var status))
                 {
@@ -462,7 +580,33 @@ namespace FactoryManagementSystem.Controllers
                 }
             }
 
-            return (tailorsPresent, othersPresent, absent, unknown);
+            // Borrowed in: their minutes were worked HERE, so they belong in
+            // this line's pool. Bucketed by the operation they covered here
+            // rather than by their home section - a super team tailor
+            // standing in as a checker did a checker's work today.
+            //
+            // Only if payroll says they were present, exactly like everybody
+            // else. Somebody scanned in but marked absent is not counted.
+            if (loans != null)
+            {
+                foreach (var (employeeCode, section) in loans.BorrowedIn)
+                {
+                    if (!attendanceByCode.TryGetValue(employeeCode, out var status)) continue;
+                    var trimmed = status.Trim();
+                    if (!trimmed.Equals("P", StringComparison.OrdinalIgnoreCase) &&
+                        !trimmed.Equals("Present", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    var sec = (section ?? "").Trim().ToUpper();
+                    if (sec == "MAIN" || sec == "SUPER TEAM") tailorsPresent++;
+                    else othersPresent++;
+                    borrowedInCount++;
+                }
+            }
+
+            return (tailorsPresent, othersPresent, absent, unknown, lentOutCount, borrowedInCount);
         }
 
         /// Calls SewingProdRept ONCE for the whole [fromDate, toDate] range,

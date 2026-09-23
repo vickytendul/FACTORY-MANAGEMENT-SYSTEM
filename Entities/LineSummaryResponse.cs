@@ -63,6 +63,28 @@ namespace FactoryManagementSystem.Entities
         /// LineSummaryController.ClassifyAttendance for the exact rule.
         public int UnknownAttendance { get; set; }
 
+        /// On this line's layout, but spent the day covering an absence on
+        /// ANOTHER line.
+        ///
+        /// Counted here rather than as present (their minutes were not
+        /// worked on this line, so including them understates this line's
+        /// efficiency) or as absent (they did turn up). On Roll still adds
+        /// up: Present + Absent + Unknown + LentOut = TotalOnRoll.
+        public int LentOut { get; set; }
+
+        /// Came from another line to cover an absence here. Already included
+        /// in TailorsPresent/OthersPresent - their minutes were worked on
+        /// this line, and this line's output includes what they made.
+        ///
+        /// Reported separately so the present count can be reconciled
+        /// against On Roll, which they are not part of.
+        public int BorrowedIn { get; set; }
+
+        /// Absent as a share of the people on this line's books.
+        ///
+        /// TotalOnRoll deliberately does NOT shrink when somebody is lent
+        /// out: if it did, lending five people away would raise this line's
+        /// absenteeism without a single extra person being absent.
         public decimal Absenteeism =>
             TotalOnRoll == 0
                 ? 0

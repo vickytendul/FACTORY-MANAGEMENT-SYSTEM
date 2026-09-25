@@ -210,6 +210,38 @@ namespace FactoryManagementSystem.Services
 
         public void InvalidateLayoutTransactionsCache() => Interlocked.Increment(ref _layoutTransactionVersion);
 
+        /// Attendance for ONE line/CC on one date.
+        ///
+        /// GetAttendanceForDateAsync below reads the whole factory's day,
+        /// which is right for the reports that genuinely need every line.
+        /// A supervisor marking or saving cover for one line does not: it
+        /// used that accessor and then filtered in memory, so opening one
+        /// line read every other line's rows only to discard them. At 19
+        /// allocated lines that is ~900 documents fetched to use ~50.
+        ///
+        /// Equality-only filters, so Firestore serves this with a zigzag
+        /// merge join - no composite index to declare or deploy.
+        ///
+        /// Shares _attendanceVersion with the whole-day accessor, so one
+        /// InvalidateAttendanceCache() still clears both and neither can be
+        /// left serving a stale view of a write the other saw.
+        public async Task<List<AttendanceTransaction>> GetAttendanceForLineDateAsync(
+            int lineId, int ccId, DateTime utcDate)
+        {
+            var key = $"attendance_{lineId}_{ccId}_{utcDate:yyyy-MM-dd}_v{Volatile.Read(ref _attendanceVersion)}";
+            if (_cache.TryGetValue(key, out List<AttendanceTransaction>? cached) && cached != null)
+                return cached;
+
+            var snapshot = await AttendanceTransactions
+                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
+                .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
+                .WhereEqualTo(nameof(AttendanceTransaction.CCId), ccId)
+                .GetSnapshotAsync();
+            var result = snapshot.Documents.Select(d => d.ConvertTo<AttendanceTransaction>()).ToList();
+            _cache.Set(key, result, _liveDataTtl);
+            return result;
+        }
+
         public async Task<List<SkillTransaction>> GetActiveSkillTransactionsAsync()
         {
             var key = $"active_skill_transactions_v{Volatile.Read(ref _skillTransactionVersion)}";

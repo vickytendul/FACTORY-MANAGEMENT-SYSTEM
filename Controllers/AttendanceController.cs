@@ -172,11 +172,11 @@ namespace FactoryManagementSystem.Controllers
                     attendanceDate.Date,
                     DateTimeKind.Utc);
 
-                // CACHED: same date-scoped attendance snapshot SkillTransaction/
-                // OperatorTracking/LineStrengthReport already share (10s TTL, tuned
-                // for exactly this cascade-of-calls-in-one-interaction pattern).
-                var data = (await _firestore.GetAttendanceForDateAsync(utcDate))
-                    .Where(x => x.LineId == lineId && x.CCId == ccId)
+                // CACHED, and scoped to this line/CC in the query rather than
+                // in memory. This used the whole-factory day snapshot and
+                // then threw away every other line's rows - at 19 allocated
+                // lines that is ~900 documents read to return ~50.
+                var data = (await _firestore.GetAttendanceForLineDateAsync(lineId, ccId.Value, utcDate))
                     .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                     .ToList();
 
@@ -206,13 +206,17 @@ namespace FactoryManagementSystem.Controllers
             var first = request[0];
             var normalizedDate = DateTime.SpecifyKind(first.AttendanceDate.Date, DateTimeKind.Utc);
 
-            // CACHED (10s TTL): this almost always runs moments after a Get for
-            // the same line/cc/date, so the cache is warm - avoids a second
-            // fresh read of the same rows we just fetched.
-            var existingForDate = await _firestore.GetAttendanceForDateAsync(normalizedDate);
+            // CACHED, and scoped to the one line/CC being saved. This almost
+            // always runs moments after a Get for the same line/cc/date, so
+            // the cache is warm and it costs nothing - and when it is not
+            // warm (every save after the first, because each save
+            // invalidates the cache) it now reads this line's rows instead
+            // of the whole factory's day.
+            var existingForLine = await _firestore.GetAttendanceForLineDateAsync(
+                first.LineId, first.CCId, normalizedDate);
 
             var existingByKey = new Dictionary<string, string>();
-            foreach (var record in existingForDate.Where(x => x.LineId == first.LineId && x.CCId == first.CCId))
+            foreach (var record in existingForLine)
             {
                 existingByKey[BuildKey(record.EmployeeCode, record.LayoutNo)] = record.FirestoreId;
             }

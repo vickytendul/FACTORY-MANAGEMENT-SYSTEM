@@ -478,7 +478,7 @@ namespace FactoryManagementSystem.Controllers
             if (missingIds.Any())
                 throw new InvalidOperationException($"New rows cannot be added via Update. LayoutMaster(s) not found: [{string.Join(", ", missingIds)}].");
 
-            var sectionLookup = await BuildSectionLookupAsync(request.Items);
+            var sectionLookup = await BuildSectionLookupAsync(request.Items, request.CCId);
 
             await ValidateNoCrossLineDuplicatesAsync(request.Items, request.LineId, request.CCId);
 
@@ -713,9 +713,22 @@ namespace FactoryManagementSystem.Controllers
                   "Remove them there first, or pick a different operator.";
         }
 
-        // Batched: fetch every referenced LayoutMaster in chunks of 30 instead of
-        // one query per LayoutMasterId (N reads for an N-row layout).
-        private async Task<Dictionary<int, string>> BuildSectionLookupAsync(List<LayoutTransactionItem> items)
+        // Section per referenced LayoutMaster.
+        //
+        // Served from the cached active-LayoutMasters-for-this-CC snapshot,
+        // which the save path has usually already fetched and which every
+        // other consumer shares - so the common case costs no read at all.
+        // It used to run its own WhereIn scan of ~50 documents on every
+        // save, re-fetching rows already sitting in that cache.
+        //
+        // Anything the cached list does not cover still gets the original
+        // chunked WhereIn. That is not a fallback for safety's sake: the
+        // cache is active-only, and a row can legitimately reference a
+        // LayoutMaster that has since been deactivated. Dropping straight
+        // to "MAIN" for those would silently rewrite a SUPER TEAM or BACKUP
+        // row's section on the next save.
+        private async Task<Dictionary<int, string>> BuildSectionLookupAsync(
+            List<LayoutTransactionItem> items, int ccId)
         {
             var layoutMasterIds = items
                 .Where(i => i.LayoutMasterId > 0)
@@ -726,10 +739,18 @@ namespace FactoryManagementSystem.Controllers
             var sectionLookup = new Dictionary<int, string>();
             if (layoutMasterIds.Count == 0) return sectionLookup;
 
-            const int chunkSize = 30;
-            for (int i = 0; i < layoutMasterIds.Count; i += chunkSize)
+            foreach (var lm in await _firestore.GetActiveLayoutMastersByCcAsync(ccId))
             {
-                var chunk = layoutMasterIds.Skip(i).Take(chunkSize).Cast<object>().ToList();
+                if (!layoutMasterIds.Contains(lm.Id)) continue;
+                sectionLookup[lm.Id] = string.IsNullOrWhiteSpace(lm.Section) ? "MAIN" : lm.Section;
+            }
+
+            var missing = layoutMasterIds.Where(id => !sectionLookup.ContainsKey(id)).ToList();
+
+            const int chunkSize = 30;
+            for (int i = 0; i < missing.Count; i += chunkSize)
+            {
+                var chunk = missing.Skip(i).Take(chunkSize).Cast<object>().ToList();
                 var snapshot = await _firestore.LayoutMasters
                     .WhereIn(nameof(LayoutMaster.Id), chunk)
                     .GetSnapshotAsync();

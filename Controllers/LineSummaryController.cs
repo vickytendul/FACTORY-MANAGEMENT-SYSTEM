@@ -119,7 +119,8 @@ namespace FactoryManagementSystem.Controllers
                 // the payroll fetch, because a borrowed operator's code has
                 // to be in the set it asks about or their status comes back
                 // missing and they are silently dropped.
-                var loans = await FetchDayLoansAsync(lineId, dateOnly, context);
+                var loansByDate = await FetchLoansForRangeAsync(lineId, dateOnly, dateOnly, context);
+                var loans = loansByDate[DateTime.SpecifyKind(dateOnly, DateTimeKind.Utc)];
                 var codesToAsk = context.EmployeeSectionMap.Keys
                     .Concat(loans.BorrowedIn.Keys);
 
@@ -222,17 +223,15 @@ namespace FactoryManagementSystem.Controllers
                 }
 
                 // One lending picture per day - lending is a daily decision,
-                // so a range cannot resolve it once and reuse it. Resolved
-                // before the payroll fetch so every borrowed operator's code
-                // is in the set it asks about.
-                var loansByDate = new Dictionary<DateTime, DayLoans>();
+                // so each day still gets its own answer. What changed is the
+                // fetching: the whole range is read in a fixed handful of
+                // queries rather than three per day. Resolved before the
+                // payroll fetch so every borrowed operator's code is in the
+                // set it asks about.
+                var loansByDate = await FetchLoansForRangeAsync(lineId, from, to, context);
                 var borrowedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                for (var d = from; d <= to; d = d.AddDays(1))
-                {
-                    var dayLoans = await FetchDayLoansAsync(lineId, d, context);
-                    loansByDate[d] = dayLoans;
+                foreach (var dayLoans in loansByDate.Values)
                     foreach (var code in dayLoans.BorrowedIn.Keys) borrowedCodes.Add(code);
-                }
 
                 var attendanceByDate = await FetchAttendanceRangeAsync(
                     from, to, context.EmployeeSectionMap.Keys.Concat(borrowedCodes));
@@ -469,53 +468,91 @@ namespace FactoryManagementSystem.Controllers
             // minutes belong in the tailor pool.
             Dictionary<string, string> BorrowedIn);
 
-        /// Reads both directions of lending for one line on one date.
+        /// Reads both directions of lending for one line, for EVERY date in
+        /// a range, in a fixed handful of queries.
         ///
         /// Without this a lent-out operator is counted present on the line
         /// they left - inflating its Available Minutes for work it never
         /// received - while the line that actually got them counts their
         /// output without their minutes. Both figures are wrong, in
         /// opposite directions.
-        private async Task<DayLoans> FetchDayLoansAsync(
-            int lineId, DateTime date, LineContext context)
+        ///
+        /// This used to be a one-date method called in a loop, which cost
+        /// 3 queries per day: a 34-day range ran 102 queries to return 44
+        /// documents, because Firestore bills a minimum of one read even
+        /// for a query that matches nothing - and 28 of those 34 days were
+        /// empty. Both halves batch cleanly instead:
+        ///
+        ///   - borrowed in: AttendanceDate IN (up to 30 dates) + LineId
+        ///   - lent out:    ReplacementEmployeeCode IN (up to 30 codes)
+        ///
+        /// Both are equality-only, so Firestore serves them with a zigzag
+        /// merge join and neither needs a composite index declared or
+        /// deployed. 34 days now costs 4 queries.
+        ///
+        /// The lent-out half deliberately carries no date filter: Firestore
+        /// refuses two IN clauses whose combination exceeds 30 disjunctions
+        /// (30 codes x 30 dates), and a date range would need an inequality,
+        /// which does need a composite index. It therefore reads every row
+        /// that ever named one of this line's people as a replacement - 16
+        /// documents today - and filters to the range in memory. That set
+        /// grows slowly with history; if it ever outgrows the per-day cost
+        /// it is worth revisiting, but it is two orders of magnitude
+        /// cheaper at present.
+        private async Task<Dictionary<DateTime, DayLoans>> FetchLoansForRangeAsync(
+            int lineId, DateTime from, DateTime to, LineContext context)
         {
-            var utcDate = DateTime.SpecifyKind(date.Date, DateTimeKind.Utc);
-            var lentOut = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var borrowedIn = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var dates = new List<DateTime>();
+            for (var d = from.Date; d <= to.Date; d = d.AddDays(1))
+                dates.Add(DateTime.SpecifyKind(d, DateTimeKind.Utc));
 
-            // Borrowed in: this line's own attendance rows for the date. A
-            // replacement whose code is NOT on this line's layout came from
-            // somewhere else; one that IS on it is an ordinary same-line
-            // cover and is already counted through the layout.
-            var mine = await _firestore.AttendanceTransactions
-                .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
-                .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
-                .GetSnapshotAsync();
-
-            foreach (var doc in mine.Documents)
+            var result = new Dictionary<DateTime, DayLoans>();
+            foreach (var d in dates)
             {
-                var tx = doc.ConvertTo<AttendanceTransaction>();
-                var code = (tx.ReplacementEmployeeCode ?? "").Trim();
-                if (code.Length == 0) continue;
-                if (context.EmployeeSectionMap.ContainsKey(code)) continue;
+                result[d] = new DayLoans(
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            }
 
-                // The section of the row they covered, found in the layout
-                // this request already loaded - no extra read.
-                var covered = context.LayoutItems
-                    .FirstOrDefault(x => x.LayoutMasterId == tx.LayoutMasterId);
-                borrowedIn[code] = covered?.Section ?? "MAIN";
+            const int chunkSize = 30;
+
+            // Borrowed in: this line's own attendance rows across the range.
+            // A replacement whose code is NOT on this line's layout came
+            // from somewhere else; one that IS on it is an ordinary
+            // same-line cover and is already counted through the layout.
+            for (int i = 0; i < dates.Count; i += chunkSize)
+            {
+                var chunk = dates.Skip(i).Take(chunkSize).Cast<object>().ToList();
+                var mine = await _firestore.AttendanceTransactions
+                    .WhereIn(nameof(AttendanceTransaction.AttendanceDate), chunk)
+                    .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
+                    .GetSnapshotAsync();
+
+                foreach (var doc in mine.Documents)
+                {
+                    var tx = doc.ConvertTo<AttendanceTransaction>();
+                    var code = (tx.ReplacementEmployeeCode ?? "").Trim();
+                    if (code.Length == 0) continue;
+                    if (context.EmployeeSectionMap.ContainsKey(code)) continue;
+
+                    var day = DateTime.SpecifyKind(tx.AttendanceDate.Date, DateTimeKind.Utc);
+                    if (!result.TryGetValue(day, out var loans)) continue;
+
+                    // The section of the row they covered, found in the
+                    // layout this request already loaded - no extra read.
+                    var covered = context.LayoutItems
+                        .FirstOrDefault(x => x.LayoutMasterId == tx.LayoutMasterId);
+                    loans.BorrowedIn[code] = covered?.Section ?? "MAIN";
+                }
             }
 
             // Lent out: rows on ANY line naming one of this line's people as
-            // the replacement. Chunked at Firestore's WhereIn limit, the
-            // same shape ValidateNoCrossLineDuplicatesAsync uses.
+            // the replacement.
             var codes = context.EmployeeSectionMap.Keys.ToList();
-            const int chunkSize = 30;
             for (int i = 0; i < codes.Count; i += chunkSize)
             {
                 var chunk = codes.Skip(i).Take(chunkSize).Cast<object>().ToList();
                 var snapshot = await _firestore.AttendanceTransactions
-                    .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), utcDate)
                     .WhereIn(nameof(AttendanceTransaction.ReplacementEmployeeCode), chunk)
                     .GetSnapshotAsync();
 
@@ -526,11 +563,15 @@ namespace FactoryManagementSystem.Controllers
                     // still here, just on a different operation.
                     if (tx.LineId == lineId) continue;
                     var code = (tx.ReplacementEmployeeCode ?? "").Trim();
-                    if (code.Length > 0) lentOut.Add(code);
+                    if (code.Length == 0) continue;
+
+                    var day = DateTime.SpecifyKind(tx.AttendanceDate.Date, DateTimeKind.Utc);
+                    if (!result.TryGetValue(day, out var loans)) continue;
+                    loans.LentOut.Add(code);
                 }
             }
 
-            return new DayLoans(lentOut, borrowedIn);
+            return result;
         }
 
         private static (int tailorsPresent, int othersPresent, int absent, int unknown, int lentOut, int borrowedIn) ClassifyAttendance(

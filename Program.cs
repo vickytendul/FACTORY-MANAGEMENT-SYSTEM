@@ -1,3 +1,5 @@
+using FactoryManagementSystem.Services.Skills;
+using Npgsql;
 using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Services;
 using FirebaseAdmin;
@@ -90,6 +92,65 @@ builder.Services.AddSingleton<CompanyApiClient>();
 builder.Services.AddSingleton<CompanyAttendanceService>();
 builder.Services.AddSingleton<ProductionLineService>();
 builder.Services.AddSingleton<EmployeeSyncService>();
+
+// =====================================================
+// Skill records: Firebase or Supabase, chosen by configuration
+// =====================================================
+//
+// Skills__Source = firebase | dual | supabase   (default firebase)
+//
+//   firebase - unchanged behaviour, the rollback target
+//   dual     - reads both, SERVES FIREBASE, logs any disagreement.
+//              Writes go to Firebase only.
+//   supabase - Supabase is the source of truth
+//
+// Firebase data is never deleted by any of these, so switching the flag
+// back is a complete rollback for everything except records written while
+// Supabase was authoritative.
+builder.Services.AddSingleton<FirestoreSkillRepository>();
+
+var skillsSource = (builder.Configuration["Skills:Source"] ?? "firebase").Trim().ToLowerInvariant();
+
+if (skillsSource is "supabase" or "dual")
+{
+    var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
+        ?? throw new Exception(
+            "Supabase:ConnectionString is required when Skills:Source is 'supabase' or 'dual'.");
+
+    builder.Services.AddSingleton(_ =>
+    {
+        // Supabase hands out a postgresql:// URI; Npgsql wants keywords.
+        // Converted here rather than asking whoever sets the environment
+        // variable to reshape what the dashboard gave them.
+        var connectionString = supabaseConnection;
+        if (connectionString.Contains("://"))
+        {
+            var uri = new Uri(connectionString);
+            var userInfo = uri.UserInfo.Split(':', 2);
+            connectionString = new NpgsqlConnectionStringBuilder
+            {
+                Host = uri.Host,
+                Port = uri.Port > 0 ? uri.Port : 5432,
+                Username = Uri.UnescapeDataString(userInfo[0]),
+                Password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : string.Empty,
+                Database = uri.AbsolutePath.Trim('/'),
+                SslMode = SslMode.Require,
+            }.ConnectionString;
+        }
+        return NpgsqlDataSource.Create(connectionString);
+    });
+    builder.Services.AddSingleton<SupabaseSkillRepository>();
+}
+
+builder.Services.AddSingleton<ISkillRepository>(sp => skillsSource switch
+{
+    "supabase" => sp.GetRequiredService<SupabaseSkillRepository>(),
+    "dual" => new DualReadSkillRepository(
+        sp.GetRequiredService<FirestoreSkillRepository>(),
+        sp.GetRequiredService<SupabaseSkillRepository>(),
+        sp.GetRequiredService<ILogger<DualReadSkillRepository>>()),
+    _ => sp.GetRequiredService<FirestoreSkillRepository>(),
+});
 
 // =====================================================
 // Authentication / Authorization

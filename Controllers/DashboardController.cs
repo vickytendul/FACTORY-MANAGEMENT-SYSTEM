@@ -1,4 +1,5 @@
 using FactoryManagementSystem.Entities;
+using FactoryManagementSystem.Services.Skills;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
@@ -12,9 +13,15 @@ namespace FactoryManagementSystem.Controllers
         private const double WorkingMinutesPerDay = 480;
         private readonly FirestoreService _firestore;
 
-        public DashboardController(FirestoreService firestore)
+        /// Skill records only - this controller is currently a disabled
+        /// stub, but wiring it to the repository means re-enabling it can
+        /// never silently read a different store than the rest of the app.
+        private readonly ISkillRepository _skills;
+
+        public DashboardController(FirestoreService firestore, ISkillRepository skills)
         {
             _firestore = firestore;
+            _skills = skills;
         }
 
         // Temporarily disabled pending a rework of the whole Dashboard feature.
@@ -99,10 +106,7 @@ namespace FactoryManagementSystem.Controllers
                 var employees = await _firestore.GetAllEmployeesAsync();
                 var tailors = employees.Where(x => (x.Designation ?? string.Empty).Contains("TAILOR", StringComparison.OrdinalIgnoreCase)).ToList();
 
-                var skillSnapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-                var skills = skillSnapshot.Documents.Select(d => d.ConvertTo<SkillTransaction>()).ToList();
+                var skills = await _skills.GetAllActiveAsync();
 
                 var productionByCc = monthOutputs
                     .GroupBy(x => x.CCId)

@@ -1,4 +1,5 @@
 using FactoryManagementSystem.Entities;
+using FactoryManagementSystem.Services.Skills;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Authorization;
@@ -14,14 +15,22 @@ namespace FactoryManagementSystem.Controllers
         private readonly SummaryService _summaryService;
         private readonly CompanyAttendanceService _companyAttendance;
 
+        /// Skill records only. Everything else this controller reads -
+        /// layout allocations, layout masters, employees - stays on
+        /// Firestore through _firestore above, so these endpoints are
+        /// deliberately hybrid while the migration settles.
+        private readonly ISkillRepository _skills;
+
         public SkillTransactionController(
             FirestoreService firestore,
             SummaryService summaryService,
-            CompanyAttendanceService companyAttendance)
+            CompanyAttendanceService companyAttendance,
+            ISkillRepository skills)
         {
             _firestore = firestore;
             _summaryService = summaryService;
             _companyAttendance = companyAttendance;
+            _skills = skills;
         }
 
         [HttpGet]
@@ -31,20 +40,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                Query query = _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true);
-
-                if (!string.IsNullOrWhiteSpace(employeeCode))
-                    query = query.WhereEqualTo(nameof(SkillTransaction.EmployeeCode), employeeCode);
-                if (ccId.HasValue)
-                    query = query.WhereEqualTo(nameof(SkillTransaction.CCId), ccId.Value);
-
-                var snapshot = await query.GetSnapshotAsync();
-                var data = snapshot.Documents
-                    .Select(d => d.ConvertTo<SkillTransaction>())
-                    .ToList();
-
-                return Ok(data);
+                return Ok(await _skills.GetActiveAsync(employeeCode, ccId));
             }
             catch (Exception ex)
             {
@@ -57,17 +53,11 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.TransactionId), id)
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var doc = snapshot.Documents.FirstOrDefault();
-                if (doc == null)
+                var record = await _skills.GetByTransactionIdAsync(id);
+                if (record == null)
                     return NotFound(new { Success = false, Message = "Skill record not found." });
 
-                return Ok(doc.ConvertTo<SkillTransaction>());
+                return Ok(record);
             }
             catch (Exception ex)
             {
@@ -93,74 +83,13 @@ namespace FactoryManagementSystem.Controllers
                 if (request.ActualQty > request.TargetQty)
                     return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
 
-                var now = DateTime.UtcNow;
-                var eligiblePercentage = request.TargetQty > 0
-                    ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)
-                    : 0;
-
-                var existingSnapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.EmployeeCode), request.EmployeeCode)
-                    .WhereEqualTo(nameof(SkillTransaction.OperationName), request.OperationName)
-                    .WhereEqualTo(nameof(SkillTransaction.MachineType), request.MachineType ?? "")
-                    .WhereEqualTo(nameof(SkillTransaction.OperationGrade), request.OperationGrade ?? "")
-                    .WhereEqualTo(nameof(SkillTransaction.Section), request.Section ?? "MAIN")
-                    .WhereEqualTo(nameof(SkillTransaction.CCId), request.CCId)
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                if (existingSnapshot.Documents.Any())
+                var (record, created) = await _skills.SaveAsync(request);
+                return Ok(new
                 {
-                    var doc = existingSnapshot.Documents.First();
-                    var existing = doc.ConvertTo<SkillTransaction>();
-                    existing.TargetQty = request.TargetQty;
-                    existing.OperationId = request.OperationId;
-                    existing.ActualQty = request.ActualQty;
-                    existing.EligiblePercentage = eligiblePercentage;
-                    existing.Grade = request.Grade ?? string.Empty;
-                    existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
-                    existing.UpdatedOn = now;
-                    existing.NormalizedOperationName =
-                        SkillTransaction.Normalize(existing.OperationName);
-                    await doc.Reference.SetAsync(existing);
-                    _firestore.InvalidateSkillTransactionsCache();
-
-                    return Ok(new { Success = true, Message = "Skill record updated.", Data = existing });
-                }
-                else
-                {
-                    var nextId = await _firestore.GetNextSequentialIdAsync(
-                        "SkillTransactionCounter",
-                        _firestore.SkillTransactions,
-                        d => d.ConvertTo<SkillTransaction>().TransactionId);
-
-                    var newRecord = new SkillTransaction
-                    {
-                        TransactionId = nextId,
-                        OperationId = request.OperationId,
-                        EmployeeCode = request.EmployeeCode,
-                        OperationName = request.OperationName,
-                        NormalizedOperationName =
-                            SkillTransaction.Normalize(request.OperationName),
-                        MachineType = request.MachineType ?? string.Empty,
-                        OperationGrade = request.OperationGrade ?? string.Empty,
-                        Section = string.IsNullOrWhiteSpace(request.Section) ? "MAIN" : request.Section,
-                        CCId = request.CCId,
-                        CCNo = request.CCNo ?? string.Empty,
-                        TargetQty = request.TargetQty,
-                        ActualQty = request.ActualQty,
-                        EligiblePercentage = eligiblePercentage,
-                        Grade = request.Grade ?? string.Empty,
-                        UpdatedBy = request.UpdatedBy ?? string.Empty,
-                        UpdatedOn = now,
-                        IsActive = true
-                    };
-
-                    await _firestore.SkillTransactions.AddAsync(newRecord);
-                    _firestore.InvalidateSkillTransactionsCache();
-
-                    return Ok(new { Success = true, Message = "Skill record created.", Data = newRecord });
-                }
+                    Success = true,
+                    Message = created ? "Skill record created." : "Skill record updated.",
+                    Data = record
+                });
             }
             catch (Exception ex)
             {
@@ -180,43 +109,11 @@ namespace FactoryManagementSystem.Controllers
                 if (request.ActualQty > request.TargetQty)
                     return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
 
-                var snapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.TransactionId), id)
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var doc = snapshot.Documents.FirstOrDefault();
-                if (doc == null)
+                var updated = await _skills.UpdateAsync(id, request);
+                if (updated == null)
                     return NotFound(new { Success = false, Message = "Skill record not found." });
 
-                var existing = doc.ConvertTo<SkillTransaction>();
-                existing.TargetQty = request.TargetQty;
-                existing.OperationId = request.OperationId;
-                existing.ActualQty = request.ActualQty;
-                existing.EligiblePercentage = request.TargetQty > 0
-                    ? (int)Math.Round((double)request.ActualQty / request.TargetQty * 100)
-                    : 0;
-                existing.Grade = request.Grade ?? string.Empty;
-                existing.UpdatedBy = request.UpdatedBy ?? string.Empty;
-                existing.UpdatedOn = DateTime.UtcNow;
-
-                if (!string.IsNullOrWhiteSpace(request.OperationName))
-                    existing.OperationName = request.OperationName;
-                if (!string.IsNullOrWhiteSpace(request.CCNo))
-                    existing.CCNo = request.CCNo;
-
-                // Kept in step with OperationName on every write, including
-                // the case where the name was not part of this request - an
-                // older document reaching this path gets the field filled in
-                // rather than staying unqueryable.
-                existing.NormalizedOperationName =
-                    SkillTransaction.Normalize(existing.OperationName);
-
-                await doc.Reference.SetAsync(existing);
-                _firestore.InvalidateSkillTransactionsCache();
-
-                return Ok(new { Success = true, Message = "Skill record updated.", Data = existing });
+                return Ok(new { Success = true, Message = "Skill record updated.", Data = updated });
             }
             catch (Exception ex)
             {
@@ -261,13 +158,7 @@ namespace FactoryManagementSystem.Controllers
                     .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
-                var skillSnapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.OperationId), operationId)
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-
-                var skillByCode = skillSnapshot.Documents
-                    .Select(d => d.ConvertTo<SkillTransaction>())
+                var skillByCode = (await _skills.GetByOperationIdAsync(operationId))
                     .Where(s => !IsExcluded(s.EmployeeCode))
                     // A person can have more than one skill record for the same
                     // operation over time; keep only their best one.
@@ -668,26 +559,7 @@ namespace FactoryManagementSystem.Controllers
         private async Task<List<SkillTransaction>> FetchSkillsForOperationAsync(
             int operationId, string normalizedOperationName)
         {
-            var found = new Dictionary<string, SkillTransaction>(StringComparer.Ordinal);
-
-            var byId = await _firestore.SkillTransactions
-                .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                .WhereEqualTo(nameof(SkillTransaction.OperationId), operationId)
-                .GetSnapshotAsync();
-            foreach (var doc in byId.Documents)
-                found[doc.Reference.Path] = doc.ConvertTo<SkillTransaction>();
-
-            if (!string.IsNullOrEmpty(normalizedOperationName))
-            {
-                var byName = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .WhereEqualTo(nameof(SkillTransaction.NormalizedOperationName), normalizedOperationName)
-                    .GetSnapshotAsync();
-                foreach (var doc in byName.Documents)
-                    found[doc.Reference.Path] = doc.ConvertTo<SkillTransaction>();
-            }
-
-            return found.Values.ToList();
+            return await _skills.GetForOperationAsync(operationId, normalizedOperationName);
         }
 
         private static string NormalizeOperationName(string? value) =>
@@ -729,7 +601,7 @@ namespace FactoryManagementSystem.Controllers
                 var ccAllocations = (await _firestore.GetActiveLayoutTransactionsAsync())
                     .Where(t => t.CCId == ccId)
                     .ToList();
-                var ccSkills = (await _firestore.GetActiveSkillTransactionsAsync())
+                var ccSkills = (await _skills.GetAllActiveAsync())
                     .Where(s => s.CCId == ccId)
                     .ToList();
 
@@ -783,7 +655,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var activeSkillTransactions = await _firestore.GetActiveSkillTransactionsAsync();
+                var activeSkillTransactions = await _skills.GetAllActiveAsync();
 
                 var byEmployee = activeSkillTransactions
                     .Where(s => !string.IsNullOrWhiteSpace(s.EmployeeCode))
@@ -838,18 +710,8 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.SkillTransactions
-                    .WhereEqualTo(nameof(SkillTransaction.TransactionId), id)
-                    .WhereEqualTo(nameof(SkillTransaction.IsActive), true)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var doc = snapshot.Documents.FirstOrDefault();
-                if (doc == null)
+                if (!await _skills.SoftDeleteAsync(id))
                     return NotFound(new { Success = false, Message = "Skill record not found." });
-
-                await doc.Reference.UpdateAsync(nameof(SkillTransaction.IsActive), false);
-                _firestore.InvalidateSkillTransactionsCache();
 
                 return Ok(new { Success = true, Message = "Skill record deleted." });
             }

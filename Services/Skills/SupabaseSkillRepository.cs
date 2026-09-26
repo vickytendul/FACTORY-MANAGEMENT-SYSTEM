@@ -111,7 +111,7 @@ namespace FactoryManagementSystem.Services.Skills
             QueryAsync(SelectColumns + " where is_active and operation_id = @op",
                 new NpgsqlParameter("op", operationId));
 
-        public async Task<(SkillTransaction Record, bool Created)> SaveAsync(SkillTransaction request)
+        public async Task<SkillSaveResult> SaveAsync(SkillTransaction request)
         {
             // One statement, no read first. The partial unique index makes
             // a duplicate impossible at the database level - where the
@@ -144,7 +144,7 @@ namespace FactoryManagementSystem.Services.Skills
                 returning (xmax = 0) as created, transaction_id, operation_id, employee_code,
                    operation_name, normalized_operation_name, machine_type, operation_grade,
                    section, cc_id, cc_no, target_qty, actual_qty, eligible_percentage,
-                   grade, updated_by, updated_on, is_active
+                   grade, updated_by, updated_on, is_active, firebase_doc_id
                 """;
 
             await using var cmd = _dataSource.CreateCommand(sql);
@@ -185,10 +185,10 @@ namespace FactoryManagementSystem.Services.Skills
                 UpdatedOn = r.GetFieldValue<DateTimeOffset>(16).UtcDateTime,
                 IsActive = r.GetBoolean(17),
             };
-            return (record, created);
+            return new SkillSaveResult(record, created, r.GetString(18));
         }
 
-        public async Task<SkillTransaction?> UpdateAsync(int transactionId, SkillTransaction request)
+        public async Task<SkillSaveResult?> UpdateAsync(int transactionId, SkillTransaction request)
         {
             // OperationName and CCNo are only overwritten when supplied,
             // exactly as the Firestore path does - COALESCE on a nullified
@@ -207,7 +207,7 @@ namespace FactoryManagementSystem.Services.Skills
                 returning transaction_id, operation_id, employee_code, operation_name,
                    normalized_operation_name, machine_type, operation_grade, section,
                    cc_id, cc_no, target_qty, actual_qty, eligible_percentage,
-                   grade, updated_by, updated_on, is_active
+                   grade, updated_by, updated_on, is_active, firebase_doc_id
                 """;
 
             await using var cmd = _dataSource.CreateCommand(sql);
@@ -222,10 +222,121 @@ namespace FactoryManagementSystem.Services.Skills
 
             await using var r = await cmd.ExecuteReaderAsync();
             if (!await r.ReadAsync()) return null;
-            return Read(r);
+            return new SkillSaveResult(Read(r), false, r.GetString(17));
         }
 
         public async Task<bool> SoftDeleteAsync(int transactionId)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                "update public.skill_transactions set is_active = false, updated_on = now() " +
+                "where transaction_id = @id and is_active");
+            cmd.Parameters.AddWithValue("id", transactionId);
+            return await cmd.ExecuteNonQueryAsync() > 0;
+        }
+
+        // ── Mirroring (dual mode only) ──────────────────────────────────
+        //
+        // These are NOT on ISkillRepository. They exist for one caller,
+        // DualReadSkillRepository, and they are the opposite of the methods
+        // above: instead of deciding a record's identity, they accept the
+        // identity Firebase already decided and reproduce it exactly.
+        //
+        // Mirroring must never mint its own TransactionId. Firebase and
+        // Postgres allocate ids independently - a counter document there,
+        // skill_transaction_id_seq here - so a mirror that called nextval
+        // would store the same record under two different ids. Update and
+        // soft delete both find rows BY TransactionId, so from the first
+        // divergence onward every later mirror would hit the wrong row or
+        // none at all, while the dual-read comparator went on reporting a
+        // match because the field values still lined up.
+
+        /// Writes a Firebase-authored record into Supabase under Firebase's
+        /// own TransactionId and document id.
+        ///
+        /// Conflicts are resolved on transaction_id, which is the identity
+        /// Firebase owns. A clash on the natural-key index instead means the
+        /// two stores genuinely disagree about which record holds that key -
+        /// that surfaces as an error rather than being papered over, because
+        /// it is exactly the drift this mirror exists to prevent.
+        public async Task MirrorUpsertAsync(SkillTransaction record, string firebaseDocumentId)
+        {
+            const string sql = """
+                insert into public.skill_transactions
+                  (firebase_doc_id, transaction_id, operation_id, employee_code, operation_name,
+                   machine_type, operation_grade, section, cc_id, cc_no,
+                   target_qty, actual_qty, grade, updated_by, updated_on, is_active)
+                values
+                  (@docId, @tid, @opId, @code, @opName, @machine, @opGrade, @section, @ccId, @ccNo,
+                   @target, @actual, @grade, @by, @updatedOn, @isActive)
+                on conflict (transaction_id) do update set
+                   operation_id    = excluded.operation_id,
+                   employee_code   = excluded.employee_code,
+                   operation_name  = excluded.operation_name,
+                   machine_type    = excluded.machine_type,
+                   operation_grade = excluded.operation_grade,
+                   section         = excluded.section,
+                   cc_id           = excluded.cc_id,
+                   cc_no           = excluded.cc_no,
+                   target_qty      = excluded.target_qty,
+                   actual_qty      = excluded.actual_qty,
+                   grade           = excluded.grade,
+                   updated_by      = excluded.updated_by,
+                   updated_on      = excluded.updated_on,
+                   is_active       = excluded.is_active
+                """;
+
+            await using var conn = await _dataSource.OpenConnectionAsync();
+            await using var tx = await conn.BeginTransactionAsync();
+
+            await using (var cmd = new NpgsqlCommand(sql, conn, tx))
+            {
+                cmd.Parameters.AddWithValue("docId", firebaseDocumentId);
+                cmd.Parameters.AddWithValue("tid", record.TransactionId);
+                cmd.Parameters.AddWithValue("opId", record.OperationId);
+                cmd.Parameters.AddWithValue("code", record.EmployeeCode ?? string.Empty);
+                cmd.Parameters.AddWithValue("opName", record.OperationName ?? string.Empty);
+                cmd.Parameters.AddWithValue("machine", record.MachineType ?? string.Empty);
+                cmd.Parameters.AddWithValue("opGrade", record.OperationGrade ?? string.Empty);
+                cmd.Parameters.AddWithValue("section",
+                    string.IsNullOrWhiteSpace(record.Section) ? "MAIN" : record.Section);
+                cmd.Parameters.AddWithValue("ccId", record.CCId);
+                cmd.Parameters.AddWithValue("ccNo", record.CCNo ?? string.Empty);
+                cmd.Parameters.AddWithValue("target", record.TargetQty);
+                cmd.Parameters.AddWithValue("actual", record.ActualQty);
+                cmd.Parameters.AddWithValue("grade", record.Grade ?? string.Empty);
+                cmd.Parameters.AddWithValue("by", record.UpdatedBy ?? string.Empty);
+                cmd.Parameters.AddWithValue("updatedOn",
+                    NpgsqlTypes.NpgsqlDbType.TimestampTz,
+                    DateTime.SpecifyKind(record.UpdatedOn, DateTimeKind.Utc));
+                cmd.Parameters.AddWithValue("isActive", record.IsActive);
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            // Keep the sequence ahead of every id Firebase has handed out.
+            //
+            // Without this, cutover is a trap: the sequence was seeded to the
+            // highest id in the original import (252), so the first standalone
+            // Supabase create after switching would hand out an id that a
+            // mirrored Firebase record already occupies, and the insert would
+            // fail on transaction_id. Advancing it here means the switch needs
+            // no separate reseeding step and cannot be forgotten.
+            await using (var bump = new NpgsqlCommand(
+                "select setval('public.skill_transaction_id_seq', " +
+                "greatest(@tid::bigint, (select last_value from public.skill_transaction_id_seq)))",
+                conn, tx))
+            {
+                bump.Parameters.AddWithValue("tid", record.TransactionId);
+                await bump.ExecuteScalarAsync();
+            }
+
+            await tx.CommitAsync();
+        }
+
+        /// Mirrors a soft delete by the TransactionId Firebase owns.
+        ///
+        /// Returns false when no active row carried that id - which means
+        /// the mirror is already out of step, not that the delete failed.
+        public async Task<bool> MirrorSoftDeleteAsync(int transactionId)
         {
             await using var cmd = _dataSource.CreateCommand(
                 "update public.skill_transactions set is_active = false, updated_on = now() " +

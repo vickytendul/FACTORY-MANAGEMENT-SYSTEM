@@ -83,12 +83,12 @@ namespace FactoryManagementSystem.Controllers
                 if (request.ActualQty > request.TargetQty)
                     return BadRequest(new { Success = false, Message = "ActualQty cannot exceed TargetQty." });
 
-                var (record, created) = await _skills.SaveAsync(request);
+                var result = await _skills.SaveAsync(request);
                 return Ok(new
                 {
                     Success = true,
-                    Message = created ? "Skill record created." : "Skill record updated.",
-                    Data = record
+                    Message = result.Created ? "Skill record created." : "Skill record updated.",
+                    Data = result.Record
                 });
             }
             catch (Exception ex)
@@ -113,7 +113,7 @@ namespace FactoryManagementSystem.Controllers
                 if (updated == null)
                     return NotFound(new { Success = false, Message = "Skill record not found." });
 
-                return Ok(new { Success = true, Message = "Skill record updated.", Data = updated });
+                return Ok(new { Success = true, Message = "Skill record updated.", Data = updated.Record });
             }
             catch (Exception ex)
             {

@@ -17,13 +17,17 @@ namespace FactoryManagementSystem.Services.Skills
     /// comparison is read at the end of it, not left running for weeks.
     public class DualReadSkillRepository : ISkillRepository
     {
-        private readonly ISkillRepository _firebase;
-        private readonly ISkillRepository _supabase;
+        // Concrete types, not ISkillRepository: mirroring is specific to
+        // these two stores, and MirrorUpsertAsync/MirrorSoftDeleteAsync are
+        // deliberately not part of the general interface - no other
+        // implementation should be asked to reproduce a foreign identity.
+        private readonly FirestoreSkillRepository _firebase;
+        private readonly SupabaseSkillRepository _supabase;
         private readonly ILogger<DualReadSkillRepository> _log;
 
         public DualReadSkillRepository(
-            ISkillRepository firebase,
-            ISkillRepository supabase,
+            FirestoreSkillRepository firebase,
+            SupabaseSkillRepository supabase,
             ILogger<DualReadSkillRepository> log)
         {
             _firebase = firebase;
@@ -129,14 +133,95 @@ namespace FactoryManagementSystem.Services.Skills
             return primary;
         }
 
-        // Writes: Firebase only. Supabase deliberately untouched here.
-        public Task<(SkillTransaction Record, bool Created)> SaveAsync(SkillTransaction request) =>
-            _firebase.SaveAsync(request);
+        // ── Writes ──────────────────────────────────────────────────────
+        //
+        // Firebase first and always. Its result is what the API returns, so
+        // a mirror that fails cannot change what the user sees or what the
+        // authoritative store holds.
+        //
+        // The mirror then reproduces that exact record in Supabase under
+        // FIREBASE's TransactionId and document id - never an id Postgres
+        // minted. Update and soft delete find rows by TransactionId, so two
+        // independently allocated ids would silently send every later write
+        // to the wrong row.
+        //
+        // A mirror failure is logged at Error with the TransactionId and
+        // never swallowed: it means Supabase is now behind by a known
+        // record, which is recoverable, and pretending otherwise is not.
 
-        public Task<SkillTransaction?> UpdateAsync(int transactionId, SkillTransaction request) =>
-            _firebase.UpdateAsync(transactionId, request);
+        public async Task<SkillSaveResult> SaveAsync(SkillTransaction request)
+        {
+            var result = await _firebase.SaveAsync(request);
+            await MirrorAsync("Save", result);
+            return result;
+        }
 
-        public Task<bool> SoftDeleteAsync(int transactionId) =>
-            _firebase.SoftDeleteAsync(transactionId);
+        public async Task<SkillSaveResult?> UpdateAsync(int transactionId, SkillTransaction request)
+        {
+            var result = await _firebase.UpdateAsync(transactionId, request);
+            // Null means Firebase found nothing to update, so there is
+            // nothing to mirror either.
+            if (result != null) await MirrorAsync("Update", result);
+            return result;
+        }
+
+        public async Task<bool> SoftDeleteAsync(int transactionId)
+        {
+            var deleted = await _firebase.SoftDeleteAsync(transactionId);
+            if (!deleted) return false;
+
+            try
+            {
+                var mirrored = await _supabase.MirrorSoftDeleteAsync(transactionId);
+                if (mirrored)
+                {
+                    _log.LogInformation(
+                        "SKILL DUAL-WRITE OK [SoftDelete] TransactionId={Id}", transactionId);
+                }
+                else
+                {
+                    // Firebase deactivated a record Supabase has no active
+                    // row for - the stores were already out of step before
+                    // this delete, so say so rather than reporting success.
+                    _log.LogWarning(
+                        "SKILL DUAL-WRITE [SoftDelete] TransactionId={Id} deleted in Firebase but " +
+                        "no active Supabase row carried that id - the mirror was already behind",
+                        transactionId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "SKILL DUAL-WRITE FAILED [SoftDelete] TransactionId={Id} - Firebase succeeded, " +
+                    "Supabase still holds this record as ACTIVE", transactionId);
+            }
+            return true;
+        }
+
+        private async Task MirrorAsync(string op, SkillSaveResult result)
+        {
+            var id = result.Record.TransactionId;
+            try
+            {
+                // Firestore always reports its document id; the fallback only
+                // covers a store that has none, and keeps firebase_doc_id
+                // NOT NULL satisfied with a traceable value rather than a
+                // fabricated-looking one.
+                var docId = string.IsNullOrWhiteSpace(result.SourceDocumentId)
+                    ? $"firebase:{id}"
+                    : result.SourceDocumentId!;
+
+                await _supabase.MirrorUpsertAsync(result.Record, docId);
+                _log.LogInformation(
+                    "SKILL DUAL-WRITE OK [{Op}] TransactionId={Id} firebaseDocId={DocId} created={Created}",
+                    op, id, docId, result.Created);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "SKILL DUAL-WRITE FAILED [{Op}] TransactionId={Id} - Firebase succeeded and is " +
+                    "correct, Supabase is now behind by this record", op, id);
+            }
+        }
     }
 }

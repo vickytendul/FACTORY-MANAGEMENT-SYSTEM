@@ -2,6 +2,23 @@ using FactoryManagementSystem.Entities;
 
 namespace FactoryManagementSystem.Services.Skills
 {
+    /// What a write produced: the stored record, whether it was newly
+    /// created, and the store's own key for the row.
+    ///
+    /// [SourceDocumentId] exists so dual mode can mirror a Firebase-created
+    /// record into Supabase under the SAME identity. Firestore's document id
+    /// is not part of [SkillTransaction] - unlike AttendanceTransaction,
+    /// that entity carries no [FirestoreDocumentId] field - and adding one
+    /// would put a new key into every JSON response Flutter receives. On a
+    /// migration, changing the API contract to move an internal id around is
+    /// not a trade worth making, so it travels beside the record instead.
+    ///
+    /// Null when the store has no document id of its own to report.
+    public sealed record SkillSaveResult(
+        SkillTransaction Record,
+        bool Created,
+        string? SourceDocumentId);
+
     /// Every read and write SkillTransactionController performs against
     /// skill records, behind one interface so the store can be swapped
     /// without the controller - or the API contract, or Flutter - noticing.
@@ -33,13 +50,12 @@ namespace FactoryManagementSystem.Services.Skills
 
         /// Creates, or updates the existing active record with the same
         /// natural key (EmployeeCode + OperationName + MachineType +
-        /// OperationGrade + Section + CCId). Returns the stored record and
-        /// whether it was newly created.
-        Task<(SkillTransaction Record, bool Created)> SaveAsync(SkillTransaction request);
+        /// OperationGrade + Section + CCId).
+        Task<SkillSaveResult> SaveAsync(SkillTransaction request);
 
         /// Updates one record found by TransactionId. Returns null when
         /// there is no active record with that id.
-        Task<SkillTransaction?> UpdateAsync(int transactionId, SkillTransaction request);
+        Task<SkillSaveResult?> UpdateAsync(int transactionId, SkillTransaction request);
 
         /// Soft delete - IsActive false, never a hard delete. False when no
         /// active record carried that id.

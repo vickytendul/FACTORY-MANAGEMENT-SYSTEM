@@ -74,7 +74,7 @@ namespace FactoryManagementSystem.Services.Skills
             return snapshot.Documents.Select(d => d.ConvertTo<SkillTransaction>()).ToList();
         }
 
-        public async Task<(SkillTransaction Record, bool Created)> SaveAsync(SkillTransaction request)
+        public async Task<SkillSaveResult> SaveAsync(SkillTransaction request)
         {
             var now = DateTime.UtcNow;
             var eligible = request.TargetQty > 0
@@ -106,7 +106,7 @@ namespace FactoryManagementSystem.Services.Skills
                 existing.NormalizedOperationName = SkillTransaction.Normalize(existing.OperationName);
                 await doc.Reference.SetAsync(existing);
                 _firestore.InvalidateSkillTransactionsCache();
-                return (existing, false);
+                return new SkillSaveResult(existing, false, doc.Id);
             }
 
             var nextId = await _firestore.GetNextSequentialIdAsync(
@@ -135,12 +135,15 @@ namespace FactoryManagementSystem.Services.Skills
                 IsActive = true
             };
 
-            await _firestore.SkillTransactions.AddAsync(record);
+            // AddAsync hands back the reference it created, which is the
+            // only place the new document id exists - dual mode needs it to
+            // mirror this record into Supabase under the same identity.
+            var created = await _firestore.SkillTransactions.AddAsync(record);
             _firestore.InvalidateSkillTransactionsCache();
-            return (record, true);
+            return new SkillSaveResult(record, true, created.Id);
         }
 
-        public async Task<SkillTransaction?> UpdateAsync(int transactionId, SkillTransaction request)
+        public async Task<SkillSaveResult?> UpdateAsync(int transactionId, SkillTransaction request)
         {
             var doc = await FindActiveDocAsync(transactionId);
             if (doc == null) return null;
@@ -165,7 +168,7 @@ namespace FactoryManagementSystem.Services.Skills
 
             await doc.Reference.SetAsync(existing);
             _firestore.InvalidateSkillTransactionsCache();
-            return existing;
+            return new SkillSaveResult(existing, false, doc.Id);
         }
 
         public async Task<bool> SoftDeleteAsync(int transactionId)

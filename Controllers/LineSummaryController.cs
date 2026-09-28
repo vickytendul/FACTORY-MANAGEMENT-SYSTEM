@@ -146,15 +146,23 @@ namespace FactoryManagementSystem.Controllers
                 // as 0 present AND 0 absent, which looks like a shut factory
                 // rather than an unposted day.
                 var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceByCode);
-                if (!payrollPosted)
-                {
-                    attendanceByCode = (await FetchOwnAttendanceRangeAsync(lineId, new[] { dateOnly }))
+                var ownForDay = payrollPosted
+                    ? null
+                    : (await FetchOwnAttendanceRangeAsync(lineId, new[] { dateOnly }))
                         [DateTime.SpecifyKind(dateOnly, DateTimeKind.Utc)];
-                }
+
+                // Only usable when the supervisor marked SOMETHING. No rows
+                // at all does not mean a full line turned up - it means
+                // nobody opened the Attendance page, which is exactly what a
+                // Sunday looks like. Inferring "everyone present" from
+                // silence would put a full line on a day the factory was
+                // shut.
+                var canEstimate = ownForDay is { Count: > 0 };
+                if (canEstimate) attendanceByCode = ownForDay!;
 
                 var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
                     ClassifyAttendance(context.EmployeeSectionMap, attendanceByCode, loans,
-                        treatMissingAsPresent: !payrollPosted);
+                        treatMissingAsPresent: canEstimate);
 
                 int totalPresent = tailorsPresent + othersPresent;
 
@@ -177,7 +185,7 @@ namespace FactoryManagementSystem.Controllers
                     TotalPresent = totalPresent,
                     Absent = absent,
                     UnknownAttendance = unknown,
-                    AttendanceEstimated = !payrollPosted,
+                    AttendanceEstimated = canEstimate,
                     LentOut = lentOut,
                     BorrowedIn = borrowedIn,
                     Output = output,
@@ -280,16 +288,20 @@ namespace FactoryManagementSystem.Controllers
 
                     // See the single-date path: an unposted day otherwise
                     // reads as 0 present and 0 absent on every column.
+                    // See the single-date path: no rows of our own means we
+                    // know nothing about the day, not that everyone came in.
                     var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceForDay);
-                    if (!payrollPosted &&
-                        ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own))
+                    var canEstimate = !payrollPosted
+                        && ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own)
+                        && own.Count > 0;
+                    if (canEstimate)
                     {
-                        attendanceForDay = own;
+                        attendanceForDay = ownByDate[DateTime.SpecifyKind(d, DateTimeKind.Utc)];
                     }
 
                     var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
                         ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d],
-                            treatMissingAsPresent: !payrollPosted);
+                            treatMissingAsPresent: canEstimate);
                     var (output, rej) = outputByDate.TryGetValue(d, out var o) ? o : (0, 0);
 
                     results.Add(new LineSummaryResponse
@@ -306,7 +318,7 @@ namespace FactoryManagementSystem.Controllers
                         TotalPresent = tailorsPresent + othersPresent,
                         Absent = absent,
                         UnknownAttendance = unknown,
-                        AttendanceEstimated = !payrollPosted,
+                        AttendanceEstimated = canEstimate,
                         LentOut = lentOut,
                         BorrowedIn = borrowedIn,
                         Output = output,

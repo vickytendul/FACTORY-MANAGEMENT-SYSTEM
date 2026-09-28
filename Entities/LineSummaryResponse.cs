@@ -55,6 +55,16 @@ namespace FactoryManagementSystem.Entities
 
         public int Absent { get; set; }
 
+        /// True when payroll had posted nothing for this line on this date
+        /// and the present/absent figures were derived from this app's own
+        /// attendance instead.
+        ///
+        /// That fallback assumes anyone the supervisor did not mark was at
+        /// their station, which payroll has not confirmed and may yet
+        /// contradict. The flag exists so the screen can say so rather than
+        /// present an inference as a payroll fact.
+        public bool AttendanceEstimated { get; set; }
+
         /// On-roll employees whose attendance for the selected date could
         /// not be determined from the Company API response - either the
         /// EmployeeCode did not appear in that day's response at all, or it

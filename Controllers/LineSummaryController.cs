@@ -141,8 +141,20 @@ namespace FactoryManagementSystem.Controllers
                 var attendanceByDate = await FetchAttendanceRangeAsync(dateOnly, dateOnly, codesToAsk);
                 var attendanceByCode = attendanceByDate.TryGetValue(dateOnly, out var m) ? m : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
+                // Payroll has not posted this day: fall back to what the
+                // supervisor marked here. Without this the whole line reads
+                // as 0 present AND 0 absent, which looks like a shut factory
+                // rather than an unposted day.
+                var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceByCode);
+                if (!payrollPosted)
+                {
+                    attendanceByCode = (await FetchOwnAttendanceRangeAsync(lineId, new[] { dateOnly }))
+                        [DateTime.SpecifyKind(dateOnly, DateTimeKind.Utc)];
+                }
+
                 var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
-                    ClassifyAttendance(context.EmployeeSectionMap, attendanceByCode, loans);
+                    ClassifyAttendance(context.EmployeeSectionMap, attendanceByCode, loans,
+                        treatMissingAsPresent: !payrollPosted);
 
                 int totalPresent = tailorsPresent + othersPresent;
 
@@ -165,6 +177,7 @@ namespace FactoryManagementSystem.Controllers
                     TotalPresent = totalPresent,
                     Absent = absent,
                     UnknownAttendance = unknown,
+                    AttendanceEstimated = !payrollPosted,
                     LentOut = lentOut,
                     BorrowedIn = borrowedIn,
                     Output = output,
@@ -251,14 +264,32 @@ namespace FactoryManagementSystem.Controllers
                     from, to, context.EmployeeSectionMap.Keys.Concat(borrowedCodes));
                 var outputByDate = await FetchOutputAndRejRangeAsync(lineId, from, to);
 
+                // One read for the whole range, used only for the days
+                // payroll has not posted. Cheap enough to fetch up front:
+                // it is this line's rows, which run to a handful per day.
+                var dayList = new List<DateTime>();
+                for (var d = from; d <= to; d = d.AddDays(1)) dayList.Add(d);
+                var ownByDate = await FetchOwnAttendanceRangeAsync(lineId, dayList);
+
                 var results = new List<LineSummaryResponse>();
                 for (var d = from; d <= to; d = d.AddDays(1))
                 {
                     var attendanceForDay = attendanceByDate.TryGetValue(d, out var m)
                         ? m
                         : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                    // See the single-date path: an unposted day otherwise
+                    // reads as 0 present and 0 absent on every column.
+                    var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceForDay);
+                    if (!payrollPosted &&
+                        ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own))
+                    {
+                        attendanceForDay = own;
+                    }
+
                     var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
-                        ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d]);
+                        ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d],
+                            treatMissingAsPresent: !payrollPosted);
                     var (output, rej) = outputByDate.TryGetValue(d, out var o) ? o : (0, 0);
 
                     results.Add(new LineSummaryResponse
@@ -275,6 +306,7 @@ namespace FactoryManagementSystem.Controllers
                         TotalPresent = tailorsPresent + othersPresent,
                         Absent = absent,
                         UnknownAttendance = unknown,
+                        AttendanceEstimated = !payrollPosted,
                         LentOut = lentOut,
                         BorrowedIn = borrowedIn,
                         Output = output,
@@ -563,10 +595,50 @@ namespace FactoryManagementSystem.Controllers
             return result;
         }
 
+        /// This line's own attendance rows for one date, as a status per
+        /// employee code, for the days payroll has not posted.
+        ///
+        /// Read from the app's own AttendanceTransactions - the rows a
+        /// supervisor actually marked on the Attendance page.
+        private async Task<Dictionary<DateTime, Dictionary<string, string>>> FetchOwnAttendanceRangeAsync(
+            int lineId, IReadOnlyList<DateTime> dates)
+        {
+            var byDate = new Dictionary<DateTime, Dictionary<string, string>>();
+            foreach (var d in dates)
+                byDate[DateTime.SpecifyKind(d.Date, DateTimeKind.Utc)] =
+                    new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var row in await _attendance.GetForLineDatesAsync(lineId, byDate.Keys.ToList()))
+            {
+                var day = DateTime.SpecifyKind(row.AttendanceDate.Date, DateTimeKind.Utc);
+                var code = (row.EmployeeCode ?? string.Empty).Trim();
+                if (code.Length == 0) continue;
+                if (!byDate.TryGetValue(day, out var forDay)) continue;
+                forDay[code] = row.AttendanceStatus ?? string.Empty;
+            }
+
+            return byDate;
+        }
+
+        /// Whether payroll has posted anything at all for this line on this
+        /// date.
+        ///
+        /// Employee_Att returns the date key for every employee whatever
+        /// happens, with an EMPTY value until payroll posts the day - so the
+        /// key existing proves nothing. What distinguishes "nobody was
+        /// marked" from "the day is not posted yet" is whether a single one
+        /// of this line's operators has a non-blank status.
+        private static bool PayrollHasPosted(
+            Dictionary<string, string> employeeSectionMap,
+            Dictionary<string, string> attendanceByCode)
+            => employeeSectionMap.Keys.Any(code =>
+                attendanceByCode.TryGetValue(code, out var s) && !string.IsNullOrWhiteSpace(s));
+
         private static (int tailorsPresent, int othersPresent, int absent, int unknown, int lentOut, int borrowedIn) ClassifyAttendance(
             Dictionary<string, string> employeeSectionMap,
             Dictionary<string, string> attendanceByCode,
-            DayLoans? loans = null)
+            DayLoans? loans = null,
+            bool treatMissingAsPresent = false)
         {
             int tailorsPresent = 0, othersPresent = 0, absent = 0, unknown = 0;
             int lentOutCount = 0, borrowedInCount = 0;
@@ -588,7 +660,23 @@ namespace FactoryManagementSystem.Controllers
 
                 if (!attendanceByCode.TryGetValue(employeeCode, out var status))
                 {
-                    unknown++;
+                    // Normally "we do not know" - payroll carries a status
+                    // for everybody, so a missing one is genuinely missing.
+                    //
+                    // On the fallback path it means the opposite: the map is
+                    // this line's OWN attendance, which only holds the people
+                    // a supervisor marked, so no row means nobody flagged
+                    // them and they stood at their station. This is an
+                    // INFERENCE, not a payroll fact, which is why the
+                    // response says the figure was estimated.
+                    if (treatMissingAsPresent)
+                    {
+                        if (isTailor) tailorsPresent++; else othersPresent++;
+                    }
+                    else
+                    {
+                        unknown++;
+                    }
                     continue;
                 }
 

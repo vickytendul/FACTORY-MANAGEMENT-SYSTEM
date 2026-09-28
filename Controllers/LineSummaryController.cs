@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
 using System.Text.Json;
@@ -75,6 +76,7 @@ namespace FactoryManagementSystem.Controllers
         private readonly FirestoreService _firestore;
         private readonly CompanyApiClient _companyApiClient;
         private readonly ILayoutRepository _layouts;
+        private readonly IAttendanceRepository _attendance;
         private readonly ICcRepository _ccs;
 
         // TEMPORARY - see TemporaryFirebaseBypass.
@@ -84,10 +86,12 @@ namespace FactoryManagementSystem.Controllers
             FirestoreService firestore,
             CompanyApiClient companyApiClient,
             ILayoutRepository layouts,
+            IAttendanceRepository attendance,
             ICcRepository ccs,
             TemporaryFirebaseBypass bypass)
         {
             _layouts = layouts;
+            _attendance = attendance;
             _ccs = ccs;
             _bypass = bypass;
             _firestore = firestore;
@@ -535,61 +539,40 @@ namespace FactoryManagementSystem.Controllers
                 return result;
             }
 
-            const int chunkSize = 30;
-
             // Borrowed in: this line's own attendance rows across the range.
             // A replacement whose code is NOT on this line's layout came
             // from somewhere else; one that IS on it is an ordinary
             // same-line cover and is already counted through the layout.
-            for (int i = 0; i < dates.Count; i += chunkSize)
+            foreach (var tx in await _attendance.GetForLineDatesAsync(lineId, dates))
             {
-                var chunk = dates.Skip(i).Take(chunkSize).Cast<object>().ToList();
-                var mine = await _firestore.AttendanceTransactions
-                    .WhereIn(nameof(AttendanceTransaction.AttendanceDate), chunk)
-                    .WhereEqualTo(nameof(AttendanceTransaction.LineId), lineId)
-                    .GetSnapshotAsync();
+                var code = (tx.ReplacementEmployeeCode ?? "").Trim();
+                if (code.Length == 0) continue;
+                if (context.EmployeeSectionMap.ContainsKey(code)) continue;
 
-                foreach (var doc in mine.Documents)
-                {
-                    var tx = doc.ConvertTo<AttendanceTransaction>();
-                    var code = (tx.ReplacementEmployeeCode ?? "").Trim();
-                    if (code.Length == 0) continue;
-                    if (context.EmployeeSectionMap.ContainsKey(code)) continue;
+                var day = DateTime.SpecifyKind(tx.AttendanceDate.Date, DateTimeKind.Utc);
+                if (!result.TryGetValue(day, out var loans)) continue;
 
-                    var day = DateTime.SpecifyKind(tx.AttendanceDate.Date, DateTimeKind.Utc);
-                    if (!result.TryGetValue(day, out var loans)) continue;
-
-                    // The section of the row they covered, found in the
-                    // layout this request already loaded - no extra read.
-                    var covered = context.LayoutItems
-                        .FirstOrDefault(x => x.LayoutMasterId == tx.LayoutMasterId);
-                    loans.BorrowedIn[code] = covered?.Section ?? "MAIN";
-                }
+                // The section of the row they covered, found in the
+                // layout this request already loaded - no extra read.
+                var covered = context.LayoutItems
+                    .FirstOrDefault(x => x.LayoutMasterId == tx.LayoutMasterId);
+                loans.BorrowedIn[code] = covered?.Section ?? "MAIN";
             }
 
             // Lent out: rows on ANY line naming one of this line's people as
             // the replacement.
             var codes = context.EmployeeSectionMap.Keys.ToList();
-            for (int i = 0; i < codes.Count; i += chunkSize)
+            foreach (var tx in await _attendance.GetByReplacementCodesAllDatesAsync(codes))
             {
-                var chunk = codes.Skip(i).Take(chunkSize).Cast<object>().ToList();
-                var snapshot = await _firestore.AttendanceTransactions
-                    .WhereIn(nameof(AttendanceTransaction.ReplacementEmployeeCode), chunk)
-                    .GetSnapshotAsync();
+                // Covering on their own line is not lending - they are
+                // still here, just on a different operation.
+                if (tx.LineId == lineId) continue;
+                var code = (tx.ReplacementEmployeeCode ?? "").Trim();
+                if (code.Length == 0) continue;
 
-                foreach (var doc in snapshot.Documents)
-                {
-                    var tx = doc.ConvertTo<AttendanceTransaction>();
-                    // Covering on their own line is not lending - they are
-                    // still here, just on a different operation.
-                    if (tx.LineId == lineId) continue;
-                    var code = (tx.ReplacementEmployeeCode ?? "").Trim();
-                    if (code.Length == 0) continue;
-
-                    var day = DateTime.SpecifyKind(tx.AttendanceDate.Date, DateTimeKind.Utc);
-                    if (!result.TryGetValue(day, out var loans)) continue;
-                    loans.LentOut.Add(code);
-                }
+                var day = DateTime.SpecifyKind(tx.AttendanceDate.Date, DateTimeKind.Utc);
+                if (!result.TryGetValue(day, out var loans)) continue;
+                loans.LentOut.Add(code);
             }
 
             return result;

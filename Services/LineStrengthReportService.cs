@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Layouts;
 using System.Text.RegularExpressions;
 using FactoryManagementSystem.Entities;
@@ -11,14 +12,17 @@ public class LineStrengthReportService
     private readonly CompanyAttendanceService _companyAttendance;
     private readonly ProductionLineService _productionLines;
     private readonly ILayoutRepository _layouts;
+    private readonly IAttendanceRepository _attendance;
 
     public LineStrengthReportService(
         FirestoreService firestore,
         CompanyAttendanceService companyAttendance,
         ProductionLineService productionLines,
-        ILayoutRepository layouts)
+        ILayoutRepository layouts,
+        IAttendanceRepository attendance)
     {
         _layouts = layouts;
+        _attendance = attendance;
         _firestore = firestore;
         _companyAttendance = companyAttendance;
         _productionLines = productionLines;
@@ -210,7 +214,7 @@ public class LineStrengthReportService
         if (payroll.Count == 0) return result;
 
         var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
-        var attendance = await _firestore.GetAttendanceForDateAsync(
+        var attendance = await _attendance.GetForDateAsync(
             DateTime.SpecifyKind(today, DateTimeKind.Utc));
 
         // EmployeeCode -> whether somebody is standing in for them today.

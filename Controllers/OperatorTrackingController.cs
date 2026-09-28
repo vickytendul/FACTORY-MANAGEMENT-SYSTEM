@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
@@ -13,13 +14,16 @@ namespace FactoryManagementSystem.Controllers
         private readonly FirestoreService _firestore;
         private readonly CompanyAttendanceService _companyAttendance;
         private readonly ILayoutRepository _layouts;
+        private readonly IAttendanceRepository _attendance;
 
         public OperatorTrackingController(
             FirestoreService firestore,
             CompanyAttendanceService companyAttendance,
-            ILayoutRepository layouts)
+            ILayoutRepository layouts,
+            IAttendanceRepository attendance)
         {
             _layouts = layouts;
+            _attendance = attendance;
             _firestore = firestore;
             _companyAttendance = companyAttendance;
         }
@@ -44,7 +48,7 @@ namespace FactoryManagementSystem.Controllers
                 // AttendanceTransactions is still read, but only for the one
                 // thing payroll does not know - who is covering for whom.
                 var payrollAttendance = await _companyAttendance.GetCodesForDateAsync(date);
-                var attendanceTransactions = await _firestore.GetAttendanceForDateAsync(utcDate);
+                var attendanceTransactions = await _attendance.GetForDateAsync(utcDate);
 
                 // Build lookup by employee code
                 var layoutByEmployee = layoutTransactions

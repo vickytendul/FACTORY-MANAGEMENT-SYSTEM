@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Skills;
@@ -120,18 +121,20 @@ builder.Services.AddSingleton<FirestoreSkillRepository>();
 var skillsSource = (builder.Configuration["Skills:Source"] ?? "firebase").Trim().ToLowerInvariant();
 var layoutsSource = (builder.Configuration["Layouts:Source"] ?? "firebase").Trim().ToLowerInvariant();
 var ccsSource = (builder.Configuration["CCs:Source"] ?? "firebase").Trim().ToLowerInvariant();
+var attendanceSource = (builder.Configuration["Attendance:Source"] ?? "firebase").Trim().ToLowerInvariant();
 
 // One shared connection pool, registered when EITHER migration needs it.
 // Scoping this to the Skills flag alone would mean Layouts:Source=dual with
 // Skills:Source=firebase could not resolve a data source at all.
 if (skillsSource is "supabase" or "dual"
     || layoutsSource is "supabase" or "dual"
-    || ccsSource is "supabase" or "dual")
+    || ccsSource is "supabase" or "dual"
+    || attendanceSource is "supabase" or "dual")
 {
     var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
         ?? throw new Exception(
-            "Supabase:ConnectionString is required when Skills:Source, Layouts:Source "
-            + "or CCs:Source is 'supabase' or 'dual'.");
+            "Supabase:ConnectionString is required when Skills:Source, Layouts:Source, "
+            + "CCs:Source or Attendance:Source is 'supabase' or 'dual'.");
 
     builder.Services.AddSingleton(_ =>
     {
@@ -202,6 +205,17 @@ builder.Services.AddSingleton<ILayoutIdAllocator, FirestoreLayoutIdAllocator>();
 // those are separate from each other: three independent migrations, three
 // independent rollbacks. The CC id keeps coming from the Firestore
 // CCCounter in every mode - see ICcRepository.
+// =====================================================
+// Attendance: Firebase or Supabase, on its OWN flag
+// =====================================================
+//
+// Attendance__Source = firebase | dual | supabase   (default firebase)
+//
+// Identity is the Firestore document id, in firebase_doc_id, the same
+// choice LayoutTransaction made. AttendanceId is 0 on every row and is
+// deliberately not stored.
+builder.Services.AddSingleton<FirestoreAttendanceRepository>();
+
 builder.Services.AddSingleton<FirestoreCcRepository>();
 
 builder.Services.AddSingleton<FirestoreLayoutRepository>();
@@ -210,6 +224,19 @@ builder.Services.AddSingleton<FirestoreLayoutRepository>();
 // NpgsqlDataSource registration needs to see both flags.
 if (layoutsSource is "supabase" or "dual")
     builder.Services.AddSingleton<SupabaseLayoutRepository>();
+
+if (attendanceSource is "supabase" or "dual")
+    builder.Services.AddSingleton<SupabaseAttendanceRepository>();
+
+builder.Services.AddSingleton<IAttendanceRepository>(sp => attendanceSource switch
+{
+    "supabase" => sp.GetRequiredService<SupabaseAttendanceRepository>(),
+    "dual" => new DualReadAttendanceRepository(
+        sp.GetRequiredService<FirestoreAttendanceRepository>(),
+        sp.GetRequiredService<SupabaseAttendanceRepository>(),
+        sp.GetRequiredService<ILogger<DualReadAttendanceRepository>>()),
+    _ => sp.GetRequiredService<FirestoreAttendanceRepository>(),
+});
 
 if (ccsSource is "supabase" or "dual")
     builder.Services.AddSingleton<SupabaseCcRepository>();

@@ -1,4 +1,5 @@
 ﻿using FactoryManagementSystem.Entities;
+using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
@@ -16,6 +17,7 @@ namespace FactoryManagementSystem.Controllers
         /// written through _firestore - this controller only consults the
         /// layout to resolve a line's CC.
         private readonly ILayoutRepository _layouts;
+        private readonly IAttendanceRepository _attendance;
 
         // TEMPORARY - see TemporaryFirebaseBypass.
         private readonly TemporaryFirebaseBypass _bypass;
@@ -23,10 +25,12 @@ namespace FactoryManagementSystem.Controllers
         public AttendanceController(
             FirestoreService firestore,
             ILayoutRepository layouts,
+            IAttendanceRepository attendance,
             TemporaryFirebaseBypass bypass)
         {
             _firestore = firestore;
             _layouts = layouts;
+            _attendance = attendance;
             _bypass = bypass;
         }
 
@@ -64,7 +68,7 @@ namespace FactoryManagementSystem.Controllers
                 if (refused != null) return refused;
 
                 await SyncAttendanceAsync(request, isNew: true);
-                _firestore.InvalidateAttendanceCache();
+                _attendance.InvalidateCache();
 
                 return Ok(new
                 {
@@ -91,7 +95,7 @@ namespace FactoryManagementSystem.Controllers
                 if (refused != null) return refused;
 
                 await SyncAttendanceAsync(request, isNew: false);
-                _firestore.InvalidateAttendanceCache();
+                _attendance.InvalidateCache();
 
                 return Ok(new
                 {
@@ -153,38 +157,25 @@ namespace FactoryManagementSystem.Controllers
                 var date = DateTime.SpecifyKind(attendanceDate.Date, DateTimeKind.Utc);
                 var found = new List<object>();
 
-                // Chunked at Firestore's WhereIn limit, the same shape
-                // ValidateNoCrossLineDuplicatesAsync already uses. A line has
-                // a handful of super team members, so this is one chunk in
-                // practice - and it reads only the matching rows rather than
-                // the whole day.
-                const int chunkSize = 30;
-                for (int i = 0; i < codes.Count; i += chunkSize)
+                // The repository chunks at whatever limit its store has -
+                // 30 for Firestore's WhereIn, none at all for Postgres - and
+                // reads only the matching rows rather than the whole day.
+                foreach (var tx in await _attendance.GetByReplacementCodesAsync(date, codes))
                 {
-                    var chunk = codes.Skip(i).Take(chunkSize).Cast<object>().ToList();
-                    var snapshot = await _firestore.AttendanceTransactions
-                        .WhereEqualTo(nameof(AttendanceTransaction.AttendanceDate), date)
-                        .WhereIn(nameof(AttendanceTransaction.ReplacementEmployeeCode), chunk)
-                        .GetSnapshotAsync();
-
-                    foreach (var doc in snapshot.Documents)
+                    if (tx.LineId == excludeLineId) continue;
+                    found.Add(new
                     {
-                        var tx = doc.ConvertTo<AttendanceTransaction>();
-                        if (tx.LineId == excludeLineId) continue;
-                        found.Add(new
-                        {
-                            EmployeeCode = tx.ReplacementEmployeeCode,
-                            tx.LineId,
-                            tx.LineName,
-                            tx.CCNo,
-                            tx.OperationName,
-                            // Who they are standing in for, so the lending
-                            // supervisor can see it is a real absence being
-                            // covered rather than a spare pair of hands.
-                            CoveringForCode = tx.EmployeeCode,
-                            CoveringForName = tx.EmployeeName,
-                        });
-                    }
+                        EmployeeCode = tx.ReplacementEmployeeCode,
+                        tx.LineId,
+                        tx.LineName,
+                        tx.CCNo,
+                        tx.OperationName,
+                        // Who they are standing in for, so the lending
+                        // supervisor can see it is a real absence being
+                        // covered rather than a spare pair of hands.
+                        CoveringForCode = tx.EmployeeCode,
+                        CoveringForName = tx.EmployeeName,
+                    });
                 }
 
                 return Ok(found);
@@ -231,7 +222,7 @@ namespace FactoryManagementSystem.Controllers
                 // in memory. This used the whole-factory day snapshot and
                 // then threw away every other line's rows - at 19 allocated
                 // lines that is ~900 documents read to return ~50.
-                var data = (await _firestore.GetAttendanceForLineDateAsync(lineId, ccId.Value, utcDate))
+                var data = (await _attendance.GetForLineDateAsync(lineId, ccId.Value, utcDate))
                     .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                     .ToList();
 
@@ -261,64 +252,24 @@ namespace FactoryManagementSystem.Controllers
             var first = request[0];
             var normalizedDate = DateTime.SpecifyKind(first.AttendanceDate.Date, DateTimeKind.Utc);
 
-            // CACHED, and scoped to the one line/CC being saved. This almost
-            // always runs moments after a Get for the same line/cc/date, so
-            // the cache is warm and it costs nothing - and when it is not
-            // warm (every save after the first, because each save
-            // invalidates the cache) it now reads this line's rows instead
-            // of the whole factory's day.
-            var existingForLine = await _firestore.GetAttendanceForLineDateAsync(
-                first.LineId, first.CCId, normalizedDate);
-
-            var existingByKey = new Dictionary<string, string>();
-            foreach (var record in existingForLine)
-            {
-                existingByKey[BuildKey(record.EmployeeCode, record.LayoutNo)] = record.FirestoreId;
-            }
-
+            // Stamped here rather than inside the repository, so both stores
+            // record the same instant for the same save instead of each
+            // calling UtcNow when it happens to run.
+            var markedAt = DateTime.UtcNow;
             foreach (var item in request)
             {
-                var key = BuildKey(item.EmployeeCode, item.LayoutNo);
-
-                if (existingByKey.TryGetValue(key, out var docId))
-                {
-                    var docRef = _firestore.AttendanceTransactions.Document(docId);
-
-                    var updates = new Dictionary<string, object>
-                    {
-                        { nameof(AttendanceTransaction.AttendanceStatus), item.AttendanceStatus },
-                        { nameof(AttendanceTransaction.ReplacementEmployeeCode), item.ReplacementEmployeeCode },
-                        { nameof(AttendanceTransaction.ReplacementEmployeeBarcode), item.ReplacementEmployeeBarcode },
-                        { nameof(AttendanceTransaction.ReplacementEmployeeName), item.ReplacementEmployeeName },
-                        { nameof(AttendanceTransaction.LayoutNo), item.LayoutNo },
-                        // Written on every save, including when the list is
-                        // empty: clearing somebody's balancing has to erase
-                        // it, not leave yesterday's entry in place.
-                        { nameof(AttendanceTransaction.BalancingLayoutMasterIds), item.BalancingLayoutMasterIds },
-                        { nameof(AttendanceTransaction.BalancingOperationNames), item.BalancingOperationNames },
-                        { nameof(AttendanceTransaction.MarkedDateTime), DateTime.UtcNow },
-                        { nameof(AttendanceTransaction.MarkedBy), "Supervisor" }
-                    };
-
-                    await docRef.UpdateAsync(updates);
-                }
-                else
-                {
-                    if (!isNew)
-                        throw new InvalidOperationException(
-                            $"Attendance not found for employee {item.EmployeeCode} on {normalizedDate:yyyy-MM-dd}. Use Save for new records.");
-
-                    item.AttendanceDate = normalizedDate;
-                    item.MarkedDateTime = DateTime.UtcNow;
-                    item.MarkedBy = "Supervisor";
-
-                    await _firestore.AttendanceTransactions.AddAsync(item);
-                }
+                item.AttendanceDate = normalizedDate;
+                item.MarkedDateTime = markedAt;
+                item.MarkedBy = "Supervisor";
             }
-        }
 
-        private static string BuildKey(string employeeCode, int layoutNo) =>
-            $"{(employeeCode ?? string.Empty).Trim().ToUpperInvariant()}|{NormalizeLayoutNo(layoutNo)}";
+            // The repository decides per row whether this is an update or a
+            // create, from the same EmployeeCode + LayoutNo key this used,
+            // and applies the whole line as one unit.
+            await _attendance.ApplyAsync(
+                new AttendancePlan(first.LineId, first.CCId, normalizedDate, request),
+                allowCreate: isNew);
+        }
 
         private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
     }

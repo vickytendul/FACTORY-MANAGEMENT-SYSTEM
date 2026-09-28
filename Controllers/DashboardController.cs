@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Skills;
@@ -23,15 +24,18 @@ namespace FactoryManagementSystem.Controllers
         /// routing it through the repository means it can never come back
         /// reading Firestore while the rest of the app reads Supabase.
         private readonly ILayoutRepository _layouts;
+        private readonly ICcRepository _ccs;
 
         public DashboardController(
             FirestoreService firestore,
             ISkillRepository skills,
-            ILayoutRepository layouts)
+            ILayoutRepository layouts,
+            ICcRepository ccs)
         {
             _firestore = firestore;
             _skills = skills;
             _layouts = layouts;
+            _ccs = ccs;
         }
 
         // Temporarily disabled pending a rework of the whole Dashboard feature.
@@ -55,7 +59,7 @@ namespace FactoryManagementSystem.Controllers
                 var monthStart = new DateTime(selectedDate.Year, selectedDate.Month, 1, 0, 0, 0, DateTimeKind.Utc);
                 var monthEnd = monthStart.AddMonths(1);
 
-                var ccs = await _firestore.GetActiveCCsAsync();
+                var ccs = await _ccs.GetActiveAsync();
                 var ccById = ccs.ToDictionary(x => x.CCId);
 
                 var layouts = await _layouts.GetActiveLayoutTransactionsAsync();

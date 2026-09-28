@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
 using System.Text.Json;
 using FactoryManagementSystem.Entities;
@@ -74,6 +75,7 @@ namespace FactoryManagementSystem.Controllers
         private readonly FirestoreService _firestore;
         private readonly CompanyApiClient _companyApiClient;
         private readonly ILayoutRepository _layouts;
+        private readonly ICcRepository _ccs;
 
         // TEMPORARY - see TemporaryFirebaseBypass.
         private readonly TemporaryFirebaseBypass _bypass;
@@ -82,9 +84,11 @@ namespace FactoryManagementSystem.Controllers
             FirestoreService firestore,
             CompanyApiClient companyApiClient,
             ILayoutRepository layouts,
+            ICcRepository ccs,
             TemporaryFirebaseBypass bypass)
         {
             _layouts = layouts;
+            _ccs = ccs;
             _bypass = bypass;
             _firestore = firestore;
             _companyApiClient = companyApiClient;
@@ -342,15 +346,11 @@ namespace FactoryManagementSystem.Controllers
             // exactly as before, so a cache miss falls back to the same
             // direct, unfiltered lookup this always used. SAM/CCNo behavior
             // is identical to before either way, never silently changed.
-            var activeCCs = await _firestore.GetActiveCCsAsync();
+            var activeCCs = await _ccs.GetActiveAsync();
             var cc = activeCCs.FirstOrDefault(c => c.CCId == ccId);
             if (cc == null)
             {
-                var ccSnapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.CCId), ccId)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-                cc = ccSnapshot.Documents.FirstOrDefault()?.ConvertTo<CC>();
+                cc = ccId.HasValue ? await _ccs.GetByIdAsync(ccId.Value) : null;
             }
 
             // Line <-> Employee/Section mapping - filtered in memory from

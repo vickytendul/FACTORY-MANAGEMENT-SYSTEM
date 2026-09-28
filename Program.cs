@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Skills;
 using Npgsql;
@@ -118,16 +119,19 @@ builder.Services.AddSingleton<FirestoreSkillRepository>();
 
 var skillsSource = (builder.Configuration["Skills:Source"] ?? "firebase").Trim().ToLowerInvariant();
 var layoutsSource = (builder.Configuration["Layouts:Source"] ?? "firebase").Trim().ToLowerInvariant();
+var ccsSource = (builder.Configuration["CCs:Source"] ?? "firebase").Trim().ToLowerInvariant();
 
 // One shared connection pool, registered when EITHER migration needs it.
 // Scoping this to the Skills flag alone would mean Layouts:Source=dual with
 // Skills:Source=firebase could not resolve a data source at all.
-if (skillsSource is "supabase" or "dual" || layoutsSource is "supabase" or "dual")
+if (skillsSource is "supabase" or "dual"
+    || layoutsSource is "supabase" or "dual"
+    || ccsSource is "supabase" or "dual")
 {
     var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
         ?? throw new Exception(
-            "Supabase:ConnectionString is required when Skills:Source or Layouts:Source "
-            + "is 'supabase' or 'dual'.");
+            "Supabase:ConnectionString is required when Skills:Source, Layouts:Source "
+            + "or CCs:Source is 'supabase' or 'dual'.");
 
     builder.Services.AddSingleton(_ =>
     {
@@ -188,12 +192,37 @@ builder.Services.AddSingleton<ISkillRepository>(sp => skillsSource switch
 // back to firebase mode cannot re-issue ids Supabase already handed out.
 builder.Services.AddSingleton<ILayoutIdAllocator, FirestoreLayoutIdAllocator>();
 
+// =====================================================
+// CC master: Firebase or Supabase, on its OWN flag
+// =====================================================
+//
+// CCs__Source = firebase | dual | supabase   (default firebase)
+//
+// Separate from Layouts__Source and Skills__Source for the same reason
+// those are separate from each other: three independent migrations, three
+// independent rollbacks. The CC id keeps coming from the Firestore
+// CCCounter in every mode - see ICcRepository.
+builder.Services.AddSingleton<FirestoreCcRepository>();
+
 builder.Services.AddSingleton<FirestoreLayoutRepository>();
 
 // layoutsSource is declared above, beside skillsSource, because the shared
 // NpgsqlDataSource registration needs to see both flags.
 if (layoutsSource is "supabase" or "dual")
     builder.Services.AddSingleton<SupabaseLayoutRepository>();
+
+if (ccsSource is "supabase" or "dual")
+    builder.Services.AddSingleton<SupabaseCcRepository>();
+
+builder.Services.AddSingleton<ICcRepository>(sp => ccsSource switch
+{
+    "supabase" => sp.GetRequiredService<SupabaseCcRepository>(),
+    "dual" => new DualReadCcRepository(
+        sp.GetRequiredService<FirestoreCcRepository>(),
+        sp.GetRequiredService<SupabaseCcRepository>(),
+        sp.GetRequiredService<ILogger<DualReadCcRepository>>()),
+    _ => sp.GetRequiredService<FirestoreCcRepository>(),
+});
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch
 {

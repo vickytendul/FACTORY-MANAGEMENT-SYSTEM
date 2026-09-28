@@ -1,7 +1,7 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
-using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -11,20 +11,24 @@ namespace FactoryManagementSystem.Controllers
     [Route("api/[controller]")]
     public class CCsController : ControllerBase
     {
-        private readonly FirestoreService _firestore;
+        private readonly ICcRepository _ccs;
 
         // TEMPORARY - see TemporaryFirebaseBypass. Both exist solely to
         // serve the CC list from layout data while the Firebase read quota
         // is exhausted; remove them with the bypass.
+        //
+        // Note this is now only needed for CCs:Source=firebase. Once CCs is
+        // served from Supabase the quota cannot affect this endpoint at all,
+        // and the derived fallback below becomes dead weight.
         private readonly TemporaryFirebaseBypass _bypass;
         private readonly ILayoutRepository _layouts;
 
         public CCsController(
-            FirestoreService firestore,
+            ICcRepository ccs,
             TemporaryFirebaseBypass bypass,
             ILayoutRepository layouts)
         {
-            _firestore = firestore;
+            _ccs = ccs;
             _bypass = bypass;
             _layouts = layouts;
         }
@@ -104,14 +108,13 @@ namespace FactoryManagementSystem.Controllers
             }
             else if (includeInactive)
             {
-                var snapshot = await _firestore.CCs.OrderBy(nameof(CC.CCNo)).GetSnapshotAsync();
-                ccs = snapshot.Documents.Select(d => d.ConvertTo<CC>()).ToList();
+                ccs = await _ccs.GetAllAsync();
             }
             else
             {
-                // CACHED: active CCs rarely change; avoids re-reading them from
-                // Firestore on every screen that lists CCs.
-                ccs = (await _firestore.GetActiveCCsAsync())
+                // CACHED on the Firestore path; Supabase serves ten rows from
+                // an index and needs no cache of its own.
+                ccs = (await _ccs.GetActiveAsync())
                     .OrderBy(x => x.CCNo)
                     .ToList();
             }
@@ -133,18 +136,9 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet("{ccId}")]
         public async Task<IActionResult> GetCC(int ccId)
         {
-            // OPTIMIZED: Query only the specific CC (1 read instead of N)
-            var snapshot = await _firestore.CCs
-                .WhereEqualTo(nameof(CC.CCId), ccId)
-                .Limit(1)
-                .GetSnapshotAsync();
-
-            var document = snapshot.Documents.FirstOrDefault();
-
-            if (document == null)
+            var cc = await _ccs.GetByIdAsync(ccId);
+            if (cc == null)
                 return NotFound(new { Success = false, Message = "CC not found." });
-
-            var cc = document.ConvertTo<CC>();
 
             return Ok(new
             {
@@ -162,31 +156,19 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // OPTIMIZED: Query only documents with matching CCNo (1 read instead of N)
-                var duplicateSnapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.CCNo), (request.CCNo ?? "").Trim().ToUpper())
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                if (duplicateSnapshot.Documents.Any())
+                if (await _ccs.FindByNumberAsync(request.CCNo ?? "") != null)
                     return BadRequest(new { Success = false, Message = "CC Number already exists." });
-
-                var nextId = await _firestore.GetNextSequentialIdAsync(
-                    "CCCounter",
-                    _firestore.CCs,
-                    d => d.ConvertTo<CC>().CCId);
 
                 var newCC = new CC
                 {
-                    CCId = nextId,
+                    CCId = await _ccs.ReserveCcIdAsync(),
                     CCNo = request.CCNo ?? "",
                     SAM = request.Sam,
                     IsActive = request.IsActive,
                     HasMultipleLayouts = request.HasMultipleLayouts
                 };
 
-                await _firestore.CCs.AddAsync(newCC);
-                _firestore.InvalidateCCsCache();
+                await _ccs.CreateAsync(newCC);
 
                 return Ok(new
                 {
@@ -214,36 +196,16 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // OPTIMIZED: Find the specific CC (1 read instead of N)
-                var targetSnapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.CCId), ccId)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var document = targetSnapshot.Documents.FirstOrDefault();
-
-                if (document == null)
+                if (await _ccs.GetByIdAsync(ccId) == null)
                     return NotFound(new { Success = false, Message = "CC not found." });
 
-                // OPTIMIZED: Check duplicate CCNo excluding self (1 read instead of N)
-                var duplicateSnapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.CCNo), (request.CCNo ?? "").Trim().ToUpper())
-                    .GetSnapshotAsync();
-
-                if (duplicateSnapshot.Documents.Any(x =>
-                    x.ConvertTo<CC>().CCId != ccId))
-                {
+                // A CC may keep its own number; only somebody else's is a clash.
+                var holder = await _ccs.FindByNumberAsync(request.CCNo ?? "");
+                if (holder != null && holder.CCId != ccId)
                     return BadRequest(new { Success = false, Message = "CC Number already exists." });
-                }
 
-                await document.Reference.UpdateAsync(new Dictionary<string, object>
-                {
-                    { nameof(CC.CCNo), request.CCNo ?? "" },
-                    { nameof(CC.SAM), request.Sam },
-                    { nameof(CC.IsActive), request.IsActive },
-                    { nameof(CC.HasMultipleLayouts), request.HasMultipleLayouts }
-                });
-                _firestore.InvalidateCCsCache();
+                await _ccs.UpdateAsync(ccId, request.CCNo ?? "", request.Sam,
+                    request.IsActive, request.HasMultipleLayouts);
 
                 return Ok(new { Success = true, Message = "CC updated successfully." });
             }
@@ -259,21 +221,8 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // OPTIMIZED: Query only the specific CC (1 read instead of N)
-                var snapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.CCId), ccId)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var document = snapshot.Documents.FirstOrDefault();
-
-                if (document == null)
+                if (await _ccs.ToggleActiveAsync(ccId) == null)
                     return NotFound(new { Success = false, Message = "CC not found." });
-
-                var cc = document.ConvertTo<CC>();
-
-                await document.Reference.UpdateAsync(nameof(CC.IsActive), !cc.IsActive);
-                _firestore.InvalidateCCsCache();
 
                 return Ok(new { Success = true, Message = "CC status updated successfully." });
             }
@@ -289,19 +238,8 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                // OPTIMIZED: Query only the specific CC (1 read instead of N)
-                var snapshot = await _firestore.CCs
-                    .WhereEqualTo(nameof(CC.CCId), ccId)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var document = snapshot.Documents.FirstOrDefault();
-
-                if (document == null)
+                if (!await _ccs.UpdateSamAsync(ccId, request.Sam))
                     return NotFound(new { Success = false, Message = "CC not found." });
-
-                await document.Reference.UpdateAsync(nameof(CC.SAM), request.Sam);
-                _firestore.InvalidateCCsCache();
 
                 return Ok(new { Success = true, Message = "SAM updated successfully." });
             }

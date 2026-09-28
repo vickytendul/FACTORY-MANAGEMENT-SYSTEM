@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
@@ -12,10 +13,13 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly FirestoreService _firestore;
         private readonly ILayoutRepository _layouts;
+        private readonly ICcRepository _ccs;
 
-        public OutputTransactionController(FirestoreService firestore, ILayoutRepository layouts)
+        public OutputTransactionController(
+            FirestoreService firestore, ILayoutRepository layouts, ICcRepository ccs)
         {
             _layouts = layouts;
+            _ccs = ccs;
             _firestore = firestore;
         }
 
@@ -35,7 +39,7 @@ namespace FactoryManagementSystem.Controllers
                 // uncached read on every Output Entry screen load.
                 var layoutItems = await _layouts.GetActiveLayoutTransactionsAsync();
 
-                var ccLookup = (await _firestore.GetActiveCCsAsync())
+                var ccLookup = (await _ccs.GetActiveAsync())
                     .ToDictionary(x => x.CCId, x => x.CCNo);
 
                 // Build CC lookup per line from active allocations

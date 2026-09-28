@@ -1,4 +1,5 @@
 using FactoryManagementSystem.Entities;
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Skills;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
@@ -18,10 +19,19 @@ namespace FactoryManagementSystem.Controllers
         /// never silently read a different store than the rest of the app.
         private readonly ISkillRepository _skills;
 
-        public DashboardController(FirestoreService firestore, ISkillRepository skills)
+        /// Same reasoning as _skills: the stub reads no layout today, but
+        /// routing it through the repository means it can never come back
+        /// reading Firestore while the rest of the app reads Supabase.
+        private readonly ILayoutRepository _layouts;
+
+        public DashboardController(
+            FirestoreService firestore,
+            ISkillRepository skills,
+            ILayoutRepository layouts)
         {
             _firestore = firestore;
             _skills = skills;
+            _layouts = layouts;
         }
 
         // Temporarily disabled pending a rework of the whole Dashboard feature.
@@ -48,10 +58,7 @@ namespace FactoryManagementSystem.Controllers
                 var ccs = await _firestore.GetActiveCCsAsync();
                 var ccById = ccs.ToDictionary(x => x.CCId);
 
-                var layoutSnapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-                var layouts = layoutSnapshot.Documents.Select(d => d.ConvertTo<LayoutTransaction>()).ToList();
+                var layouts = await _layouts.GetActiveLayoutTransactionsAsync();
                 var layoutSectionById = layouts
                     .Where(x => x.LayoutMasterId > 0)
                     .GroupBy(x => x.LayoutMasterId)

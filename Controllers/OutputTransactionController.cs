@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
@@ -10,9 +11,11 @@ namespace FactoryManagementSystem.Controllers
     public class OutputTransactionController : ControllerBase
     {
         private readonly FirestoreService _firestore;
+        private readonly ILayoutRepository _layouts;
 
-        public OutputTransactionController(FirestoreService firestore)
+        public OutputTransactionController(FirestoreService firestore, ILayoutRepository layouts)
         {
+            _layouts = layouts;
             _firestore = firestore;
         }
 
@@ -30,7 +33,7 @@ namespace FactoryManagementSystem.Controllers
                 // CACHED: same active-allocations snapshot used everywhere else
                 // (Attendance, SkillTransaction, LineSummary) instead of a fresh
                 // uncached read on every Output Entry screen load.
-                var layoutItems = await _firestore.GetActiveLayoutTransactionsAsync();
+                var layoutItems = await _layouts.GetActiveLayoutTransactionsAsync();
 
                 var ccLookup = (await _firestore.GetActiveCCsAsync())
                     .ToDictionary(x => x.CCId, x => x.CCNo);

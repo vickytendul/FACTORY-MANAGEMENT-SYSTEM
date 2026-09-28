@@ -1,4 +1,5 @@
 ﻿using FactoryManagementSystem.Data;
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
@@ -11,10 +12,15 @@ namespace FactoryManagementSystem.Controllers
     public class LayoutTransactionController : ControllerBase
     {
         private readonly ApplicationDbContext _context;
-        private readonly FirestoreService _firestore;
         private readonly SummaryService _summaryService;
         private readonly CompanyApiClient _companyApiClient;
         private readonly LineAllocationSummaryService _lineAllocationSummaryService;
+        private readonly ILayoutRepository _layouts;
+
+        /// Reserves a document id for each new allocation before it is
+        /// written, so the row's identity is known to every store that has
+        /// to record it. See ILayoutIdAllocator.
+        private readonly ILayoutIdAllocator _ids;
 
         // Compcode 17 - the same constant EmployeeSyncService/UsersController
         // use for every other Company API call in this backend.
@@ -22,13 +28,15 @@ namespace FactoryManagementSystem.Controllers
 
         public LayoutTransactionController(
             ApplicationDbContext context,
-            FirestoreService firestore,
             SummaryService summaryService,
             CompanyApiClient companyApiClient,
-            LineAllocationSummaryService lineAllocationSummaryService)
+            LineAllocationSummaryService lineAllocationSummaryService,
+            ILayoutRepository layouts,
+            ILayoutIdAllocator ids)
         {
+            _layouts = layouts;
+            _ids = ids;
             _context = context;
-            _firestore = firestore;
             _summaryService = summaryService;
             _companyApiClient = companyApiClient;
             _lineAllocationSummaryService = lineAllocationSummaryService;
@@ -40,7 +48,7 @@ namespace FactoryManagementSystem.Controllers
             try
             {
                 await SyncLayoutAsync(request, isNew: true);
-                _firestore.InvalidateLayoutTransactionsCache();
+                _layouts.InvalidateLayoutTransactionsCache();
                 // Source write already committed successfully above - a
                 // summary rebuild failure here must never fail this response.
                 await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
@@ -58,7 +66,7 @@ namespace FactoryManagementSystem.Controllers
             try
             {
                 await SyncLayoutAsync(request, isNew: false);
-                _firestore.InvalidateLayoutTransactionsCache();
+                _layouts.InvalidateLayoutTransactionsCache();
                 // Source write already committed successfully above - a
                 // summary rebuild failure here must never fail this response.
                 await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
@@ -107,7 +115,7 @@ namespace FactoryManagementSystem.Controllers
             {
                 // CACHED: same active-allocations snapshot every other consumer
                 // (Attendance, Output, SkillTransaction, LineStrengthReport) shares.
-                var data = await _firestore.GetActiveLayoutTransactionsAsync();
+                var data = await _layouts.GetActiveLayoutTransactionsAsync();
                 return Ok(data);
             }
             catch (Exception ex)
@@ -140,15 +148,9 @@ namespace FactoryManagementSystem.Controllers
                 var code = (employeeCode ?? string.Empty).Trim();
                 if (code.Length == 0) return Ok(new { Found = false });
 
-                var snapshot = await _firestore.LayoutTransactions
-                    .WhereEqualTo(nameof(LayoutTransaction.EmployeeCode), code)
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .Limit(1)
-                    .GetSnapshotAsync();
+                var tx = await _layouts.GetActiveByEmployeeCodeAsync(code);
+                if (tx == null) return Ok(new { Found = false });
 
-                if (snapshot.Documents.Count == 0) return Ok(new { Found = false });
-
-                var tx = snapshot.Documents[0].ConvertTo<LayoutTransaction>();
                 return Ok(new
                 {
                     Found = true,
@@ -181,7 +183,7 @@ namespace FactoryManagementSystem.Controllers
             {
                 // CACHED: filter the shared active-allocations snapshot in memory
                 // instead of a fresh Firestore query per call.
-                var data = (await _firestore.GetActiveLayoutTransactionsAsync())
+                var data = (await _layouts.GetActiveLayoutTransactionsAsync())
                     .Where(x => x.LineId == lineId)
                     .Where(x => !ccId.HasValue || x.CCId == ccId.Value)
                     .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
@@ -207,7 +209,7 @@ namespace FactoryManagementSystem.Controllers
             {
                 // CACHED: filter the shared active-allocations snapshot in memory
                 // instead of a fresh Firestore query per call.
-                var forCc = (await _firestore.GetActiveLayoutTransactionsAsync())
+                var forCc = (await _layouts.GetActiveLayoutTransactionsAsync())
                     .Where(x => x.CCId == ccId)
                     .ToList();
 
@@ -248,56 +250,31 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet("migrate-section")]
         public async Task<IActionResult> MigrateSection()
         {
-            var snapshot = await _firestore.LayoutTransactions
-                .GetSnapshotAsync();
+            var all = await _layouts.GetAllLayoutTransactionsAsync();
+            var total = all.Count;
 
-            var total = snapshot.Documents.Count;
-            var updated = 0;
-            var skipped = 0;
+            var candidates = all
+                .Where(tx => string.IsNullOrWhiteSpace(tx.Section) && tx.LayoutMasterId > 0)
+                .ToList();
 
-            foreach (var doc in snapshot.Documents)
+            // One lookup for every referenced master instead of a query per
+            // transaction. Masters that no longer exist simply do not come
+            // back, which is the same "skip" the per-row lookup produced.
+            var masters = (await _layouts.GetLayoutMastersByIdsAsync(
+                    candidates.Select(tx => tx.LayoutMasterId).Distinct()))
+                .GroupBy(m => m.Id)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            var assignments = new List<(string, string)>();
+            foreach (var tx in candidates)
             {
-                var tx = doc.ConvertTo<LayoutTransaction>();
-
-                // Skip if already has a Section
-                if (!string.IsNullOrWhiteSpace(tx.Section))
-                {
-                    skipped++;
-                    continue;
-                }
-
-                // Skip if no LayoutMasterId
-                if (tx.LayoutMasterId <= 0)
-                {
-                    skipped++;
-                    continue;
-                }
-
-                // Find corresponding LayoutMaster
-                var lmSnap = await _firestore.LayoutMasters
-                    .WhereEqualTo(nameof(LayoutMaster.Id), tx.LayoutMasterId)
-                    .Limit(1)
-                    .GetSnapshotAsync();
-
-                var lmDoc = lmSnap.Documents.FirstOrDefault();
-                if (lmDoc == null)
-                {
-                    skipped++;
-                    continue;
-                }
-
-                var section = lmDoc.GetValue<string>(nameof(LayoutMaster.Section));
-                if (string.IsNullOrWhiteSpace(section))
-                    section = "MAIN";
-
-                // Update only the Section field
-                await doc.Reference.UpdateAsync(new Dictionary<string, object>
-                {
-                    { nameof(LayoutTransaction.Section), section }
-                });
-
-                updated++;
+                if (!masters.TryGetValue(tx.LayoutMasterId, out var lm)) continue;
+                assignments.Add((tx.FirestoreId,
+                    string.IsNullOrWhiteSpace(lm.Section) ? "MAIN" : lm.Section));
             }
+
+            var updated = await _layouts.AssignTransactionSectionsAsync(assignments);
+            var skipped = total - updated;
 
             // Log results
             Console.WriteLine($"[Migration] LayoutTransaction Section migration completed.");
@@ -312,24 +289,35 @@ namespace FactoryManagementSystem.Controllers
             });
         }
 
+        /// One employee's headcount bookkeeping, deferred until the layout
+        /// write has actually committed.
+        private readonly record struct HeadcountChange(string Code, bool Allocated);
+
         private async Task SyncLayoutAsync(LayoutTransactionRequest request, bool isNew)
         {
             var layoutNo = NormalizeLayoutNo(request.LayoutNo);
-            var existingSnapshot = await _firestore.LayoutTransactions
-                .WhereEqualTo(nameof(LayoutTransaction.LineId), request.LineId)
-                .WhereEqualTo(nameof(LayoutTransaction.CCId), request.CCId)
-                .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                .GetSnapshotAsync();
 
-            var existingDocs = existingSnapshot.Documents
-                .Select(d => new { DocId = d.Id, Transaction = d.ConvertTo<LayoutTransaction>() })
-                .Where(x => NormalizeLayoutNo(x.Transaction.LayoutNo) == layoutNo)
+            // FRESH: an allocation saved seconds ago must be visible here, so
+            // this deliberately does not use the cached accessor.
+            var existingDocs = (await _layouts.GetActiveByLineCcFreshAsync(
+                    request.LineId, request.CCId, layoutNo))
+                .Select(t => new { DocId = t.FirestoreId, Transaction = t })
                 .ToList();
+
+            // Built up row by row, then applied as ONE unit. The previous
+            // code issued each update as its own call and ran the summary
+            // bookkeeping between them, so a failure partway through left
+            // some stations reassigned, the rest not, and the headcount
+            // already moved for the half that got through.
+            var updates = new List<AllocationFieldUpdate>();
+            var creates = new List<LayoutTransaction>();
+            var clears = new List<AllocationEmployeeClear>();
+            var headcount = new List<HeadcountChange>();
 
             // ─── SAVE PATH ──────────────────────────────────────────────
             if (isNew)
             {
-                var lmRecords = await _firestore.GetActiveLayoutMastersByCcAsync(request.CCId);
+                var lmRecords = await _layouts.GetActiveLayoutMastersByCcAsync(request.CCId);
 
                 if (!lmRecords.Any())
                     throw new InvalidOperationException("No layout records found for this CC.");
@@ -367,39 +355,34 @@ namespace FactoryManagementSystem.Controllers
                         var oldCode = existing.Transaction.EmployeeCode ?? string.Empty;
                         var newCode = item?.EmployeeCode ?? string.Empty;
 
-                        var docRef = _firestore.LayoutTransactions.Document(existing.DocId);
-                        await docRef.UpdateAsync(new Dictionary<string, object>
-                        {
-                            { nameof(LayoutTransaction.EmployeeCode), newCode },
-                            { nameof(LayoutTransaction.EmployeeBarcode), item?.EmployeeBarcode ?? string.Empty },
-                            { nameof(LayoutTransaction.EmployeeName), item?.EmployeeName ?? string.Empty },
-                            { nameof(LayoutTransaction.EmployeeGrade), item?.EmployeeGrade ?? string.Empty },
-                            { nameof(LayoutTransaction.Section), section },
-                            { nameof(LayoutTransaction.LayoutNo), layoutNo }
-                        });
+                        updates.Add(new AllocationFieldUpdate(
+                            existing.DocId,
+                            newCode,
+                            item?.EmployeeBarcode ?? string.Empty,
+                            item?.EmployeeName ?? string.Empty,
+                            item?.EmployeeGrade ?? string.Empty,
+                            section,
+                            layoutNo));
 
                         existingDocs.Remove(existing);
 
                         if (!string.Equals(oldCode, newCode, StringComparison.OrdinalIgnoreCase))
                         {
                             if (!string.IsNullOrWhiteSpace(oldCode))
-                            {
-                                var oldEmp = employeeLookup.GetValueOrDefault(oldCode);
-                                if (oldEmp != null)
-                                    await _summaryService.OnEmployeeDeallocated(oldEmp.DeptName, oldEmp.DesignationName, oldCode);
-                            }
+                                headcount.Add(new HeadcountChange(oldCode, Allocated: false));
                             if (!string.IsNullOrWhiteSpace(newCode))
-                            {
-                                var newEmp = employeeLookup.GetValueOrDefault(newCode);
-                                if (newEmp != null)
-                                    await _summaryService.OnEmployeeAllocated(newEmp.DeptName, newEmp.DesignationName, newCode);
-                            }
+                                headcount.Add(new HeadcountChange(newCode, Allocated: true));
                         }
                     }
                     else
                     {
                         var transaction = new LayoutTransaction
                         {
+                            // Reserved BEFORE the write rather than invented
+                            // by it. That is what lets dual mode give both
+                            // stores the same identity for this row.
+                            FirestoreId = _ids.NewDocumentId(nameof(LayoutTransaction)),
+
                             LayoutMasterId = lm.Id,
 
                             ZoneId = request.ZoneId,
@@ -429,14 +412,10 @@ namespace FactoryManagementSystem.Controllers
                             IsActive = true
                         };
 
-                        await _firestore.LayoutTransactions.AddAsync(transaction);
+                        creates.Add(transaction);
 
                         if (!string.IsNullOrWhiteSpace(item?.EmployeeCode))
-                        {
-                            var emp = employeeLookup.GetValueOrDefault(item.EmployeeCode);
-                            if (emp != null)
-                                await _summaryService.OnEmployeeAllocated(emp.DeptName, emp.DesignationName, item.EmployeeCode);
-                        }
+                            headcount.Add(new HeadcountChange(item.EmployeeCode, Allocated: true));
                     }
                 }
 
@@ -446,21 +425,13 @@ namespace FactoryManagementSystem.Controllers
                     var oldCode = old.Transaction.EmployeeCode ?? string.Empty;
                     if (!string.IsNullOrWhiteSpace(oldCode))
                     {
-                        var docRef = _firestore.LayoutTransactions.Document(old.DocId);
-                        await docRef.UpdateAsync(new Dictionary<string, object>
-                        {
-                            { nameof(LayoutTransaction.EmployeeCode), string.Empty },
-                            { nameof(LayoutTransaction.EmployeeBarcode), string.Empty },
-                            { nameof(LayoutTransaction.EmployeeName), string.Empty },
-                            { nameof(LayoutTransaction.EmployeeGrade), string.Empty }
-                        });
-
-                        var emp = employeeLookup.GetValueOrDefault(oldCode);
-                        if (emp != null)
-                            await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, oldCode);
+                        clears.Add(new AllocationEmployeeClear(old.DocId));
+                        headcount.Add(new HeadcountChange(oldCode, Allocated: false));
                     }
                 }
 
+                await CommitAllocationsAsync(
+                    new AllocationPlan(updates, creates, clears), headcount, employeeLookup);
                 return;
             }
 
@@ -499,33 +470,23 @@ namespace FactoryManagementSystem.Controllers
                     var oldCode = existing.Transaction.EmployeeCode ?? string.Empty;
                     var newCode = item.EmployeeCode ?? string.Empty;
 
-                    var docRef = _firestore.LayoutTransactions.Document(existing.DocId);
-                    await docRef.UpdateAsync(new Dictionary<string, object>
-                    {
-                        { nameof(LayoutTransaction.EmployeeCode), item.EmployeeCode ?? string.Empty },
-                        { nameof(LayoutTransaction.EmployeeBarcode), item.EmployeeBarcode ?? string.Empty },
-                        { nameof(LayoutTransaction.EmployeeName), item.EmployeeName ?? string.Empty },
-                        { nameof(LayoutTransaction.EmployeeGrade), item.EmployeeGrade ?? string.Empty },
-                        { nameof(LayoutTransaction.Section), resolvedSection },
-                        { nameof(LayoutTransaction.LayoutNo), layoutNo }
-                    });
+                    updates.Add(new AllocationFieldUpdate(
+                        existing.DocId,
+                        item.EmployeeCode ?? string.Empty,
+                        item.EmployeeBarcode ?? string.Empty,
+                        item.EmployeeName ?? string.Empty,
+                        item.EmployeeGrade ?? string.Empty,
+                        resolvedSection,
+                        layoutNo));
 
                     existingDocs.Remove(existing);
 
                     if (!string.Equals(oldCode, newCode, StringComparison.OrdinalIgnoreCase))
                     {
                         if (!string.IsNullOrWhiteSpace(oldCode))
-                        {
-                            var oldEmp = updateEmployeeLookup.GetValueOrDefault(oldCode);
-                            if (oldEmp != null)
-                                await _summaryService.OnEmployeeDeallocated(oldEmp.DeptName, oldEmp.DesignationName, oldCode);
-                        }
+                            headcount.Add(new HeadcountChange(oldCode, Allocated: false));
                         if (!string.IsNullOrWhiteSpace(newCode))
-                        {
-                            var newEmp = updateEmployeeLookup.GetValueOrDefault(newCode);
-                            if (newEmp != null)
-                                await _summaryService.OnEmployeeAllocated(newEmp.DeptName, newEmp.DesignationName, newCode);
-                        }
+                            headcount.Add(new HeadcountChange(newCode, Allocated: true));
                     }
                 }
             }
@@ -536,18 +497,83 @@ namespace FactoryManagementSystem.Controllers
                 var oldCode = old.Transaction.EmployeeCode ?? string.Empty;
                 if (!string.IsNullOrWhiteSpace(oldCode))
                 {
-                    var docRef = _firestore.LayoutTransactions.Document(old.DocId);
-                    await docRef.UpdateAsync(new Dictionary<string, object>
-                    {
-                        { nameof(LayoutTransaction.EmployeeCode), string.Empty },
-                        { nameof(LayoutTransaction.EmployeeBarcode), string.Empty },
-                        { nameof(LayoutTransaction.EmployeeName), string.Empty },
-                        { nameof(LayoutTransaction.EmployeeGrade), string.Empty }
-                    });
+                    clears.Add(new AllocationEmployeeClear(old.DocId));
+                    headcount.Add(new HeadcountChange(oldCode, Allocated: false));
+                }
+            }
 
-                    var emp = updateEmployeeLookup.GetValueOrDefault(oldCode);
-                    if (emp != null)
-                        await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, oldCode);
+            await CommitAllocationsAsync(
+                new AllocationPlan(updates, creates, clears), headcount, updateEmployeeLookup);
+        }
+
+        /// Writes the layout, then moves the headcount.
+        ///
+        /// That order is the point. The summary calls used to run between
+        /// the individual row writes, so a save that failed halfway had
+        /// already moved some people in the headcount for stations that
+        /// were never reassigned. Now the allocation commits as one unit or
+        /// not at all, and the bookkeeping only happens if it did.
+        ///
+        /// Each change is still applied one employee at a time, in the order
+        /// the rows produced them, so SummaryService sees exactly the
+        /// sequence of calls it saw before.
+        private async Task CommitAllocationsAsync(
+            AllocationPlan plan,
+            List<HeadcountChange> headcount,
+            Dictionary<string, CompanyApiEmployee> employeeLookup)
+        {
+            // The real write. A failure here SHOULD fail the request - the
+            // allocation did not happen, and the caller must be told so.
+            await _layouts.ApplyAllocationPlanAsync(plan);
+
+            await ApplyHeadcountBestEffortAsync(headcount, employeeLookup);
+        }
+
+        /// Moves the employee headcount, and never fails the caller for it.
+        ///
+        /// The layout has already committed by the time this runs - and,
+        /// with Layouts:Source=supabase, it committed to a DIFFERENT store
+        /// than the headcount lives in. SummaryService reads and writes the
+        /// Firestore Summary document, so a Firebase problem (an exhausted
+        /// read quota being the one actually seen in production) used to
+        /// throw straight out of here into Save's catch and return
+        /// "save failed" for an allocation that had in fact been saved.
+        ///
+        /// That is the worst kind of wrong answer: the supervisor re-saves,
+        /// which is harmless for the layout itself because the write is an
+        /// upsert, but each attempt moves the headcount again.
+        ///
+        /// So this follows the rule the write paths already use for
+        /// LineAllocationSummary - source write committed, bookkeeping is
+        /// best effort, failure is logged loudly and never silently. The
+        /// headcount is left stale until the next successful allocation or
+        /// an admin rebuild corrects it; it is never half-applied without a
+        /// trace.
+        private async Task ApplyHeadcountBestEffortAsync(
+            List<HeadcountChange> headcount,
+            Dictionary<string, CompanyApiEmployee> employeeLookup)
+        {
+            foreach (var change in headcount)
+            {
+                var emp = employeeLookup.GetValueOrDefault(change.Code);
+                if (emp == null) continue;
+
+                try
+                {
+                    if (change.Allocated)
+                        await _summaryService.OnEmployeeAllocated(emp.DeptName, emp.DesignationName, change.Code);
+                    else
+                        await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, change.Code);
+                }
+                catch (Exception ex)
+                {
+                    // Per employee, not per batch: one unreachable write must
+                    // not skip the rest of the people in the same save.
+                    Console.WriteLine(
+                        $"[LayoutTransaction] Headcount update failed for {change.Code} "
+                        + $"({(change.Allocated ? "allocated" : "deallocated")}) after the layout write "
+                        + $"committed successfully - the summary is now stale for this employee until "
+                        + $"the next successful update. {ex.Message}");
                 }
             }
         }
@@ -562,29 +588,11 @@ namespace FactoryManagementSystem.Controllers
         // separate, later Save through the normal, unmodified flow.
         private async Task<int> ReleaseActiveAllocationsAsync(int lineId, int ccId)
         {
-            var query = _firestore.LayoutTransactions
-                .WhereEqualTo(nameof(LayoutTransaction.LineId), lineId)
-                .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
-                .WhereEqualTo(nameof(LayoutTransaction.IsActive), true);
-
-            var releasedCodes = await _firestore.Db.RunTransactionAsync(async transaction =>
-            {
-                var snapshot = await transaction.GetSnapshotAsync(query);
-                var codes = new List<string>();
-
-                foreach (var doc in snapshot.Documents)
-                {
-                    transaction.Update(doc.Reference, new Dictionary<string, object>
-                    {
-                        { nameof(LayoutTransaction.IsActive), false }
-                    });
-                    codes.Add(doc.GetValue<string>(nameof(LayoutTransaction.EmployeeCode)) ?? string.Empty);
-                }
-
-                return codes;
-            });
-
-            _firestore.InvalidateLayoutTransactionsCache();
+            // The repository runs this as one all-or-nothing unit in
+            // whichever store is authoritative - a Firestore transaction or
+            // a single Postgres UPDATE ... RETURNING - so the caller still
+            // never sees a half-released line. It invalidates its own cache.
+            var releasedCodes = await _layouts.ReleaseActiveAllocationsAsync(lineId, ccId);
 
             // Headcount: unlike the old per-scan reassignment (where an
             // employee was recreated under the new CC within the same
@@ -602,12 +610,14 @@ namespace FactoryManagementSystem.Controllers
                 // PHASE A: Company API lookup (Department/Designation only)
                 // instead of a Firestore EmployeeMasters read.
                 var employeeLookup = await FindCompanyEmployeesByCodesAsync(distinctCodes);
-                foreach (var code in distinctCodes)
-                {
-                    var emp = employeeLookup.GetValueOrDefault(code);
-                    if (emp != null)
-                        await _summaryService.OnEmployeeDeallocated(emp.DeptName, emp.DesignationName, code);
-                }
+
+                // Best effort, for the same reason as the save path: the
+                // release transaction above has already committed, so a
+                // Firestore Summary failure must not turn a successful CC
+                // change into a reported failure.
+                await ApplyHeadcountBestEffortAsync(
+                    distinctCodes.Select(c => new HeadcountChange(c, Allocated: false)).ToList(),
+                    employeeLookup);
             }
 
             // Source write (the atomic release transaction above) already
@@ -671,21 +681,12 @@ namespace FactoryManagementSystem.Controllers
 
             if (codes.Count == 0) return;
 
-            const int chunkSize = 30;
-            for (int i = 0; i < codes.Count; i += chunkSize)
+            // The repository chunks at whatever limit its store has - 30 for
+            // Firestore's WhereIn, none at all for Postgres.
+            foreach (var tx in await _layouts.GetActiveByEmployeeCodesAsync(codes))
             {
-                var chunk = codes.Skip(i).Take(chunkSize).ToList();
-                var snapshot = await _firestore.LayoutTransactions
-                    .WhereIn(nameof(LayoutTransaction.EmployeeCode), chunk)
-                    .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                    .GetSnapshotAsync();
-
-                foreach (var doc in snapshot.Documents)
-                {
-                    var tx = doc.ConvertTo<LayoutTransaction>();
-                    if (tx.LineId != lineId || tx.CCId != ccId)
-                        throw new InvalidOperationException(DescribeExistingAllocation(tx));
-                }
+                if (tx.LineId != lineId || tx.CCId != ccId)
+                    throw new InvalidOperationException(DescribeExistingAllocation(tx));
             }
         }
 
@@ -739,7 +740,7 @@ namespace FactoryManagementSystem.Controllers
             var sectionLookup = new Dictionary<int, string>();
             if (layoutMasterIds.Count == 0) return sectionLookup;
 
-            foreach (var lm in await _firestore.GetActiveLayoutMastersByCcAsync(ccId))
+            foreach (var lm in await _layouts.GetActiveLayoutMastersByCcAsync(ccId))
             {
                 if (!layoutMasterIds.Contains(lm.Id)) continue;
                 sectionLookup[lm.Id] = string.IsNullOrWhiteSpace(lm.Section) ? "MAIN" : lm.Section;
@@ -747,20 +748,8 @@ namespace FactoryManagementSystem.Controllers
 
             var missing = layoutMasterIds.Where(id => !sectionLookup.ContainsKey(id)).ToList();
 
-            const int chunkSize = 30;
-            for (int i = 0; i < missing.Count; i += chunkSize)
-            {
-                var chunk = missing.Skip(i).Take(chunkSize).Cast<object>().ToList();
-                var snapshot = await _firestore.LayoutMasters
-                    .WhereIn(nameof(LayoutMaster.Id), chunk)
-                    .GetSnapshotAsync();
-
-                foreach (var doc in snapshot.Documents)
-                {
-                    var lm = doc.ConvertTo<LayoutMaster>();
-                    sectionLookup[lm.Id] = string.IsNullOrWhiteSpace(lm.Section) ? "MAIN" : lm.Section;
-                }
-            }
+            foreach (var lm in await _layouts.GetLayoutMastersByIdsAsync(missing))
+                sectionLookup[lm.Id] = string.IsNullOrWhiteSpace(lm.Section) ? "MAIN" : lm.Section;
 
             foreach (var id in layoutMasterIds)
                 sectionLookup.TryAdd(id, "MAIN");

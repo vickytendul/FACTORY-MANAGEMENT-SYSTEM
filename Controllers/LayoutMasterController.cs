@@ -1,4 +1,5 @@
 ﻿using FactoryManagementSystem.Entities;
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Authorization;
@@ -10,12 +11,21 @@ namespace FactoryManagementSystem.Controllers
     [Route("api/[controller]")]
     public class LayoutMasterController : ControllerBase
     {
-        private readonly FirestoreService _firestore;
         private readonly LineAllocationSummaryService _lineAllocationSummaryService;
+        private readonly ILayoutRepository _layouts;
 
-        public LayoutMasterController(FirestoreService firestore, LineAllocationSummaryService lineAllocationSummaryService)
+        /// OperationIds and LayoutMaster ids. Separate from the repository
+        /// because the allocator is Firestore-backed in every mode - see
+        /// ILayoutIdAllocator for why that is deliberate.
+        private readonly ILayoutIdAllocator _ids;
+
+        public LayoutMasterController(
+            LineAllocationSummaryService lineAllocationSummaryService,
+            ILayoutRepository layouts,
+            ILayoutIdAllocator ids)
         {
-            _firestore = firestore;
+            _layouts = layouts;
+            _ids = ids;
             _lineAllocationSummaryService = lineAllocationSummaryService;
         }
 
@@ -24,7 +34,7 @@ namespace FactoryManagementSystem.Controllers
 
         {
            
-            var records = await _firestore.GetActiveLayoutMastersByCcAsync(ccId);
+            var records = await _layouts.GetActiveLayoutMastersByCcAsync(ccId);
 
             var layout = records
                 .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
@@ -43,31 +53,17 @@ namespace FactoryManagementSystem.Controllers
             if (sourceLayoutNo == targetLayoutNo)
                 return BadRequest(new { Success = false, Message = "Source and target layouts must be different." });
 
-            var snapshot = await _firestore.LayoutMasters
-                .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
-                .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
-                .GetSnapshotAsync();
-            var records = snapshot.Documents.Select(d => d.ConvertTo<LayoutMaster>()).ToList();
-            if (records.Any(x => NormalizeLayoutNo(x.LayoutNo) == targetLayoutNo))
+            // Validation, id allocation and the write are one unit inside
+            // the repository now: they were always meant to be, and keeping
+            // them together is what lets the fresh "does the target already
+            // exist" check run against whichever store is authoritative.
+            var result = await _layouts.CopyLayoutAsync(ccId, sourceLayoutNo, targetLayoutNo);
+
+            if (result.Status == LayoutWriteStatus.TargetLayoutExists)
                 return BadRequest(new { Success = false, Message = "The target layout number already exists." });
-            var source = records.Where(x => NormalizeLayoutNo(x.LayoutNo) == sourceLayoutNo).OrderBy(x => x.DisplayOrder).ToList();
-            if (!source.Any())
+            if (result.Status == LayoutWriteStatus.SourceLayoutNotFound)
                 return NotFound(new { Success = false, Message = "Source layout was not found." });
 
-            var counterRef = _firestore.Counters.Document("LayoutMasterId");
-            var counter = await counterRef.GetSnapshotAsync();
-            var nextId = Math.Max(counter.Exists ? counter.GetValue<int>("Value") + 1 : 1, records.Max(x => x.Id) + 1);
-            var batch = _firestore.Db.StartBatch();
-            for (var i = 0; i < source.Count; i++)
-            {
-                var copy = source[i];
-                copy.Id = nextId + i;
-                copy.LayoutNo = targetLayoutNo;
-                batch.Set(_firestore.LayoutMasters.Document(), copy);
-            }
-            batch.Set(counterRef, new { Value = nextId + source.Count - 1 }, SetOptions.MergeAll);
-            await batch.CommitAsync();
-            _firestore.InvalidateLayoutMastersCache();
             // Source write already committed successfully above - a summary
             // rebuild failure here must never fail this response.
             await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
@@ -80,21 +76,15 @@ namespace FactoryManagementSystem.Controllers
         {
             if (ccId <= 0 || layoutNo <= 0)
                 return BadRequest(new { Success = false, Message = "Valid CC and layout number are required." });
-            var allocation = await _firestore.LayoutTransactions
-                .WhereEqualTo(nameof(LayoutTransaction.CCId), ccId)
-                .WhereEqualTo(nameof(LayoutTransaction.IsActive), true)
-                .GetSnapshotAsync();
-            if (allocation.Documents.Select(d => d.ConvertTo<LayoutTransaction>()).Any(x => NormalizeLayoutNo(x.LayoutNo) == layoutNo))
+            // The allocations-exist guard runs inside the operation, on a
+            // FRESH read, in the same transaction as the delete. It used to
+            // be a separate query here, which left a window where an
+            // allocation could be saved between the check and the delete.
+            var result = await _layouts.DeleteLayoutAsync(ccId, layoutNo);
+
+            if (result.Status == LayoutWriteStatus.AllocationsExist)
                 return BadRequest(new { Success = false, Message = "This layout cannot be deleted because allocations exist." });
 
-            var master = await _firestore.LayoutMasters
-                .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
-                .GetSnapshotAsync();
-            var docs = master.Documents.Where(d => NormalizeLayoutNo(d.ConvertTo<LayoutMaster>().LayoutNo) == layoutNo).ToList();
-            var batch = _firestore.Db.StartBatch();
-            foreach (var doc in docs) batch.Delete(doc.Reference);
-            await batch.CommitAsync();
-            _firestore.InvalidateLayoutMastersCache();
             // Source write already committed successfully above - a summary
             // rebuild failure here must never fail this response.
             await _lineAllocationSummaryService.RebuildAllBestEffortAsync();
@@ -106,7 +96,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var records = await _firestore.GetActiveLayoutMastersByCcAsync(ccId);
+                var records = await _layouts.GetActiveLayoutMastersByCcAsync(ccId);
 
                 var ops = records
                     .GroupBy(x => new { x.OperationId, x.OperationName, x.MachineType, x.OperationGrade, x.Section })
@@ -147,13 +137,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var snapshot = await _firestore.LayoutMasters.GetSnapshotAsync();
-                var missing = snapshot.Documents
-                    .Select(document => new
-                    {
-                        Reference = document.Reference,
-                        Record = document.ConvertTo<LayoutMaster>()
-                    })
+                var missing = (await _layouts.GetAllMastersFreshAsync())
                     .Where(x => x.Record.OperationId <= 0)
                     .ToList();
 
@@ -176,28 +160,10 @@ namespace FactoryManagementSystem.Controllers
                         string.IsNullOrWhiteSpace(x.Record.Section) ? "MAIN" : x.Record.Section))
                     .ToList();
 
-                var operationIds = await _firestore.GetOrCreateOperationIdsAsync(identityKeys);
+                var operationIds = await _ids.GetOrCreateOperationIdsAsync(identityKeys);
 
-                // A Firestore batch permits at most 500 writes; use 400 so the
-                // migration remains safe as the master data grows.
-                for (var offset = 0; offset < missing.Count; offset += 400)
-                {
-                    var batch = _firestore.Db.StartBatch();
-                    var count = Math.Min(400, missing.Count - offset);
-
-                    for (var index = 0; index < count; index++)
-                    {
-                        var row = missing[offset + index];
-                        batch.Update(row.Reference, new Dictionary<string, object>
-                        {
-                            [nameof(LayoutMaster.OperationId)] = operationIds[offset + index]
-                        });
-                    }
-
-                    await batch.CommitAsync();
-                }
-
-                _firestore.InvalidateLayoutMastersCache();
+                await _layouts.AssignOperationIdsAsync(
+                    missing.Select((row, index) => (row.DocumentId, operationIds[index])).ToList());
 
                 return Ok(new
                 {
@@ -229,17 +195,18 @@ namespace FactoryManagementSystem.Controllers
                 if (invalidItem != null)
                     return BadRequest(new { Success = false, Message = "Every layout row must have an operation name." });
 
-                var existing = await _firestore.LayoutMasters
-                .WhereEqualTo(nameof(LayoutMaster.CCId), ccId)
-                .GetSnapshotAsync();
-
-                var existingDocs = existing.Documents
-                .Select(d => new { DocRef = d.Reference, Record = d.ConvertTo<LayoutMaster>() })
+                // FRESH, and now store-agnostic. Ordered by DisplayOrder
+                // because this save is positional: row i of the request
+                // overwrites row i of what is already there, which is what
+                // keeps a LayoutMaster.Id attached to its position in the
+                // layout rather than to its operation name.
+                var existingDocs = (await _layouts.GetAllMastersByCcFreshAsync(ccId))
                 .Where(x => NormalizeLayoutNo(x.Record.LayoutNo) == layoutNo)
                 .OrderBy(x => x.Record.DisplayOrder)
                 .ToList();
 
-            var batch = _firestore.Db.StartBatch();
+            var writes = new List<ResolvedMasterRow>();
+            var deletes = new List<string>();
 
             var identityKeys = new List<(int, string, string, string, string)>();
             for (int i = 0; i < items.Count; i++)
@@ -255,7 +222,7 @@ namespace FactoryManagementSystem.Controllers
                 }
             }
 
-            var operationIds = await _firestore.GetOrCreateOperationIdsAsync(identityKeys);
+            var operationIds = await _ids.GetOrCreateOperationIdsAsync(identityKeys);
 
             int operationIdIndex = 0;
             var newRecordCount = 0;
@@ -266,21 +233,24 @@ namespace FactoryManagementSystem.Controllers
                 var item = items[i];
                 if (i < existingDocs.Count)
                 {
-                    var existingDoc = existingDocs[i];
-                    existingDoc.Record.SNo = i + 1;
-                    existingDoc.Record.LayoutNo = layoutNo;
-                    if (existingDoc.Record.OperationId == 0)
-                    {
-                        existingDoc.Record.OperationId = operationIds[operationIdIndex++];
-                    }
-                    existingDoc.Record.OperationName = item.OperationName;
-                    existingDoc.Record.OperationGrade = item.OperationGrade ?? string.Empty;
-                    existingDoc.Record.MachineType = item.MachineType ?? string.Empty;
-                    existingDoc.Record.DisplayOrder = i + 1;
-                    existingDoc.Record.Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section;
-                    existingDoc.Record.IsActive = true;
-                    batch.Set(existingDoc.DocRef, existingDoc.Record);
-                    maxExistingId = Math.Max(maxExistingId, existingDoc.Record.Id);
+                    var record = existingDocs[i].Record;
+                    // The row keeps its Id and its document id; only its
+                    // contents and position are rewritten. An existing
+                    // OperationId is never reallocated.
+                    writes.Add(new ResolvedMasterRow(
+                        existingDocs[i].DocumentId,
+                        record.Id,
+                        ccId,
+                        layoutNo,
+                        i + 1,
+                        record.OperationId == 0 ? operationIds[operationIdIndex++] : record.OperationId,
+                        item.OperationName,
+                        item.OperationGrade ?? string.Empty,
+                        item.MachineType ?? string.Empty,
+                        i + 1,
+                        string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section,
+                        true));
+                    maxExistingId = Math.Max(maxExistingId, record.Id);
                 }
                 else
                 {
@@ -288,48 +258,44 @@ namespace FactoryManagementSystem.Controllers
                 }
             }
 
+            // Surplus rows from a previous, longer layout. A HARD delete,
+            // preserved as such: DeleteLayout relies on rows actually
+            // disappearing, and a soft delete would leave them to be
+            // resurrected by the next positional save.
             for (int i = items.Count; i < existingDocs.Count; i++)
             {
-                batch.Delete(existingDocs[i].DocRef);
+                deletes.Add(existingDocs[i].DocumentId);
             }
 
             if (newRecordCount > 0)
             {
-                var counterRef = _firestore.Counters.Document("LayoutMasterId");
-                var counterSnap = await counterRef.GetSnapshotAsync();
-                int nextId = Math.Max(
-                    counterSnap.Exists ? counterSnap.GetValue<int>("Value") + 1 : 1,
-                    maxExistingId + 1
-                );
+                // maxExistingId is still the floor, so a counter that has
+                // fallen behind cannot hand back an id this layout already
+                // uses - the same guard as before, now applied inside one
+                // transaction rather than across a read and a later write.
+                int nextId = await _ids.ReserveLayoutMasterIdsAsync(newRecordCount, maxExistingId);
 
                 for (int i = existingDocs.Count; i < items.Count; i++)
                 {
                     var item = items[i];
-                    var generatedId = nextId + (i - existingDocs.Count);
-                    var layoutMaster = new LayoutMaster
-                    {
-                        Id = generatedId,
-                        CCId = ccId,
-                        LayoutNo = layoutNo,
-                        SNo = i + 1,
-                        OperationId = operationIds[operationIdIndex++],
-                        OperationName = item.OperationName,
-                        OperationGrade = item.OperationGrade ?? string.Empty,
-                        MachineType = item.MachineType ?? string.Empty,
-                        DisplayOrder = i + 1,
-                        IsActive = true,
-                        Section = string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section
-                    };
-
-                    var docRef = _firestore.LayoutMasters.Document();
-                    batch.Set(docRef, layoutMaster);
+                    writes.Add(new ResolvedMasterRow(
+                        _ids.NewDocumentId(nameof(LayoutMaster)),
+                        nextId + (i - existingDocs.Count),
+                        ccId,
+                        layoutNo,
+                        i + 1,
+                        operationIds[operationIdIndex++],
+                        item.OperationName,
+                        item.OperationGrade ?? string.Empty,
+                        item.MachineType ?? string.Empty,
+                        i + 1,
+                        string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section,
+                        true));
                 }
-
-                batch.Set(counterRef, new { Value = nextId + newRecordCount - 1 }, SetOptions.MergeAll);
             }
 
-                await batch.CommitAsync();
-                _firestore.InvalidateLayoutMastersCache();
+                await _layouts.ApplyMasterBatchAsync(
+                    new MasterBatchPlan(ccId, layoutNo, writes, deletes));
                 // Source write already committed successfully above - a
                 // summary rebuild failure here must never fail this response.
                 await _lineAllocationSummaryService.RebuildAllBestEffortAsync();

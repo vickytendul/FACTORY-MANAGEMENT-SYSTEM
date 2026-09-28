@@ -35,6 +35,9 @@ public class LineAllocationSummaryService
     private readonly ProductionLineService _productionLines;
     private readonly IMemoryCache _cache;
 
+    // TEMPORARY - see TemporaryFirebaseBypass.
+    private readonly TemporaryFirebaseBypass _bypass;
+
     // Single fixed document ID within the existing LineAllocationSummaries
     // collection - LineAllocationSummaries/aggregate. Deliberately a
     // different document ID than the pre-existing per-LineId documents
@@ -56,12 +59,14 @@ public class LineAllocationSummaryService
         FirestoreService firestore,
         LineStrengthReportService reportService,
         ProductionLineService productionLines,
-        IMemoryCache cache)
+        IMemoryCache cache,
+        TemporaryFirebaseBypass bypass)
     {
         _firestore = firestore;
         _reportService = reportService;
         _productionLines = productionLines;
         _cache = cache;
+        _bypass = bypass;
     }
 
     // Recomputes every line's summary from the source of truth and
@@ -85,6 +90,19 @@ public class LineAllocationSummaryService
     // RebuildAllBestEffortAsync instead.
     public async Task RebuildAllAsync()
     {
+        // TEMPORARY: the rebuild both READS Firestore (GetAllocationSummaryAsync
+        // resolves the Lines collection) and WRITES the aggregate document, so
+        // in test mode it cannot succeed. Left to run, every layout save would
+        // log "[LineAllocationSummary] Rebuild failed ..." - a spurious error
+        // that would sit alongside, and obscure, any genuine layout failure.
+        // Skipped explicitly and loudly instead. Nothing is written, so the
+        // stored aggregate keeps whatever it last held.
+        if (_bypass.Enabled)
+        {
+            _bypass.LogSummaryBypass("RebuildAllAsync (skipped - summary left as-is, nothing written)");
+            return;
+        }
+
         var rows = await _reportService.GetAllocationSummaryAsync();
         var now = DateTime.UtcNow;
 
@@ -163,7 +181,22 @@ public class LineAllocationSummaryService
     public async Task<List<LineAllocationSummaryDto>> GetPersistedSummariesAsync()
     {
         var key = $"line_allocation_summaries_v{Volatile.Read(ref _summaryVersion)}";
-        if (!_cache.TryGetValue(key, out List<LineAllocationSummaryDoc>? docs) || docs == null)
+        List<LineAllocationSummaryDoc>? docs;
+
+        // TEMPORARY: skip ONLY the Firestore read. Everything after this
+        // still runs exactly as it does in production - including the
+        // Company API production lookup, which is not bypassed - so the
+        // method keeps its shape and its contract. An empty document list
+        // is the SAME state it already handles when the aggregate has not
+        // been built yet, and it flows through the existing projection
+        // untouched: the Home Screen shows no line cards rather than
+        // wrong ones.
+        if (_bypass.Enabled)
+        {
+            _bypass.LogSummaryBypass("GetPersistedSummariesAsync (empty line list, nothing cached)");
+            docs = new List<LineAllocationSummaryDoc>();
+        }
+        else if (!_cache.TryGetValue(key, out docs) || docs == null)
         {
             var snapshot = await _firestore.LineAllocationSummaries.Document(AggregateDocumentId).GetSnapshotAsync();
             if (!snapshot.Exists)

@@ -1,4 +1,5 @@
 using FactoryManagementSystem.Entities;
+using FactoryManagementSystem.Services.Layouts;
 using Google.Cloud.Firestore;
 
 namespace FactoryManagementSystem.Services
@@ -8,9 +9,14 @@ namespace FactoryManagementSystem.Services
         private readonly FirestoreService _firestore;
         private const string SummaryDocId = "EmployeeSummary";
 
-        public SummaryService(FirestoreService firestore)
+        /// Only the allocated-employee count below comes from here. The
+        /// summary document itself stays on Firestore.
+        private readonly ILayoutRepository _layouts;
+
+        public SummaryService(FirestoreService firestore, ILayoutRepository layouts)
         {
             _firestore = firestore;
+            _layouts = layouts;
         }
 
         private async Task<EmployeeSummary> GetOrCreateAsync()
@@ -165,12 +171,7 @@ namespace FactoryManagementSystem.Services
                 .Where(x => x.IsActive)
                 .ToList();
 
-            var layoutSnapshot = await _firestore.LayoutTransactions
-                .WhereEqualTo("IsActive", true)
-                .GetSnapshotAsync();
-
-            var allocatedCodes = layoutSnapshot.Documents
-                .Select(x => x.ConvertTo<LayoutTransaction>())
+            var allocatedCodes = (await _layouts.GetActiveLayoutTransactionsAsync())
                 .Where(x => x.IsActive && !string.IsNullOrWhiteSpace(x.EmployeeCode))
                 .Select(x => x.EmployeeCode.Trim())
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);

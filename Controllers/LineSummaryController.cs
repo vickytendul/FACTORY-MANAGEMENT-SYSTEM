@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Layouts;
 using System.Text.Json;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
@@ -72,9 +73,19 @@ namespace FactoryManagementSystem.Controllers
 
         private readonly FirestoreService _firestore;
         private readonly CompanyApiClient _companyApiClient;
+        private readonly ILayoutRepository _layouts;
 
-        public LineSummaryController(FirestoreService firestore, CompanyApiClient companyApiClient)
+        // TEMPORARY - see TemporaryFirebaseBypass.
+        private readonly TemporaryFirebaseBypass _bypass;
+
+        public LineSummaryController(
+            FirestoreService firestore,
+            CompanyApiClient companyApiClient,
+            ILayoutRepository layouts,
+            TemporaryFirebaseBypass bypass)
         {
+            _layouts = layouts;
+            _bypass = bypass;
             _firestore = firestore;
             _companyApiClient = companyApiClient;
         }
@@ -304,7 +315,7 @@ namespace FactoryManagementSystem.Controllers
             // fetched once and reused below for both the ccId-resolution
             // step and the Line/Employee mapping, instead of two fresh
             // single-purpose Firestore queries on every Line Summary load.
-            var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+            var activeLayoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
 
             string? resolvedCcNo = null;
             if (ccId == null)
@@ -512,6 +523,16 @@ namespace FactoryManagementSystem.Controllers
                 result[d] = new DayLoans(
                     new HashSet<string>(StringComparer.OrdinalIgnoreCase),
                     new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            }
+
+            // TEMPORARY: an empty DayLoans per date is exactly what this
+            // method returns for a range in which nobody was borrowed or
+            // lent, so the caller and the response shape are unchanged -
+            // the Line Summary shows no loan movements.
+            if (_bypass.Enabled)
+            {
+                _bypass.LogAttendanceBypass($"FetchLoansForRangeAsync line={lineId}");
+                return result;
             }
 
             const int chunkSize = 30;

@@ -1,4 +1,5 @@
 ﻿using FactoryManagementSystem.Entities;
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
@@ -11,9 +12,47 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly FirestoreService _firestore;
 
-        public AttendanceController(FirestoreService firestore)
+        /// Layout reads only. Attendance rows themselves are still read and
+        /// written through _firestore - this controller only consults the
+        /// layout to resolve a line's CC.
+        private readonly ILayoutRepository _layouts;
+
+        // TEMPORARY - see TemporaryFirebaseBypass.
+        private readonly TemporaryFirebaseBypass _bypass;
+
+        public AttendanceController(
+            FirestoreService firestore,
+            ILayoutRepository layouts,
+            TemporaryFirebaseBypass bypass)
         {
             _firestore = firestore;
+            _layouts = layouts;
+            _bypass = bypass;
+        }
+
+        /// TEMPORARY. Attendance writes MUST be refused while reads are
+        /// bypassed, and this is the most important part of the bypass.
+        ///
+        /// SyncAttendanceAsync decides between updating an existing row and
+        /// creating a new one by first reading that line's rows for the day.
+        /// With that read returning empty, every row looks new: Save would
+        /// ADD a second attendance record for people who already have one,
+        /// and Update would throw "Attendance not found". Silently
+        /// duplicating real attendance data is far worse than refusing to
+        /// write it, so the endpoint says plainly why it will not.
+        private IActionResult? RefuseAttendanceWriteIfBypassed()
+        {
+            if (!_bypass.Enabled) return null;
+
+            _bypass.LogAttendanceBypass("attendance WRITE refused");
+            return BadRequest(new
+            {
+                Success = false,
+                Message = "Attendance is unavailable: the server is in temporary layout-test mode "
+                        + "with Firebase attendance reads bypassed, so saving now would duplicate "
+                        + "existing records. Turn off FirebaseDependencies__BypassForLayoutTesting "
+                        + "to record attendance."
+            });
         }
 
         [HttpPost]
@@ -21,6 +60,9 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                var refused = RefuseAttendanceWriteIfBypassed();
+                if (refused != null) return refused;
+
                 await SyncAttendanceAsync(request, isNew: true);
                 _firestore.InvalidateAttendanceCache();
 
@@ -45,6 +87,9 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                var refused = RefuseAttendanceWriteIfBypassed();
+                if (refused != null) return refused;
+
                 await SyncAttendanceAsync(request, isNew: false);
                 _firestore.InvalidateAttendanceCache();
 
@@ -94,6 +139,16 @@ namespace FactoryManagementSystem.Controllers
                     .ToList();
 
                 if (codes.Count == 0) return Ok(Array.Empty<object>());
+
+                // TEMPORARY: the empty array is already this endpoint's
+                // answer for "nobody from this line is working elsewhere
+                // today", so the response shape is unchanged. The layout
+                // simply shows no lent-out markers.
+                if (_bypass.Enabled)
+                {
+                    _bypass.LogAttendanceBypass("GetDeployedElsewhere");
+                    return Ok(Array.Empty<object>());
+                }
 
                 var date = DateTime.SpecifyKind(attendanceDate.Date, DateTimeKind.Utc);
                 var found = new List<object>();
@@ -154,7 +209,7 @@ namespace FactoryManagementSystem.Controllers
                 {
                     // CACHED: same active-allocations snapshot Output/SkillTransaction/
                     // LineStrengthReport already share, instead of a fresh read here.
-                    var layout = (await _firestore.GetActiveLayoutTransactionsAsync())
+                    var layout = (await _layouts.GetActiveLayoutTransactionsAsync())
                         .FirstOrDefault(x => x.LineId == lineId);
 
                     if (layout != null)

@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services.Skills;
 using FactoryManagementSystem.Services;
@@ -15,18 +16,22 @@ namespace FactoryManagementSystem.Controllers
         private readonly SummaryService _summaryService;
         private readonly CompanyAttendanceService _companyAttendance;
 
-        /// Skill records only. Everything else this controller reads -
-        /// layout allocations, layout masters, employees - stays on
-        /// Firestore through _firestore above, so these endpoints are
-        /// deliberately hybrid while the migration settles.
+        /// Skill records only. Layout allocations and layout masters now
+        /// come from _layouts below, on their own independent flag;
+        /// employees still come from Firestore through _firestore above,
+        /// so these endpoints are deliberately hybrid while the migration
+        /// settles.
         private readonly ISkillRepository _skills;
+        private readonly ILayoutRepository _layouts;
 
         public SkillTransactionController(
             FirestoreService firestore,
             SummaryService summaryService,
             CompanyAttendanceService companyAttendance,
-            ISkillRepository skills)
+            ISkillRepository skills,
+            ILayoutRepository layouts)
         {
+            _layouts = layouts;
             _firestore = firestore;
             _summaryService = summaryService;
             _companyAttendance = companyAttendance;
@@ -151,7 +156,7 @@ namespace FactoryManagementSystem.Controllers
                 // "free" (Priority 1/2) vs. who could be shifted from elsewhere on
                 // this same line (Priority 3). Cached briefly since one Absent mark
                 // can cascade through several of these calls back-to-back.
-                var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+                var activeLayoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
 
                 var allocationByCode = activeLayoutTransactions
                     .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
@@ -348,7 +353,7 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+                var activeLayoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
                 var allocationByCode = activeLayoutTransactions
                     .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
                     .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)
@@ -580,7 +585,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var layoutMasters = await _firestore.GetActiveLayoutMastersByCcAsync(ccId);
+                var layoutMasters = await _layouts.GetActiveLayoutMastersByCcAsync(ccId);
 
                 // A CC can have more than one Layout (Layout 1, Layout 2...),
                 // and legacy rows can carry mismatched/zero OperationIds for
@@ -598,7 +603,7 @@ namespace FactoryManagementSystem.Controllers
                     return Ok(new { ccId, operations = Array.Empty<object>() });
                 }
 
-                var ccAllocations = (await _firestore.GetActiveLayoutTransactionsAsync())
+                var ccAllocations = (await _layouts.GetActiveLayoutTransactionsAsync())
                     .Where(t => t.CCId == ccId)
                     .ToList();
                 var ccSkills = (await _skills.GetAllActiveAsync())
@@ -667,7 +672,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(byEmployee.Keys);
 
-                var activeLayoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+                var activeLayoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
                 var allocationByCode = activeLayoutTransactions
                     .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
                     .GroupBy(x => x.EmployeeCode, StringComparer.OrdinalIgnoreCase)

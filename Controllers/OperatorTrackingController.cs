@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Google.Cloud.Firestore;
@@ -11,9 +12,14 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly FirestoreService _firestore;
         private readonly CompanyAttendanceService _companyAttendance;
+        private readonly ILayoutRepository _layouts;
 
-        public OperatorTrackingController(FirestoreService firestore, CompanyAttendanceService companyAttendance)
+        public OperatorTrackingController(
+            FirestoreService firestore,
+            CompanyAttendanceService companyAttendance,
+            ILayoutRepository layouts)
         {
+            _layouts = layouts;
             _firestore = firestore;
             _companyAttendance = companyAttendance;
         }
@@ -32,7 +38,7 @@ namespace FactoryManagementSystem.Controllers
                     .ToList();
 
                 // Cached, shared with the Attendance backup-suggestion flow.
-                var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+                var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
 
                 // Status comes from payroll (real for everyone, every day);
                 // AttendanceTransactions is still read, but only for the one

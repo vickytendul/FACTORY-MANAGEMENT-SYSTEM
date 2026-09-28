@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using Microsoft.AspNetCore.Mvc;
@@ -15,11 +16,16 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly FirestoreService _firestore;
         private readonly SummaryService _summaryService;
+        private readonly ILayoutRepository _layouts;
 
         private static readonly string[] Grades = { "A+", "A", "B", "C" };
 
-        public SkillMatrixController(FirestoreService firestore, SummaryService summaryService)
+        public SkillMatrixController(
+            FirestoreService firestore,
+            SummaryService summaryService,
+            ILayoutRepository layouts)
         {
+            _layouts = layouts;
             _firestore = firestore;
             _summaryService = summaryService;
         }
@@ -81,7 +87,7 @@ namespace FactoryManagementSystem.Controllers
             {
                 var ratios = await _firestore.GetGradeRatioConfigAsync();
                 var lines = await _firestore.GetActiveLinesAsync();
-                var allocations = await _firestore.GetActiveLayoutTransactionsAsync();
+                var allocations = await _layouts.GetActiveLayoutTransactionsAsync();
 
                 var allocationsByLine = allocations
                     .Where(a => !string.IsNullOrWhiteSpace(a.EmployeeCode))

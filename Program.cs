@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Skills;
 using Npgsql;
 using FactoryManagementSystem.Data;
@@ -84,6 +85,12 @@ builder.Services.AddSingleton(provider =>
 });
 
 builder.Services.AddMemoryCache();
+
+// TEMPORARY - remove with Services/TemporaryFirebaseBypass.cs once the
+// Firebase read quota is resolved. Registered before FirestoreService
+// because that service takes it. Defaults to OFF.
+builder.Services.AddSingleton<TemporaryFirebaseBypass>();
+
 builder.Services.AddSingleton<FirestoreService>();
 builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<LineStrengthReportService>();
@@ -110,12 +117,17 @@ builder.Services.AddSingleton<EmployeeSyncService>();
 builder.Services.AddSingleton<FirestoreSkillRepository>();
 
 var skillsSource = (builder.Configuration["Skills:Source"] ?? "firebase").Trim().ToLowerInvariant();
+var layoutsSource = (builder.Configuration["Layouts:Source"] ?? "firebase").Trim().ToLowerInvariant();
 
-if (skillsSource is "supabase" or "dual")
+// One shared connection pool, registered when EITHER migration needs it.
+// Scoping this to the Skills flag alone would mean Layouts:Source=dual with
+// Skills:Source=firebase could not resolve a data source at all.
+if (skillsSource is "supabase" or "dual" || layoutsSource is "supabase" or "dual")
 {
     var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
         ?? throw new Exception(
-            "Supabase:ConnectionString is required when Skills:Source is 'supabase' or 'dual'.");
+            "Supabase:ConnectionString is required when Skills:Source or Layouts:Source "
+            + "is 'supabase' or 'dual'.");
 
     builder.Services.AddSingleton(_ =>
     {
@@ -139,8 +151,10 @@ if (skillsSource is "supabase" or "dual")
         }
         return NpgsqlDataSource.Create(connectionString);
     });
-    builder.Services.AddSingleton<SupabaseSkillRepository>();
 }
+
+if (skillsSource is "supabase" or "dual")
+    builder.Services.AddSingleton<SupabaseSkillRepository>();
 
 builder.Services.AddSingleton<ISkillRepository>(sp => skillsSource switch
 {
@@ -150,6 +164,45 @@ builder.Services.AddSingleton<ISkillRepository>(sp => skillsSource switch
         sp.GetRequiredService<SupabaseSkillRepository>(),
         sp.GetRequiredService<ILogger<DualReadSkillRepository>>()),
     _ => sp.GetRequiredService<FirestoreSkillRepository>(),
+});
+
+// =====================================================
+// Layout records: Firebase or Supabase, chosen SEPARATELY
+// =====================================================
+//
+// Layouts__Source = firebase | dual | supabase   (default firebase)
+//
+// A DIFFERENT flag from Skills__Source on purpose. The two migrations
+// are independent, and coupling them would mean a layout problem could
+// only be rolled back by also reverting skills.
+//
+// dual reads both stores, SERVES FIREBASE, and logs disagreements.
+// Every write stays Firebase-authoritative in dual mode - layout writes
+// allocate ids through two Firestore transactions and produce their own
+// document ids, so mirroring them is not yet proven safe.
+//
+// The id allocator is registered OUTSIDE the switch and is Firestore-backed
+// in every mode, supabase included. LayoutMaster ids and OperationIds stay
+// allocated from Counters/LayoutMasterId and Counters/LayoutMasterOperation
+// so that an id means the same row in both stores, and so that switching
+// back to firebase mode cannot re-issue ids Supabase already handed out.
+builder.Services.AddSingleton<ILayoutIdAllocator, FirestoreLayoutIdAllocator>();
+
+builder.Services.AddSingleton<FirestoreLayoutRepository>();
+
+// layoutsSource is declared above, beside skillsSource, because the shared
+// NpgsqlDataSource registration needs to see both flags.
+if (layoutsSource is "supabase" or "dual")
+    builder.Services.AddSingleton<SupabaseLayoutRepository>();
+
+builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch
+{
+    "supabase" => sp.GetRequiredService<SupabaseLayoutRepository>(),
+    "dual" => new DualReadLayoutRepository(
+        sp.GetRequiredService<FirestoreLayoutRepository>(),
+        sp.GetRequiredService<SupabaseLayoutRepository>(),
+        sp.GetRequiredService<ILogger<DualReadLayoutRepository>>()),
+    _ => sp.GetRequiredService<FirestoreLayoutRepository>(),
 });
 
 // =====================================================

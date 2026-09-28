@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Layouts;
 using System.Text.RegularExpressions;
 using FactoryManagementSystem.Entities;
 using Google.Cloud.Firestore;
@@ -9,12 +10,15 @@ public class LineStrengthReportService
     private readonly FirestoreService _firestore;
     private readonly CompanyAttendanceService _companyAttendance;
     private readonly ProductionLineService _productionLines;
+    private readonly ILayoutRepository _layouts;
 
     public LineStrengthReportService(
         FirestoreService firestore,
         CompanyAttendanceService companyAttendance,
-        ProductionLineService productionLines)
+        ProductionLineService productionLines,
+        ILayoutRepository layouts)
     {
+        _layouts = layouts;
         _firestore = firestore;
         _companyAttendance = companyAttendance;
         _productionLines = productionLines;
@@ -27,7 +31,7 @@ public class LineStrengthReportService
 
         // 2 — Load all active LayoutTransactions (cached, shared with the
         // Attendance backup-suggestion flow and Operator Tracking)
-        var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+        var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
 
         // Attendance comes from payroll, not this app's own
         // AttendanceTransactions: that collection only has a status where a
@@ -39,7 +43,7 @@ public class LineStrengthReportService
         // with GetAllocationSummaryAsync below, which already used this
         // exact same MAIN-section rule/shape via this same helper), instead
         // of a fresh raw LayoutMasters scan on every call.
-        var plannedByLayout = await _firestore.GetActiveMainLayoutMasterCountsAsync();
+        var plannedByLayout = await _layouts.GetActiveMainLayoutMasterCountsAsync();
 
         // 4 — Group transactions by line and compute stats
         var lineGroups = layoutTransactions
@@ -205,7 +209,7 @@ public class LineStrengthReportService
         var payroll = await _companyAttendance.GetCodesForDateAsync(today);
         if (payroll.Count == 0) return result;
 
-        var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
+        var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
         var attendance = await _firestore.GetAttendanceForDateAsync(
             DateTime.SpecifyKind(today, DateTimeKind.Utc));
 
@@ -268,8 +272,8 @@ public class LineStrengthReportService
     public async Task<List<LineAllocationSummaryDto>> GetAllocationSummaryAsync()
     {
         var lines = await ResolveLinesAsync();
-        var layoutTransactions = await _firestore.GetActiveLayoutTransactionsAsync();
-        var requiredByLayout = await _firestore.GetActiveMainLayoutMasterCountsAsync();
+        var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
+        var requiredByLayout = await _layouts.GetActiveMainLayoutMasterCountsAsync();
 
         var transactionsByLine = layoutTransactions
             .GroupBy(t => t.LineId)

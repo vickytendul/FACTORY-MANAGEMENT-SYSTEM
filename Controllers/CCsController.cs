@@ -1,7 +1,6 @@
 ﻿using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using FactoryManagementSystem.Services.Ccs;
-using FactoryManagementSystem.Services.Layouts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -13,100 +12,17 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly ICcRepository _ccs;
 
-        // TEMPORARY - see TemporaryFirebaseBypass. Both exist solely to
-        // serve the CC list from layout data while the Firebase read quota
-        // is exhausted; remove them with the bypass.
-        //
-        // Note this is now only needed for CCs:Source=firebase. Once CCs is
-        // served from Supabase the quota cannot affect this endpoint at all,
-        // and the derived fallback below becomes dead weight.
-        private readonly TemporaryFirebaseBypass _bypass;
-        private readonly ILayoutRepository _layouts;
-
         public CCsController(
-            ICcRepository ccs,
-            TemporaryFirebaseBypass bypass,
-            ILayoutRepository layouts)
+            ICcRepository ccs)
         {
             _ccs = ccs;
-            _bypass = bypass;
-            _layouts = layouts;
-        }
-
-        /// TEMPORARY. The CC list, reconstructed from the layout data in
-        /// whichever store Layouts:Source points at - Supabase, in test mode.
-        ///
-        /// Returning an empty list here would technically satisfy "do not
-        /// read Firestore", but it would also make the Layout screens
-        /// useless: with no CC to pick, the screen never requests a layout,
-        /// and the Supabase data this mode exists to exercise is never
-        /// reached. So the list is DERIVED, and every value in it is a value
-        /// really stored in the layout rows - nothing is invented:
-        ///
-        ///   ccId               layout_masters.cc_id / layout_transactions.cc_id
-        ///   ccNo               layout_transactions.cc_no, denormalised onto
-        ///                      every allocation when it was written
-        ///   hasMultipleLayouts whether that CC genuinely has more than one
-        ///                      distinct layout_no among its masters
-        ///
-        /// Two fields cannot be derived, and are NOT guessed at:
-        ///
-        ///   sam        0. It lives only on the CC master and nothing in the
-        ///              layout data records it. Layout Allocation does not
-        ///              read it; production reporting does, and that is not
-        ///              what this mode is for.
-        ///   ccNo       for a CC that has masters but was never allocated,
-        ///              no row anywhere carries its number, so it falls back
-        ///              to "CC {id}" - the same shape ResolveLinesAsync
-        ///              already uses for a line the Lines collection does
-        ///              not know.
-        ///
-        /// The list therefore covers exactly the CCs that appear in layout
-        /// data. A CC that exists in Firebase but has no layout is absent -
-        /// correctly, since there would be nothing to open for it.
-        private async Task<List<CC>> BuildCcsFromLayoutDataAsync()
-        {
-            var masters = await _layouts.GetAllLayoutMastersAsync();
-            var transactions = await _layouts.GetAllLayoutTransactionsAsync();
-
-            // Most recently allocated name wins, so a renamed CC shows the
-            // name its latest allocation recorded rather than its oldest.
-            var nameByCc = transactions
-                .Where(t => t.CCId > 0 && !string.IsNullOrWhiteSpace(t.CCNo))
-                .OrderBy(t => t.AllocatedDateTime)
-                .GroupBy(t => t.CCId)
-                .ToDictionary(g => g.Key, g => g.Last().CCNo);
-
-            var layoutCountByCc = masters
-                .Where(m => m.CCId > 0)
-                .GroupBy(m => m.CCId)
-                .ToDictionary(g => g.Key, g => g.Select(m => m.LayoutNo <= 0 ? 1 : m.LayoutNo).Distinct().Count());
-
-            return masters.Select(m => m.CCId)
-                .Concat(transactions.Select(t => t.CCId))
-                .Where(id => id > 0)
-                .Distinct()
-                .Select(id => new CC
-                {
-                    CCId = id,
-                    CCNo = nameByCc.TryGetValue(id, out var no) ? no : $"CC {id}",
-                    SAM = 0,
-                    IsActive = true,
-                    HasMultipleLayouts = layoutCountByCc.GetValueOrDefault(id) > 1,
-                })
-                .ToList();
         }
 
         [HttpGet]
         public async Task<IActionResult> GetCCs([FromQuery] bool includeInactive = false)
         {
             List<CC> ccs;
-            if (_bypass.Enabled)
-            {
-                _bypass.LogCcBypass($"GetCCs includeInactive={includeInactive} - derived from layout data");
-                ccs = (await BuildCcsFromLayoutDataAsync()).OrderBy(x => x.CCNo).ToList();
-            }
-            else if (includeInactive)
+            if (includeInactive)
             {
                 ccs = await _ccs.GetAllAsync();
             }

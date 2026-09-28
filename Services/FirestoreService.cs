@@ -19,20 +19,10 @@ namespace FactoryManagementSystem.Services
         private int _lineVersion;
         private int _layoutMasterVersion;
 
-        // TEMPORARY - see TemporaryFirebaseBypass. Optional so nothing that
-        // constructs this service directly has to know about it; null means
-        // "no bypass", which is also what the flag being off means.
-        private readonly TemporaryFirebaseBypass? _bypass;
-
-        public FirestoreService(
-            FirestoreDb db,
-            IMemoryCache cache,
-            IConfiguration? configuration = null,
-            TemporaryFirebaseBypass? bypass = null)
+        public FirestoreService(FirestoreDb db, IMemoryCache cache, IConfiguration? configuration = null)
         {
             _db = db;
             _cache = cache;
-            _bypass = bypass;
 
             // Tunable without a code change, because the right value depends
             // on how this is deployed rather than on anything in the code:
@@ -238,14 +228,6 @@ namespace FactoryManagementSystem.Services
         public async Task<List<AttendanceTransaction>> GetAttendanceForLineDateAsync(
             int lineId, int ccId, DateTime utcDate)
         {
-            // TEMPORARY: before the cache, so the bypass is unconditional
-            // and a stale warm entry cannot leak real data into test mode.
-            if (_bypass?.Enabled == true)
-            {
-                _bypass.LogAttendanceBypass($"GetAttendanceForLineDateAsync line={lineId} cc={ccId} date={utcDate:yyyy-MM-dd}");
-                return new List<AttendanceTransaction>();
-            }
-
             var key = $"attendance_{lineId}_{ccId}_{utcDate:yyyy-MM-dd}_v{Volatile.Read(ref _attendanceVersion)}";
             if (_cache.TryGetValue(key, out List<AttendanceTransaction>? cached) && cached != null)
                 return cached;
@@ -276,13 +258,6 @@ namespace FactoryManagementSystem.Services
 
         public async Task<List<AttendanceTransaction>> GetAttendanceForDateAsync(DateTime utcDate)
         {
-            // TEMPORARY: see the line/date accessor above.
-            if (_bypass?.Enabled == true)
-            {
-                _bypass.LogAttendanceBypass($"GetAttendanceForDateAsync date={utcDate:yyyy-MM-dd}");
-                return new List<AttendanceTransaction>();
-            }
-
             var key = $"attendance_{utcDate:yyyy-MM-dd}_v{Volatile.Read(ref _attendanceVersion)}";
             if (_cache.TryGetValue(key, out List<AttendanceTransaction>? cached) && cached != null)
                 return cached;

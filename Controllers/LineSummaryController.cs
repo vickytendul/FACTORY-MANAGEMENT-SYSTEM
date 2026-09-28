@@ -79,21 +79,16 @@ namespace FactoryManagementSystem.Controllers
         private readonly IAttendanceRepository _attendance;
         private readonly ICcRepository _ccs;
 
-        // TEMPORARY - see TemporaryFirebaseBypass.
-        private readonly TemporaryFirebaseBypass _bypass;
-
         public LineSummaryController(
             FirestoreService firestore,
             CompanyApiClient companyApiClient,
             ILayoutRepository layouts,
             IAttendanceRepository attendance,
-            ICcRepository ccs,
-            TemporaryFirebaseBypass bypass)
+            ICcRepository ccs)
         {
             _layouts = layouts;
             _attendance = attendance;
             _ccs = ccs;
-            _bypass = bypass;
             _firestore = firestore;
             _companyApiClient = companyApiClient;
         }
@@ -527,16 +522,6 @@ namespace FactoryManagementSystem.Controllers
                 result[d] = new DayLoans(
                     new HashSet<string>(StringComparer.OrdinalIgnoreCase),
                     new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
-            }
-
-            // TEMPORARY: an empty DayLoans per date is exactly what this
-            // method returns for a range in which nobody was borrowed or
-            // lent, so the caller and the response shape are unchanged -
-            // the Line Summary shows no loan movements.
-            if (_bypass.Enabled)
-            {
-                _bypass.LogAttendanceBypass($"FetchLoansForRangeAsync line={lineId}");
-                return result;
             }
 
             // Borrowed in: this line's own attendance rows across the range.

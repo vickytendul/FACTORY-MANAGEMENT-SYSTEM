@@ -87,12 +87,6 @@ builder.Services.AddSingleton(provider =>
 });
 
 builder.Services.AddMemoryCache();
-
-// TEMPORARY - remove with Services/TemporaryFirebaseBypass.cs once the
-// Firebase read quota is resolved. Registered before FirestoreService
-// because that service takes it. Defaults to OFF.
-builder.Services.AddSingleton<TemporaryFirebaseBypass>();
-
 builder.Services.AddSingleton<FirestoreService>();
 builder.Services.AddSingleton<SummaryService>();
 builder.Services.AddSingleton<LineStrengthReportService>();

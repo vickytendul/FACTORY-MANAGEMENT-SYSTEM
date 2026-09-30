@@ -75,26 +75,46 @@ namespace FactoryManagementSystem.Controllers
         /// them twice.
         private static readonly string[] LineDepartments = { "TAILOR", "SEWING" };
 
+        /// One day, or a week/month averaged per day.
+        ///
+        /// Present and Absent over a range are the AVERAGE PER DAY, not a
+        /// sum: "455 present" has to mean the same thing whether the period
+        /// is one day or thirty, or the two columns cannot sit in the same
+        /// table. Days payroll has not posted are left out of the average
+        /// rather than counted as nobody present, which would drag a week
+        /// containing a Sunday down by a seventh for no reason.
         [HttpGet]
-        public async Task<IActionResult> Get(DateTime? date = null)
+        public async Task<IActionResult> Get(
+            DateTime? date = null, DateTime? fromDate = null, DateTime? toDate = null)
         {
             try
             {
-                var day = (date ?? DateTime.Now).Date;
+                var from = (fromDate ?? date ?? DateTime.Now).Date;
+                var day = (toDate ?? date ?? DateTime.Now).Date;
+                if (day < from) (from, day) = (day, from);
 
                 // Employee_Att returns the roster only for a range that
                 // includes the current day - a past single date comes back
-                // as an empty array. Asking from the requested day THROUGH
-                // today keeps the roster populated whichever day is asked
-                // for, and the status for `day` is read out of it by key.
-                var to = day > DateTime.Now.Date ? day : DateTime.Now.Date;
+                // as an empty array. Asking THROUGH today keeps the roster
+                // populated whichever period is asked for; the statuses for
+                // the requested days are read out of it by key.
+                var fetchTo = day > DateTime.Now.Date ? day : DateTime.Now.Date;
                 var (ok, status, body) = await _companyApiClient.FetchRawAsync(
-                    CompCode, CompanyApiClient.FormatDate(day), CompanyApiClient.FormatDate(to));
+                    CompCode, CompanyApiClient.FormatDate(from), CompanyApiClient.FormatDate(fetchTo));
 
                 if (!ok)
                     return BadRequest(new { Success = false, Message = $"Company API returned HTTP {status}." });
 
-                var people = ParseRoster(body, CompanyApiClient.FormatDate(day));
+                var days = new List<DateTime>();
+                for (var d = from; d <= day; d = d.AddDays(1)) days.Add(d);
+
+                var people = ParseRoster(body, days);
+
+                // Only the days payroll has actually posted. A day nobody
+                // has a status on is not a day everybody was absent.
+                var postedDays = days
+                    .Where(d => people.Any(p => !string.IsNullOrWhiteSpace(p.StatusOn(d))))
+                    .ToList();
 
                 var allocatedLineByCode = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
                 foreach (var t in await _layouts.GetActiveLayoutTransactionsAsync())
@@ -121,7 +141,7 @@ namespace FactoryManagementSystem.Controllers
                                         && !allocatedLineByCode.ContainsKey(p.Code))
                             .ToList();
                         foreach (var m in members) counted.Add(m.Code);
-                        rows.Add(DepartmentRow(label, members));
+                        rows.Add(DepartmentRow(label, members, postedDays));
                     }
                 }
 
@@ -138,9 +158,9 @@ namespace FactoryManagementSystem.Controllers
                             .ToList();
                         foreach (var m in pairMembers) counted.Add(m.Code);
                         teamMembers.AddRange(pairMembers);
-                        rows.Add(TeamRow(team, $"{a}&{b}", pairMembers, allocated: true));
+                        rows.Add(TeamRow(team, $"{a}&{b}", pairMembers, postedDays));
                     }
-                    rows.Add(TeamRow(team, "TEAM TOTAL", teamMembers, allocated: true, isTotal: true));
+                    rows.Add(TeamRow(team, "TEAM TOTAL", teamMembers, postedDays, isTotal: true));
                 }
 
                 AddDepartmentRows(AfterTeams);
@@ -161,20 +181,26 @@ namespace FactoryManagementSystem.Controllers
                 // Sewing staff on the roster with no active layout row
                 // today - the same people the TAILOR block reports as
                 // BAL TO ALL, listed here so the rows add up to the roster.
-                rows.Add(DepartmentRow("UNALLOCATED SEWING", unallocatedSewing));
+                rows.Add(DepartmentRow("UNALLOCATED SEWING", unallocatedSewing, postedDays));
 
                 // TRANSPORTS, SECURITY, IED, CANTEEN, CIVIL, ELECTRICAL -
                 // real departments the sheet has no row for. Shown rather
                 // than dropped, for the same reason.
-                rows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments));
+                rows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments, postedDays));
 
                 return Ok(new
                 {
-                    date = day,
-                    tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode),
-                    others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode),
+                    fromDate = from,
+                    toDate = day,
+                    // How many days the average is over - a week with two
+                    // unposted days is an average of five, and the screen
+                    // should be able to say so.
+                    postedDayCount = postedDays.Count,
+                    dayCount = days.Count,
+                    tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays),
+                    others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays),
                     rows,
-                    totalManpower = DepartmentRow("TOTAL MANPOWER", people),
+                    totalManpower = DepartmentRow("TOTAL MANPOWER", people, postedDays),
                     // Named so the figure can be read rather than guessed
                     // at: sewing people on the roster with no active layout
                     // row today, who land in OTHER DEPARTMENTS.
@@ -187,19 +213,24 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
-        private sealed record Person(string Code, string Department, string Designation, string Status)
+        private sealed record Person(
+            string Code, string Department, string Designation, Dictionary<DateTime, string> StatusByDay)
         {
             /// TAILOR vs OTHERS uses the same rule the manpower categories
             /// use, so this page and Employee Master cannot disagree about
             /// who is a tailor.
             public bool IsTailor => SummaryService.CategoryFor(Department, Designation) == "Tailor";
-            public bool IsPresent => CompanyAttendanceService.IsPresent(Status);
-            public bool IsAbsent => CompanyAttendanceService.IsUnavailable(Status);
+
+            public string StatusOn(DateTime day) =>
+                StatusByDay.TryGetValue(day.Date, out var s) ? s : string.Empty;
+
+            public bool IsPresentOn(DateTime day) => CompanyAttendanceService.IsPresent(StatusOn(day));
+            public bool IsAbsentOn(DateTime day) => CompanyAttendanceService.IsUnavailable(StatusOn(day));
         }
 
-        /// Active employees with the requested day's status read off each
-        /// record by its date key.
-        private static List<Person> ParseRoster(string body, string dateKey)
+        /// Active employees, each carrying their status for every requested
+        /// day keyed by that day.
+        private static List<Person> ParseRoster(string body, IReadOnlyList<DateTime> days)
         {
             var people = new List<Person>();
             if (string.IsNullOrWhiteSpace(body)) return people;
@@ -226,12 +257,35 @@ namespace FactoryManagementSystem.Controllers
                     && left.Date <= DateTime.Now.Date)
                     continue;
 
-                people.Add(new Person(code, Read(e, "DeptName"), Read(e, "DesignationName"), Read(e, dateKey)));
+                var byDay = new Dictionary<DateTime, string>();
+                foreach (var d in days) byDay[d.Date] = Read(e, CompanyApiClient.FormatDate(d));
+
+                people.Add(new Person(code, Read(e, "DeptName"), Read(e, "DesignationName"), byDay));
             }
             return people;
         }
 
-        private static object Block(IEnumerable<Person> people, Dictionary<string, int> allocatedLineByCode)
+        /// Average headcount per posted day. With one posted day this is
+        /// simply that day's count, so Date mode is unchanged.
+        ///
+        /// Averaged per day rather than per person, so the rows still add
+        /// up to the total exactly: each person lands in one row on each
+        /// day, so the day's row counts sum to the day's total, and so do
+        /// their averages.
+        private static double AveragePerDay(
+            IReadOnlyCollection<Person> members,
+            IReadOnlyList<DateTime> postedDays,
+            Func<Person, DateTime, bool> matches)
+        {
+            if (postedDays.Count == 0 || members.Count == 0) return 0;
+            var total = postedDays.Sum(d => (double)members.Count(p => matches(p, d)));
+            return Math.Round(total / postedDays.Count, 1);
+        }
+
+        private static object Block(
+            IEnumerable<Person> people,
+            Dictionary<string, int> allocatedLineByCode,
+            IReadOnlyList<DateTime> postedDays)
         {
             var list = people.ToList();
             var allocated = list.Count(p => allocatedLineByCode.ContainsKey(p.Code));
@@ -239,37 +293,39 @@ namespace FactoryManagementSystem.Controllers
             {
                 totalManpower = list.Count,
                 allocated,
-                present = list.Count(p => p.IsPresent),
-                absent = list.Count(p => p.IsAbsent),
+                present = AveragePerDay(list, postedDays, (p, d) => p.IsPresentOn(d)),
+                absent = AveragePerDay(list, postedDays, (p, d) => p.IsAbsentOn(d)),
                 balToAll = list.Count - allocated,
             };
         }
 
-        private static object DepartmentRow(string label, IReadOnlyCollection<Person> members) => new
-        {
-            group = (string?)null,
-            label,
-            // Allocation is a layout concept; a department row has no line,
-            // so this is null and the screen shows a dash. A zero would
-            // read as "nobody is allocated", which is a different claim.
-            allocated = (int?)null,
-            tailorPresent = members.Count(p => p.IsTailor && p.IsPresent),
-            tailorAbsent = members.Count(p => p.IsTailor && p.IsAbsent),
-            othersPresent = members.Count(p => !p.IsTailor && p.IsPresent),
-            othersAbsent = members.Count(p => !p.IsTailor && p.IsAbsent),
-            total = members.Count,
-        };
+        private static object DepartmentRow(
+            string label, IReadOnlyCollection<Person> members, IReadOnlyList<DateTime> postedDays) => new
+            {
+                group = (string?)null,
+                label,
+                // Allocation is a layout concept; a department row has no
+                // line, so this is null and the screen shows a dash. A zero
+                // would read as "nobody is allocated", a different claim.
+                allocated = (int?)null,
+                tailorPresent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsPresentOn(d)),
+                tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
+                othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),
+                othersAbsent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsAbsentOn(d)),
+                total = members.Count,
+            };
 
         private static object TeamRow(
-            string group, string label, IReadOnlyCollection<Person> members, bool allocated, bool isTotal = false) => new
+            string group, string label, IReadOnlyCollection<Person> members,
+            IReadOnlyList<DateTime> postedDays, bool isTotal = false) => new
             {
                 group,
                 label,
                 allocated = (int?)members.Count,
-                tailorPresent = members.Count(p => p.IsTailor && p.IsPresent),
-                tailorAbsent = members.Count(p => p.IsTailor && p.IsAbsent),
-                othersPresent = members.Count(p => !p.IsTailor && p.IsPresent),
-                othersAbsent = members.Count(p => !p.IsTailor && p.IsAbsent),
+                tailorPresent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsPresentOn(d)),
+                tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
+                othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),
+                othersAbsent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsAbsentOn(d)),
                 total = members.Count,
                 isTotal,
             };

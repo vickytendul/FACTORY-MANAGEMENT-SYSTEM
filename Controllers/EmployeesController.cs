@@ -1,6 +1,7 @@
 using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Layouts;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -18,16 +19,30 @@ namespace FactoryManagementSystem.Controllers
         private readonly SummaryService _summaryService;
         private readonly EmployeeSyncService _syncService;
 
+        /// Only allocation-summary uses these two: the live roster and the
+        /// live layout, so the figures are computed rather than counted up
+        /// over time.
+        private readonly CompanyApiClient _companyApiClient;
+        private readonly ILayoutRepository _layouts;
+
+        /// Compcode 17 - the same constant every other Company API call in
+        /// this backend uses.
+        private const int CompCode = 17;
+
         public EmployeesController(
             ApplicationDbContext context,
             FirestoreService firestore,
             SummaryService summaryService,
-            EmployeeSyncService syncService)
+            EmployeeSyncService syncService,
+            CompanyApiClient companyApiClient,
+            ILayoutRepository layouts)
         {
             _context = context;
             _firestore = firestore;
             _summaryService = summaryService;
             _syncService = syncService;
+            _companyApiClient = companyApiClient;
+            _layouts = layouts;
         }
 
         public class EmployeeSyncRequest
@@ -352,6 +367,142 @@ namespace FactoryManagementSystem.Controllers
         }
 
                 // GET: api/Employees/summary
+        /// Allocation counted from the two sources that actually know, at
+        /// the moment of the request.
+        ///
+        /// It replaces Employees/summary, which served a Firestore counter
+        /// document maintained by +1/-1 on every allocate and deallocate.
+        /// That document had drifted and could not recover: it claimed 258
+        /// allocated while the layout held 248, and its own
+        /// AllocatedEmployeeCodes list held 259 - three numbers from one
+        /// document, none agreeing. A missed decrement is permanent.
+        ///
+        /// Worse for the page, its TotalManpower (659) was a different
+        /// number from the Company API headcount the cards above it show
+        /// (845), so "Total - Allocated" did not reconcile with anything on
+        /// screen.
+        ///
+        /// Both figures now come from one place each, recomputed every
+        /// time:
+        ///   total     - the Company API roster, the same source the cards
+        ///               use, so the two blocks agree by construction
+        ///   allocated - distinct employee codes on an ACTIVE layout row,
+        ///               through ILayoutRepository, so it follows
+        ///               Layouts:Source like everything else
+        ///
+        /// Category comes from the roster's department and designation via
+        /// the same Categorize rule, so an allocated employee is counted
+        /// under the category their payroll record puts them in - not under
+        /// whatever the layout row happens to be called.
+        [HttpGet("allocation-summary")]
+        public async Task<IActionResult> GetAllocationSummary()
+        {
+            try
+            {
+                // LOCAL today, not UtcNow.Date. Employee_Att returns the
+                // roster only for a range that includes the current day:
+                // asked for 26-Sep..26-Sep or 28-Sep..28-Sep it returns an
+                // empty array, and for 30-Sep..30-Sep it returns all 845.
+                // On a server behind UTC, UtcNow.Date is yesterday for part
+                // of the day, and this page would silently show zeros.
+                var today = DateTime.Now.Date;
+                var roster = await _companyApiClient.FetchEmployeesAsync(CompCode, today, today);
+
+                // Relieved employees are excluded, matching the cards: the
+                // page already says its categories count active employees
+                // only.
+                var active = roster
+                    .Where(e => !string.IsNullOrWhiteSpace(e.Tno) && IsStillEmployed(e))
+                    .GroupBy(e => e.Tno!.Trim(), StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+                var allocatedCodes = (await _layouts.GetActiveLayoutTransactionsAsync())
+                    .Select(t => (t.EmployeeCode ?? string.Empty).Trim())
+                    .Where(c => c.Length > 0)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                // Others is seeded with the rest: it is where everybody the
+                // rule does not place ends up, so it must exist before the
+                // first unplaced employee arrives.
+                var totals = new Dictionary<string, int>(StringComparer.Ordinal);
+                var allocated = new Dictionary<string, int>(StringComparer.Ordinal);
+                foreach (var name in ManpowerCategories.Append(OthersCategory))
+                {
+                    totals[name] = 0;
+                    allocated[name] = 0;
+                }
+
+                foreach (var (code, employee) in active)
+                {
+                    // Everybody the rules do not place is still a real
+                    // employee, so they go under "Others" rather than being
+                    // dropped - otherwise the rows would not add up to the
+                    // headcount the cards show.
+                    var category = SummaryService.CategoryFor(employee.DeptName, employee.DesignationName)
+                                   ?? OthersCategory;
+                    totals[category]++;
+                    if (allocatedCodes.Contains(code)) allocated[category]++;
+                }
+
+                // Counted from the roster, not summed from the categories,
+                // so a bug in the category rule shows up as rows that do not
+                // add up rather than as a total that quietly agrees with it.
+                var totalCount = active.Count;
+                var totalAllocated = allocatedCodes.Count(c => active.ContainsKey(c));
+
+                return Ok(new
+                {
+                    totalCount,
+                    totalAllocated,
+                    // On a layout but not on the active roster - relieved
+                    // while still allocated, or a code payroll does not
+                    // know. Reported rather than hidden: it is the
+                    // difference between this total and the layout's own.
+                    unmatchedAllocated = allocatedCodes.Count - totalAllocated,
+                    categories = ManpowerCategories.Concat(new[] { OthersCategory })
+                        .ToDictionary(
+                            name => name,
+                            name => (object)new
+                            {
+                                total = totals[name],
+                                allocated = allocated[name],
+                            }),
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// Still on the books today.
+        ///
+        /// DateOfReleave is never blank: every active employee carries the
+        /// sentinel 9999-01-01, so testing it for emptiness excluded the
+        /// entire roster and the page showed zeros everywhere. A real
+        /// leaving date in the future is treated as still employed, which
+        /// is what the sentinel is - anything already past means gone.
+        private static bool IsStillEmployed(CompanyApiEmployee employee)
+        {
+            var raw = (employee.DateOfReleave ?? string.Empty).Trim();
+            if (raw.Length == 0) return true;
+            return !DateTime.TryParse(raw, out var leaving) || leaving.Date > DateTime.Now.Date;
+        }
+
+        /// Every category [SummaryService.CategoryFor] can return, in the
+        /// order the screens show them.
+        private static readonly string[] ManpowerCategories =
+        {
+            "Tailor", "Packing Helper", "Sewing Helper",
+            "Sewing Leader", "Quality Checking", "Store Helper",
+        };
+
+        private const string OthersCategory = "Others";
+
+        /// The Firestore counter document. Superseded by
+        /// allocation-summary above and kept only so a client that has not
+        /// been rebuilt yet keeps working; delete it once none call this.
+        [Obsolete("Use allocation-summary - this serves a counter that cannot self-correct.")]
         [HttpGet("summary")]
         public async Task<IActionResult> GetSummary()
         {

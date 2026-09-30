@@ -34,7 +34,7 @@ namespace FactoryManagementSystem.Services
         {
             var s = await GetOrCreateAsync();
             s.TotalManpower++;
-            var cat = Categorize(department, designation);
+            var cat = CategoryFor(department, designation);
             if (cat != null) IncTotal(s, cat);
             s.TotalBalance = s.TotalManpower - s.TotalAllocated;
             await _firestore.Summary.Document(SummaryDocId).SetAsync(s);
@@ -42,8 +42,8 @@ namespace FactoryManagementSystem.Services
 
         public async Task OnEmployeeUpdated(string? oldDept, string? oldDesig, string? newDept, string? newDesig)
         {
-            var oldCat = Categorize(oldDept, oldDesig);
-            var newCat = Categorize(newDept, newDesig);
+            var oldCat = CategoryFor(oldDept, oldDesig);
+            var newCat = CategoryFor(newDept, newDesig);
             if (oldCat == newCat) return;
 
             var s = await GetOrCreateAsync();
@@ -55,7 +55,7 @@ namespace FactoryManagementSystem.Services
         public async Task OnEmployeeToggled(string? department, string? designation, bool wasActive, bool nowActive, string? employeeCode = null)
         {
             var s = await GetOrCreateAsync();
-            var cat = Categorize(department, designation);
+            var cat = CategoryFor(department, designation);
 
             if (!wasActive && nowActive)
             {
@@ -95,7 +95,7 @@ namespace FactoryManagementSystem.Services
 
             s.TotalAllocated++;
             s.TotalBalance = s.TotalManpower - s.TotalAllocated;
-            var cat = Categorize(department, designation);
+            var cat = CategoryFor(department, designation);
             if (cat != null) IncAlloc(s, cat);
             await _firestore.Summary.Document(SummaryDocId).SetAsync(s);
         }
@@ -116,7 +116,7 @@ namespace FactoryManagementSystem.Services
 
             if (s.TotalAllocated > 0) s.TotalAllocated--;
             s.TotalBalance = s.TotalManpower - s.TotalAllocated;
-            var cat = Categorize(department, designation);
+            var cat = CategoryFor(department, designation);
             if (cat != null && s.TotalAllocated >= 0) DecAlloc(s, cat);
             await _firestore.Summary.Document(SummaryDocId).SetAsync(s);
         }
@@ -179,7 +179,7 @@ namespace FactoryManagementSystem.Services
             var s = new EmployeeSummary();
             foreach (var emp in employees)
             {
-                var cat = Categorize(emp.Department, emp.Designation);
+                var cat = CategoryFor(emp.Department, emp.Designation);
                 if (cat == null) continue;
                 IncTotal(s, cat);
                 if (allocatedCodes.Contains(emp.EmployeeCode))
@@ -248,7 +248,12 @@ namespace FactoryManagementSystem.Services
             }
         }
 
-        private static string? Categorize(string? department, string? designation)
+        /// The one place a department/designation becomes a manpower
+        /// category. Public so EmployeesController can classify the live
+        /// roster with the same rule this service uses on its counters -
+        /// a second copy would let the two disagree about who is a tailor
+        /// while both looked right.
+        public static string? CategoryFor(string? department, string? designation)
         {
             var dept = (department ?? "").Trim().ToUpperInvariant();
             var desig = (designation ?? "").Trim().ToUpperInvariant();

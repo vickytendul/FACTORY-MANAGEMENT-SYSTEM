@@ -165,10 +165,9 @@ namespace FactoryManagementSystem.Controllers
 
                 AddDepartmentRows(AfterTeams);
 
-                // Everybody left, split in two rather than lumped together:
-                // 451 sewing people with no layout would otherwise swamp
-                // the handful from departments the sheet has no row for,
-                // and they mean completely different things.
+                // Everybody left, split in two. Sewing staff with no layout
+                // row would otherwise swamp the handful from departments
+                // the sheet has no row for, and they mean different things.
                 var remaining = people.Where(p => !counted.Contains(p.Code)).ToList();
 
                 var unallocatedSewing = remaining
@@ -178,14 +177,18 @@ namespace FactoryManagementSystem.Controllers
                     .Where(p => !LineDepartments.Contains(p.Department, StringComparer.OrdinalIgnoreCase))
                     .ToList();
 
-                // Sewing staff on the roster with no active layout row
-                // today - the same people the TAILOR block reports as
-                // BAL TO ALL, listed here so the rows add up to the roster.
-                rows.Add(DepartmentRow("UNALLOCATED SEWING", unallocatedSewing, postedDays));
+                // The sewing staff with no active layout row today get no
+                // row of their own: the TAILOR block already reports them
+                // as BAL TO ALL, and a 451-strong row dwarfed every line on
+                // the table. They are still counted in TOTAL MANPOWER,
+                // which is worked out over the whole roster rather than by
+                // adding these rows up, so dropping the row leaves the
+                // table short of the total by exactly this many people.
+                // The count still goes out in the payload below.
 
                 // TRANSPORTS, SECURITY, IED, CANTEEN, CIVIL, ELECTRICAL -
                 // real departments the sheet has no row for. Shown rather
-                // than dropped, for the same reason.
+                // than dropped, so nobody vanishes from the report twice.
                 rows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments, postedDays));
 
                 return Ok(new
@@ -201,9 +204,9 @@ namespace FactoryManagementSystem.Controllers
                     others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays),
                     rows,
                     totalManpower = DepartmentRow("TOTAL MANPOWER", people, postedDays),
-                    // Named so the figure can be read rather than guessed
-                    // at: sewing people on the roster with no active layout
-                    // row today, who land in OTHER DEPARTMENTS.
+                    // Sewing people on the roster with no active layout row
+                    // today. They have no row of their own on the table, so
+                    // this is the only place the figure is named.
                     unallocatedSewingCount = unallocatedSewing.Count,
                 });
             }

@@ -2,6 +2,7 @@ using System.Text.Json;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using FactoryManagementSystem.Services.Layouts;
+using FactoryManagementSystem.Services.Placements;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -26,13 +27,26 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly CompanyApiClient _companyApiClient;
         private readonly ILayoutRepository _layouts;
+        private readonly EmployeePlacementRepository? _placements;
+        private readonly IConfiguration _configuration;
 
         private const int CompCode = 17;
 
-        public StrengthSummaryController(CompanyApiClient companyApiClient, ILayoutRepository layouts)
+        /// Placements are resolved rather than injected because the
+        /// repository is only registered when Supabase is configured. A
+        /// Firestore-only deployment gets null here and the department rows
+        /// simply go back to showing a dash, which is what they showed
+        /// before confirmations existed.
+        public StrengthSummaryController(
+            CompanyApiClient companyApiClient,
+            ILayoutRepository layouts,
+            IServiceProvider services,
+            IConfiguration configuration)
         {
             _companyApiClient = companyApiClient;
             _layouts = layouts;
+            _placements = services.GetService<EmployeePlacementRepository>();
+            _configuration = configuration;
         }
 
         /// The sewing teams, exactly as the sheet lays them out: four line
@@ -128,7 +142,7 @@ namespace FactoryManagementSystem.Controllers
                                     && !allocatedLineByCode.ContainsKey(p.Code))
                         .ToList();
                     foreach (var m in members) counted.Add(m.Code);
-                    departmentRows.Add(DepartmentRow(label, members, postedDays));
+                    departmentRows.Add(DepartmentRow(label, members, postedDays, load.ConfirmedCodes));
                 }
 
                 foreach (var (team, pairs) in Teams)
@@ -171,7 +185,7 @@ namespace FactoryManagementSystem.Controllers
                 // TRANSPORTS, SECURITY, IED, CANTEEN, CIVIL, ELECTRICAL -
                 // real departments the sheet has no row for. Shown rather
                 // than dropped, so nobody vanishes from the report twice.
-                departmentRows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments, postedDays));
+                departmentRows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments, postedDays, load.ConfirmedCodes));
 
                 var rows = new List<object>(departmentRows.Count + teamRows.Count);
                 rows.AddRange(departmentRows);
@@ -187,7 +201,7 @@ namespace FactoryManagementSystem.Controllers
                     postedDayCount = postedDays.Count,
                     dayCount = days,
                     tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays),
-                    others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays),
+                    others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays, load.ConfirmedCodes),
                     rows,
                     totalManpower = DepartmentRow("TOTAL MANPOWER", people, postedDays),
                     // Sewing people on the roster with no active layout row
@@ -282,7 +296,8 @@ namespace FactoryManagementSystem.Controllers
             List<DateTime> PostedDays,
             Dictionary<string, int> AllocatedLineByCode,
             DateTime From,
-            DateTime To);
+            DateTime To,
+            HashSet<string> ConfirmedCodes);
 
         /// The roster, the days payroll has posted and who is on a line -
         /// the three things every action here starts from. Shared so the
@@ -325,7 +340,34 @@ namespace FactoryManagementSystem.Controllers
                 allocatedLineByCode[code] = t.LineId;
             }
 
-            return new RosterLoad(people, postedDays, allocatedLineByCode, from, day);
+            return new RosterLoad(
+                people, postedDays, allocatedLineByCode, from, day,
+                await ConfirmedCodesAsync(people));
+        }
+
+        /// Everyone whose confirmed placement is still believed. These are
+        /// the people a department row can call allocated: they will never
+        /// have a layout row, so somebody saying where they are is the only
+        /// placement they will ever get.
+        private async Task<HashSet<string>> ConfirmedCodesAsync(IEnumerable<Person> people)
+        {
+            var confirmed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (_placements is null) return confirmed;
+
+            var placements = await _placements.GetAllAsync();
+            if (placements.Count == 0) return confirmed;
+
+            var cutoff = DateTime.Now.Date.AddDays(-PlacementRules.VerifyWithinDays(_configuration));
+
+            foreach (var p in people)
+            {
+                if (placements.TryGetValue(p.Code, out var placement)
+                    && PlacementRules.IsFresh(placement, p.Department, p.Designation, cutoff))
+                {
+                    confirmed.Add(p.Code);
+                }
+            }
+            return confirmed;
         }
 
         private sealed record Person(
@@ -399,13 +441,25 @@ namespace FactoryManagementSystem.Controllers
             return Math.Round(total / postedDays.Count, 1);
         }
 
+        /// [confirmed] is passed for OTHERS and withheld for TAILOR, which
+        /// is deliberate and not an oversight.
+        ///
+        /// A tailor who is not on a line still has to be put on one -
+        /// confirming that he is a tailor in sewing does not place him at a
+        /// station, and letting a confirmation count here would collapse
+        /// the one number the floor uses to staff the lines each morning.
+        /// A department person is never going on a line, so a confirmation
+        /// is the only placement they will ever have.
         private static object Block(
             IEnumerable<Person> people,
             Dictionary<string, int> allocatedLineByCode,
-            IReadOnlyList<DateTime> postedDays)
+            IReadOnlyList<DateTime> postedDays,
+            IReadOnlySet<string>? confirmed = null)
         {
             var list = people.ToList();
-            var allocated = list.Count(p => allocatedLineByCode.ContainsKey(p.Code));
+            var allocated = list.Count(p =>
+                allocatedLineByCode.ContainsKey(p.Code)
+                || (confirmed is not null && confirmed.Contains(p.Code)));
             return new
             {
                 totalManpower = list.Count,
@@ -417,14 +471,25 @@ namespace FactoryManagementSystem.Controllers
         }
 
         private static object DepartmentRow(
-            string label, IReadOnlyCollection<Person> members, IReadOnlyList<DateTime> postedDays) => new
+            string label, IReadOnlyCollection<Person> members, IReadOnlyList<DateTime> postedDays,
+            IReadOnlySet<string>? confirmed = null) => new
             {
                 group = (string?)null,
                 label,
-                // Allocation is a layout concept; a department row has no
-                // line, so this is null and the screen shows a dash. A zero
-                // would read as "nobody is allocated", a different claim.
-                allocated = (int?)null,
+                // How many of this row's people somebody has confirmed the
+                // whereabouts of. Nobody here will ever have a layout row -
+                // a department row counts exactly the people who are NOT on
+                // a line - so a confirmation is the only placement they can
+                // get, and counting it is what makes this column mean the
+                // same thing as it does on a team row: we know where this
+                // person is.
+                //
+                // Null, and so a dash, when confirmations are unavailable.
+                // A zero there would read as "nobody is placed", which is a
+                // claim rather than an absence of one.
+                allocated = confirmed is null
+                    ? (int?)null
+                    : members.Count(m => confirmed.Contains(m.Code)),
                 tailorPresent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsPresentOn(d)),
                 tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
                 othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),

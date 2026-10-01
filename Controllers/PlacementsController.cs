@@ -55,10 +55,7 @@ namespace FactoryManagementSystem.Controllers
         /// March may have moved by October, and a record that never expires
         /// would quietly turn into a number that reads well and means
         /// nothing. Configurable because it is a policy, not a fact.
-        private int VerifyWithinDays =>
-            int.TryParse(_configuration["Placements:VerifyWithinDays"], out var d) && d > 0
-                ? d
-                : 90;
+        private int VerifyWithinDays => PlacementRules.VerifyWithinDays(_configuration);
 
         /// Everyone on the roster, with what payroll says, what was
         /// confirmed, and whether we currently know where they are.
@@ -334,18 +331,13 @@ namespace FactoryManagementSystem.Controllers
                 placements.TryGetValue(code, out var placement);
                 var onLine = allocatedLineByCode.TryGetValue(code, out var lineId);
 
-                // Payroll having re-filed them since the confirmation makes
-                // that confirmation out of date however recent it is: it
-                // was about a posting they no longer hold.
                 var payrollChanged = placement is not null
-                    && (!string.Equals(placement.PayrollDepartment, payrollDepartment,
-                            StringComparison.OrdinalIgnoreCase)
-                        || !string.Equals(placement.PayrollDesignation, payrollDesignation,
-                            StringComparison.OrdinalIgnoreCase));
+                    && PlacementRules.PayrollChanged(
+                        placement, payrollDepartment, payrollDesignation);
 
                 var fresh = placement is not null
-                    && placement.VerifiedOn.Date >= cutoff
-                    && !payrollChanged;
+                    && PlacementRules.IsFresh(
+                        placement, payrollDepartment, payrollDesignation, cutoff);
 
                 // A layout row outranks a confirmation: it says where they
                 // are standing today, which is better evidence than

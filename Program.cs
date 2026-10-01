@@ -1,6 +1,7 @@
 using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
+using FactoryManagementSystem.Services.Placements;
 using FactoryManagementSystem.Services.Skills;
 using Npgsql;
 using FactoryManagementSystem.Data;
@@ -120,10 +121,16 @@ var attendanceSource = (builder.Configuration["Attendance:Source"] ?? "firebase"
 // One shared connection pool, registered when EITHER migration needs it.
 // Scoping this to the Skills flag alone would mean Layouts:Source=dual with
 // Skills:Source=firebase could not resolve a data source at all.
+// Confirmed placements live in Supabase and nowhere else - new data with
+// no Firestore history, so no source flag. Its presence is simply whether
+// a connection string was configured at all.
+var hasSupabase = !string.IsNullOrWhiteSpace(builder.Configuration["Supabase:ConnectionString"]);
+
 if (skillsSource is "supabase" or "dual"
     || layoutsSource is "supabase" or "dual"
     || ccsSource is "supabase" or "dual"
-    || attendanceSource is "supabase" or "dual")
+    || attendanceSource is "supabase" or "dual"
+    || hasSupabase)
 {
     var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
         ?? throw new Exception(
@@ -244,6 +251,13 @@ builder.Services.AddSingleton<ICcRepository>(sp => ccsSource switch
         sp.GetRequiredService<ILogger<DualReadCcRepository>>()),
     _ => sp.GetRequiredService<FirestoreCcRepository>(),
 });
+
+// Supabase only, no flag - see EmployeePlacementRepository. Registered
+// only when a connection string exists, so a Firestore-only deployment
+// still boots; PlacementsController is the one thing that will not
+// resolve there, which is correct, because it has nowhere to read from.
+if (hasSupabase)
+    builder.Services.AddSingleton<EmployeePlacementRepository>();
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch
 {

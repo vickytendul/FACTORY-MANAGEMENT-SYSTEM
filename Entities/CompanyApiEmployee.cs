@@ -45,5 +45,21 @@ namespace FactoryManagementSystem.Entities
         /// the same way as every other fixed field above.
         [JsonPropertyName("Bar_Code")]
         public string? Barcode { get; set; }
+
+        /// DateOfReleave is never blank for an active employee - payroll
+        /// carries the sentinel 9999-01-01 - so this compares the date
+        /// rather than testing for emptiness. A leaving date still in the
+        /// future means they are here today.
+        ///
+        /// Lives on the entity because more than one caller needs the rule
+        /// and a second copy of it would be a second chance to get it
+        /// wrong: the first attempt at this filter tested for a blank field
+        /// and excluded the entire roster.
+        public bool IsStillEmployedOn(DateTime asOf)
+        {
+            var raw = (DateOfReleave ?? string.Empty).Trim();
+            if (raw.Length == 0) return true;
+            return !DateTime.TryParse(raw, out var leaving) || leaving.Date > asOf.Date;
+        }
     }
 }

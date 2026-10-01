@@ -126,6 +126,12 @@ namespace FactoryManagementSystem.Controllers
                 // to line 1 is counted under TEAM 1, where the supervisor
                 // will look for them - counting them in both places made
                 // the rows add to 853 against a roster of 846.
+                // Everybody each side covers, kept so the two totals are
+                // worked out over the people rather than by adding up rows
+                // that are already rounded averages.
+                var indirectMembers = new List<Person>();
+                var directMembers = new List<Person>();
+
                 foreach (var department in departments)
                 {
                     var members = people
@@ -135,6 +141,7 @@ namespace FactoryManagementSystem.Controllers
                                     && !allocatedLineByCode.ContainsKey(p.Code))
                         .ToList();
                     foreach (var m in members) counted.Add(m.Code);
+                    indirectMembers.AddRange(members);
                     departmentRows.Add(DepartmentRow(department, members, postedDays, load.ConfirmedCodes));
                 }
 
@@ -151,6 +158,7 @@ namespace FactoryManagementSystem.Controllers
                         teamMembers.AddRange(pairMembers);
                         teamRows.Add(TeamRow(team, $"{a}&{b}", pairMembers, postedDays));
                     }
+                    directMembers.AddRange(teamMembers);
                     teamRows.Add(TeamRow(team, "TEAM TOTAL", teamMembers, postedDays, isTotal: true));
                 }
 
@@ -169,10 +177,6 @@ namespace FactoryManagementSystem.Controllers
                     .Where(p => !counted.Contains(p.Code))
                     .ToList();
 
-                var rows = new List<object>(departmentRows.Count + teamRows.Count);
-                rows.AddRange(departmentRows);
-                rows.AddRange(teamRows);
-
                 return Ok(new
                 {
                     fromDate = from,
@@ -184,7 +188,24 @@ namespace FactoryManagementSystem.Controllers
                     dayCount = days,
                     tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays),
                     others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays, load.ConfirmedCodes),
-                    rows,
+
+                    // Two tables, not one list the screen has to sort out.
+                    //
+                    // INDIRECT is the departments: nobody on a line, and
+                    // next to no tailors, so the TAILOR/OTHERS split reads 0
+                    // all the way down and the table shows plain Present and
+                    // Absent instead.
+                    //
+                    // DIRECT is the five teams: the split is the whole point
+                    // there, since a line is tailors plus the helpers and
+                    // checkers working alongside them.
+                    indirect = departmentRows,
+                    indirectTotal = DepartmentRow(
+                        "INDIRECT TOTAL", indirectMembers, postedDays, load.ConfirmedCodes),
+                    direct = teamRows,
+                    directTotal = TeamRow(
+                        "", "DIRECT TOTAL", directMembers, postedDays, isTotal: true),
+
                     totalManpower = DepartmentRow("TOTAL MANPOWER", people, postedDays),
                     // Sewing people on the roster with no active layout row
                     // today. They have no row of their own on the table, so
@@ -476,6 +497,15 @@ namespace FactoryManagementSystem.Controllers
                 tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
                 othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),
                 othersAbsent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsAbsentOn(d)),
+                // Everybody, tailor or not. The indirect table shows this
+                // instead of the split, because a department has no tailors
+                // to speak of and those columns read 0 all the way down.
+                //
+                // Worked out here rather than added up on the screen. Both
+                // halves are averages rounded to a decimal, and adding two
+                // rounded numbers is not the same as rounding their sum.
+                present = AveragePerDay(members, postedDays, (p, d) => p.IsPresentOn(d)),
+                absent = AveragePerDay(members, postedDays, (p, d) => p.IsAbsentOn(d)),
                 total = members.Count,
             };
 
@@ -490,6 +520,8 @@ namespace FactoryManagementSystem.Controllers
                 tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
                 othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),
                 othersAbsent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsAbsentOn(d)),
+                present = AveragePerDay(members, postedDays, (p, d) => p.IsPresentOn(d)),
+                absent = AveragePerDay(members, postedDays, (p, d) => p.IsAbsentOn(d)),
                 total = members.Count,
                 isTotal,
             };

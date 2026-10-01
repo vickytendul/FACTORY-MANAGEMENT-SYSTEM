@@ -220,6 +220,14 @@ namespace FactoryManagementSystem.Controllers
 
                 var wantTailors = !string.Equals(category, "others", StringComparison.OrdinalIgnoreCase);
 
+                // Which day "present" and "absent" are about. The last day
+                // payroll has posted: on a single date that is the date
+                // asked for, and over a week or a month it is the most
+                // recent day there is anything to say about.
+                var onDay = load.PostedDays.Count == 0
+                    ? (DateTime?)null
+                    : load.PostedDays[^1];
+
                 var people = load.People
                     .Where(p => p.IsTailor == wantTailors)
                     .Where(p => !load.AllocatedLineByCode.ContainsKey(p.Code))
@@ -236,11 +244,17 @@ namespace FactoryManagementSystem.Controllers
                         // into something that reads like a headcount.
                         presentDays = load.PostedDays.Count(p.IsPresentOn),
                         absentDays = load.PostedDays.Count(p.IsAbsentOn),
-                        // The last posted day's own status, which is what a
-                        // single-date view is actually asking about.
-                        status = load.PostedDays.Count == 0
+                        // PRESENT / ABSENT / "" on that day. Decided here
+                        // rather than in the app: what a payroll status
+                        // string means is this backend's rule, and the
+                        // screen has no business parsing it a second time.
+                        // Empty is neither - no status posted for them.
+                        state = onDay is not { } d
                             ? string.Empty
-                            : p.StatusOn(load.PostedDays[^1]),
+                            : p.IsPresentOn(d) ? "PRESENT"
+                            : p.IsAbsentOn(d) ? "ABSENT"
+                            : string.Empty,
+                        status = onDay is { } s ? p.StatusOn(s) : string.Empty,
                     })
                     .ToList();
 
@@ -250,7 +264,10 @@ namespace FactoryManagementSystem.Controllers
                     fromDate = load.From,
                     toDate = load.To,
                     postedDayCount = load.PostedDays.Count,
+                    onDate = onDay,
                     count = people.Count,
+                    presentCount = people.Count(p => p.state == "PRESENT"),
+                    absentCount = people.Count(p => p.state == "ABSENT"),
                     people,
                 });
             }

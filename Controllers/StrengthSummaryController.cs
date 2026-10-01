@@ -206,7 +206,15 @@ namespace FactoryManagementSystem.Controllers
                     directTotal = TeamRow(
                         "", "DIRECT TOTAL", directMembers, postedDays, isTotal: true),
 
-                    totalManpower = DepartmentRow("TOTAL MANPOWER", people, postedDays),
+                    // Allocated across the whole roster means the same
+                    // thing it means on every row above: we know where
+                    // this person is. A layout row says so for the teams,
+                    // a confirmation says so for the departments.
+                    totalManpower = DepartmentRow(
+                        "TOTAL MANPOWER", people, postedDays,
+                        load.ConfirmedCodes
+                            .Concat(allocatedLineByCode.Keys)
+                            .ToHashSet(StringComparer.OrdinalIgnoreCase)),
                     // Sewing people on the roster with no active layout row
                     // today. They have no row of their own on the table, so
                     // this is the only place the figure is named.

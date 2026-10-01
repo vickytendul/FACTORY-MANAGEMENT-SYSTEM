@@ -54,19 +54,30 @@ namespace FactoryManagementSystem.Controllers
         /// one that matters: STORES not STORE, MAINTENENCE not MAINTANANCE.
         /// FABRIC is not here because payroll has no such department - the
         /// row was dropped rather than left permanently empty.
-        private static readonly (string Label, string[] Departments)[] BeforeTeams =
+        /// Every department row, in the order the table lists them - all of
+        /// them above TEAM 1, so the teams read as one unbroken block.
+        private static readonly (string Label, string[] Departments)[] DepartmentBlock =
         {
             ("ADMIN & STAFF", new[] { "ADMIN" }),
             ("HR", new[] { "HR" }),
             ("STORE", new[] { "STORE", "STORES" }),
             ("CUTTING", new[] { "CUTTING" }),
             ("QUALITY", new[] { "QUALITY" }),
-        };
-
-        private static readonly (string Label, string[] Departments)[] AfterTeams =
-        {
             ("MAINTANANCE", new[] { "MAINTENENCE", "MAINTENANCE" }),
             ("PACKING FGS", new[] { "PACKING" }),
+            // Several spellings, because which one payroll uses has not
+            // been confirmed. Until somebody is filed under one of them
+            // this row reads 0 and those people stay in OTHER DEPARTMENTS;
+            // add the real spelling here when it is known.
+            ("TRAINING AND DEVELOPMENT", new[]
+            {
+                "TRAINING",
+                "TRAINING AND DEVELOPMENT",
+                "TRAINING & DEVELOPMENT",
+                "TRAINING AND DEVELOPEMENT",
+                "TRAINING DEVELOPMENT",
+                "T&D",
+            }),
         };
 
         /// Departments that belong to a sewing line rather than to a
@@ -89,42 +100,20 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var from = (fromDate ?? date ?? DateTime.Now).Date;
-                var day = (toDate ?? date ?? DateTime.Now).Date;
-                if (day < from) (from, day) = (day, from);
+                var load = await LoadAsync(date, fromDate, toDate);
+                var from = load.From;
+                var day = load.To;
+                var people = load.People;
+                var postedDays = load.PostedDays;
+                var allocatedLineByCode = load.AllocatedLineByCode;
+                var days = (day - from).Days + 1;
 
-                // Employee_Att returns the roster only for a range that
-                // includes the current day - a past single date comes back
-                // as an empty array. Asking THROUGH today keeps the roster
-                // populated whichever period is asked for; the statuses for
-                // the requested days are read out of it by key.
-                var fetchTo = day > DateTime.Now.Date ? day : DateTime.Now.Date;
-                var (ok, status, body) = await _companyApiClient.FetchRawAsync(
-                    CompCode, CompanyApiClient.FormatDate(from), CompanyApiClient.FormatDate(fetchTo));
-
-                if (!ok)
-                    return BadRequest(new { Success = false, Message = $"Company API returned HTTP {status}." });
-
-                var days = new List<DateTime>();
-                for (var d = from; d <= day; d = d.AddDays(1)) days.Add(d);
-
-                var people = ParseRoster(body, days);
-
-                // Only the days payroll has actually posted. A day nobody
-                // has a status on is not a day everybody was absent.
-                var postedDays = days
-                    .Where(d => people.Any(p => !string.IsNullOrWhiteSpace(p.StatusOn(d))))
-                    .ToList();
-
-                var allocatedLineByCode = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                foreach (var t in await _layouts.GetActiveLayoutTransactionsAsync())
-                {
-                    var code = (t.EmployeeCode ?? string.Empty).Trim();
-                    if (code.Length == 0) continue;
-                    allocatedLineByCode[code] = t.LineId;
-                }
-
-                var rows = new List<object>();
+                // Built as two lists rather than one, because OTHER
+                // DEPARTMENTS belongs at the end of the department block but
+                // can only be worked out once the teams have claimed their
+                // people. Order of assembly, order of display: separate.
+                var departmentRows = new List<object>();
+                var teamRows = new List<object>();
                 var counted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                 // A department row counts the people of that department who
@@ -132,20 +121,15 @@ namespace FactoryManagementSystem.Controllers
                 // to line 1 is counted under TEAM 1, where the supervisor
                 // will look for them - counting them in both places made
                 // the rows add to 853 against a roster of 846.
-                void AddDepartmentRows((string Label, string[] Departments)[] block)
+                foreach (var (label, departments) in DepartmentBlock)
                 {
-                    foreach (var (label, departments) in block)
-                    {
-                        var members = people
-                            .Where(p => departments.Contains(p.Department, StringComparer.OrdinalIgnoreCase)
-                                        && !allocatedLineByCode.ContainsKey(p.Code))
-                            .ToList();
-                        foreach (var m in members) counted.Add(m.Code);
-                        rows.Add(DepartmentRow(label, members, postedDays));
-                    }
+                    var members = people
+                        .Where(p => departments.Contains(p.Department, StringComparer.OrdinalIgnoreCase)
+                                    && !allocatedLineByCode.ContainsKey(p.Code))
+                        .ToList();
+                    foreach (var m in members) counted.Add(m.Code);
+                    departmentRows.Add(DepartmentRow(label, members, postedDays));
                 }
-
-                AddDepartmentRows(BeforeTeams);
 
                 foreach (var (team, pairs) in Teams)
                 {
@@ -158,12 +142,10 @@ namespace FactoryManagementSystem.Controllers
                             .ToList();
                         foreach (var m in pairMembers) counted.Add(m.Code);
                         teamMembers.AddRange(pairMembers);
-                        rows.Add(TeamRow(team, $"{a}&{b}", pairMembers, postedDays));
+                        teamRows.Add(TeamRow(team, $"{a}&{b}", pairMembers, postedDays));
                     }
-                    rows.Add(TeamRow(team, "TEAM TOTAL", teamMembers, postedDays, isTotal: true));
+                    teamRows.Add(TeamRow(team, "TEAM TOTAL", teamMembers, postedDays, isTotal: true));
                 }
-
-                AddDepartmentRows(AfterTeams);
 
                 // Everybody left, split in two. Sewing staff with no layout
                 // row would otherwise swamp the handful from departments
@@ -189,7 +171,11 @@ namespace FactoryManagementSystem.Controllers
                 // TRANSPORTS, SECURITY, IED, CANTEEN, CIVIL, ELECTRICAL -
                 // real departments the sheet has no row for. Shown rather
                 // than dropped, so nobody vanishes from the report twice.
-                rows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments, postedDays));
+                departmentRows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments, postedDays));
+
+                var rows = new List<object>(departmentRows.Count + teamRows.Count);
+                rows.AddRange(departmentRows);
+                rows.AddRange(teamRows);
 
                 return Ok(new
                 {
@@ -199,7 +185,7 @@ namespace FactoryManagementSystem.Controllers
                     // unposted days is an average of five, and the screen
                     // should be able to say so.
                     postedDayCount = postedDays.Count,
-                    dayCount = days.Count,
+                    dayCount = days,
                     tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays),
                     others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays),
                     rows,
@@ -216,8 +202,118 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// The people behind a BAL TO ALL figure: everyone in that category
+        /// with no active layout row. The card already says how many; this
+        /// says who, which is the one question a headcount always provokes.
+        ///
+        /// Deliberately the same arithmetic as Block() - count the category,
+        /// drop the allocated - so the list length can never disagree with
+        /// the number on the tile that opened it.
+        [HttpGet("unallocated")]
+        public async Task<IActionResult> Unallocated(
+            string category = "tailor",
+            DateTime? date = null, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            try
+            {
+                var load = await LoadAsync(date, fromDate, toDate);
+
+                var wantTailors = !string.Equals(category, "others", StringComparison.OrdinalIgnoreCase);
+
+                var people = load.People
+                    .Where(p => p.IsTailor == wantTailors)
+                    .Where(p => !load.AllocatedLineByCode.ContainsKey(p.Code))
+                    .OrderBy(p => p.Department, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
+                    .Select(p => new
+                    {
+                        code = p.Code,
+                        name = p.Name,
+                        department = p.Department,
+                        designation = p.Designation,
+                        // Over a range these count the posted days, so a
+                        // month of absence is visible rather than averaged
+                        // into something that reads like a headcount.
+                        presentDays = load.PostedDays.Count(p.IsPresentOn),
+                        absentDays = load.PostedDays.Count(p.IsAbsentOn),
+                        // The last posted day's own status, which is what a
+                        // single-date view is actually asking about.
+                        status = load.PostedDays.Count == 0
+                            ? string.Empty
+                            : p.StatusOn(load.PostedDays[^1]),
+                    })
+                    .ToList();
+
+                return Ok(new
+                {
+                    category = wantTailors ? "TAILOR" : "OTHERS",
+                    fromDate = load.From,
+                    toDate = load.To,
+                    postedDayCount = load.PostedDays.Count,
+                    count = people.Count,
+                    people,
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        private sealed record RosterLoad(
+            List<Person> People,
+            List<DateTime> PostedDays,
+            Dictionary<string, int> AllocatedLineByCode,
+            DateTime From,
+            DateTime To);
+
+        /// The roster, the days payroll has posted and who is on a line -
+        /// the three things every action here starts from. Shared so the
+        /// summary and the drill-down cannot drift apart on who counts as
+        /// employed, posted or allocated.
+        private async Task<RosterLoad> LoadAsync(
+            DateTime? date, DateTime? fromDate, DateTime? toDate)
+        {
+            var from = (fromDate ?? date ?? DateTime.Now).Date;
+            var day = (toDate ?? date ?? DateTime.Now).Date;
+            if (day < from) (from, day) = (day, from);
+
+            // Employee_Att returns the roster only for a range that includes
+            // the current day - a past single date comes back as an empty
+            // array. Asking THROUGH today keeps the roster populated
+            // whichever period is asked for; the statuses for the requested
+            // days are read out of it by key.
+            var fetchTo = day > DateTime.Now.Date ? day : DateTime.Now.Date;
+            var (ok, status, body) = await _companyApiClient.FetchRawAsync(
+                CompCode, CompanyApiClient.FormatDate(from), CompanyApiClient.FormatDate(fetchTo));
+
+            if (!ok) throw new InvalidOperationException($"Company API returned HTTP {status}.");
+
+            var days = new List<DateTime>();
+            for (var d = from; d <= day; d = d.AddDays(1)) days.Add(d);
+
+            var people = ParseRoster(body, days);
+
+            // Only the days payroll has actually posted. A day nobody has a
+            // status on is not a day everybody was absent.
+            var postedDays = days
+                .Where(d => people.Any(p => !string.IsNullOrWhiteSpace(p.StatusOn(d))))
+                .ToList();
+
+            var allocatedLineByCode = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in await _layouts.GetActiveLayoutTransactionsAsync())
+            {
+                var code = (t.EmployeeCode ?? string.Empty).Trim();
+                if (code.Length == 0) continue;
+                allocatedLineByCode[code] = t.LineId;
+            }
+
+            return new RosterLoad(people, postedDays, allocatedLineByCode, from, day);
+        }
+
         private sealed record Person(
-            string Code, string Department, string Designation, Dictionary<DateTime, string> StatusByDay)
+            string Code, string Name, string Department, string Designation,
+            Dictionary<DateTime, string> StatusByDay)
         {
             /// TAILOR vs OTHERS uses the same rule the manpower categories
             /// use, so this page and Employee Master cannot disagree about
@@ -263,7 +359,8 @@ namespace FactoryManagementSystem.Controllers
                 var byDay = new Dictionary<DateTime, string>();
                 foreach (var d in days) byDay[d.Date] = Read(e, CompanyApiClient.FormatDate(d));
 
-                people.Add(new Person(code, Read(e, "DeptName"), Read(e, "DesignationName"), byDay));
+                people.Add(new Person(
+                    code, Read(e, "Name"), Read(e, "DeptName"), Read(e, "DesignationName"), byDay));
             }
             return people;
         }

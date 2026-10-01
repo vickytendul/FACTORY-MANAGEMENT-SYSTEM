@@ -158,11 +158,14 @@ namespace FactoryManagementSystem.Controllers
         {
             public string EmployeeCode { get; set; } = string.Empty;
 
-            /// Where they really are. Left empty means "payroll is right",
-            /// and the payroll department is recorded as the actual one -
-            /// so a confirmation always says something, never nothing.
-            public string ActualDepartment { get; set; } = string.Empty;
-            public string ActualWork { get; set; } = string.Empty;
+            /// Where they are now and what they do now. Either left empty
+            /// means payroll is right about that half, and the payroll value
+            /// is recorded as the current one - so a confirmation always
+            /// says something, never nothing. Answering No to one half and
+            /// leaving the other alone is normal: a person often moves
+            /// department without changing job, or the reverse.
+            public string CurrentDepartment { get; set; } = string.Empty;
+            public string CurrentDesignation { get; set; } = string.Empty;
             public string Remarks { get; set; } = string.Empty;
         }
 
@@ -200,15 +203,18 @@ namespace FactoryManagementSystem.Controllers
                     }
 
                     var payrollDepartment = (employee.DeptName ?? string.Empty).Trim();
-                    var actual = (item.ActualDepartment ?? string.Empty).Trim();
+                    var payrollDesignation = (employee.DesignationName ?? string.Empty).Trim();
+
+                    var department = (item.CurrentDepartment ?? string.Empty).Trim();
+                    var designation = (item.CurrentDesignation ?? string.Empty).Trim();
 
                     placements.Add(new EmployeePlacement
                     {
                         EmployeeCode = code,
                         PayrollDepartment = payrollDepartment,
-                        PayrollDesignation = (employee.DesignationName ?? string.Empty).Trim(),
-                        ActualDepartment = actual.Length == 0 ? payrollDepartment : actual,
-                        ActualWork = (item.ActualWork ?? string.Empty).Trim(),
+                        PayrollDesignation = payrollDesignation,
+                        CurrentDepartment = department.Length == 0 ? payrollDepartment : department,
+                        CurrentDesignation = designation.Length == 0 ? payrollDesignation : designation,
                         Remarks = (item.Remarks ?? string.Empty).Trim(),
                         VerifiedOn = now,
                         VerifiedBy = (request.VerifiedBy ?? string.Empty).Trim(),
@@ -259,9 +265,10 @@ namespace FactoryManagementSystem.Controllers
         private sealed record Row(
             string Code, string Name,
             string PayrollDepartment, string PayrollDesignation,
-            string ActualDepartment, string ActualWork, string Remarks,
+            string CurrentDepartment, string CurrentDesignation, string Remarks,
             DateTime? VerifiedOn, string VerifiedBy,
-            int? LineId, string State, bool IsMismatch, bool PayrollChanged);
+            int? LineId, string State, bool IsMismatch,
+            bool DepartmentDiffers, bool DesignationDiffers, bool PayrollChanged);
 
         private object Project(Row r) => new
         {
@@ -269,14 +276,18 @@ namespace FactoryManagementSystem.Controllers
             name = r.Name,
             payrollDepartment = r.PayrollDepartment,
             payrollDesignation = r.PayrollDesignation,
-            actualDepartment = r.ActualDepartment,
-            actualWork = r.ActualWork,
+            currentDepartment = r.CurrentDepartment,
+            currentDesignation = r.CurrentDesignation,
             remarks = r.Remarks,
             verifiedOn = r.VerifiedOn,
             verifiedBy = r.VerifiedBy,
             lineId = r.LineId,
             state = r.State,
             isMismatch = r.IsMismatch,
+            // Which half is wrong, so the screen can say "department" or
+            // "designation" rather than only that something is.
+            departmentDiffers = r.DepartmentDiffers,
+            designationDiffers = r.DesignationDiffers,
             // True when payroll has moved them since they were confirmed.
             // The confirmation was about a posting they no longer hold, so
             // it has to be made again - a different thing from simply
@@ -347,24 +358,35 @@ namespace FactoryManagementSystem.Controllers
                             ? States.Confirmed
                             : States.Stale;
 
-                var isMismatch = placement is not null
-                    && placement.ActualDepartment.Length > 0
-                    && !string.Equals(placement.ActualDepartment, payrollDepartment,
-                        StringComparison.OrdinalIgnoreCase);
+                // Either half counts. A person can sit in the right
+                // department doing a different job, or keep their job while
+                // sitting somewhere else, and the GM asked about both.
+                static bool Differs(string current, string payroll) =>
+                    current.Length > 0
+                    && !string.Equals(current, payroll, StringComparison.OrdinalIgnoreCase);
+
+                var departmentDiffers = placement is not null
+                    && Differs(placement.CurrentDepartment, payrollDepartment);
+                var designationDiffers = placement is not null
+                    && Differs(placement.CurrentDesignation, payrollDesignation);
+
+                var isMismatch = departmentDiffers || designationDiffers;
 
                 rows.Add(new Row(
                     code,
                     (e.Name ?? string.Empty).Trim(),
                     payrollDepartment,
                     payrollDesignation,
-                    placement?.ActualDepartment ?? string.Empty,
-                    placement?.ActualWork ?? string.Empty,
+                    placement?.CurrentDepartment ?? string.Empty,
+                    placement?.CurrentDesignation ?? string.Empty,
                     placement?.Remarks ?? string.Empty,
                     placement?.VerifiedOn,
                     placement?.VerifiedBy ?? string.Empty,
                     onLine ? lineId : null,
                     state,
                     isMismatch,
+                    departmentDiffers,
+                    designationDiffers,
                     payrollChanged));
             }
 

@@ -21,7 +21,7 @@ namespace FactoryManagementSystem.Services.Placements
 
         private const string Cols = """
             select employee_code, payroll_department, payroll_designation,
-                   actual_department, actual_work, remarks, verified_on, verified_by
+                   current_department, current_designation, remarks, verified_on, verified_by
             from public.employee_placements
             """;
 
@@ -30,8 +30,8 @@ namespace FactoryManagementSystem.Services.Placements
             EmployeeCode = r.GetString(0),
             PayrollDepartment = r.GetString(1),
             PayrollDesignation = r.GetString(2),
-            ActualDepartment = r.GetString(3),
-            ActualWork = r.GetString(4),
+            CurrentDepartment = r.GetString(3),
+            CurrentDesignation = r.GetString(4),
             Remarks = r.GetString(5),
             VerifiedOn = r.GetDateTime(6),
             VerifiedBy = r.GetString(7),
@@ -68,13 +68,13 @@ namespace FactoryManagementSystem.Services.Placements
                 await using var cmd = new NpgsqlCommand("""
                     insert into public.employee_placements
                         (employee_code, payroll_department, payroll_designation,
-                         actual_department, actual_work, remarks, verified_on, verified_by)
+                         current_department, current_designation, remarks, verified_on, verified_by)
                     values (@code, @pdept, @pdesig, @adept, @awork, @remarks, @on, @by)
                     on conflict (employee_code) do update set
                         payroll_department  = excluded.payroll_department,
                         payroll_designation = excluded.payroll_designation,
-                        actual_department   = excluded.actual_department,
-                        actual_work         = excluded.actual_work,
+                        current_department   = excluded.current_department,
+                        current_designation         = excluded.current_designation,
                         remarks             = excluded.remarks,
                         verified_on         = excluded.verified_on,
                         verified_by         = excluded.verified_by
@@ -83,8 +83,8 @@ namespace FactoryManagementSystem.Services.Placements
                 cmd.Parameters.AddWithValue("code", p.EmployeeCode);
                 cmd.Parameters.AddWithValue("pdept", p.PayrollDepartment);
                 cmd.Parameters.AddWithValue("pdesig", p.PayrollDesignation);
-                cmd.Parameters.AddWithValue("adept", p.ActualDepartment);
-                cmd.Parameters.AddWithValue("awork", p.ActualWork);
+                cmd.Parameters.AddWithValue("adept", p.CurrentDepartment);
+                cmd.Parameters.AddWithValue("awork", p.CurrentDesignation);
                 cmd.Parameters.AddWithValue("remarks", p.Remarks);
                 cmd.Parameters.AddWithValue("on", p.VerifiedOn);
                 cmd.Parameters.AddWithValue("by", p.VerifiedBy);

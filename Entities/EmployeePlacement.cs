@@ -21,11 +21,13 @@ namespace FactoryManagementSystem.Entities
         public string PayrollDepartment { get; set; } = string.Empty;
         public string PayrollDesignation { get; set; } = string.Empty;
 
-        public string ActualDepartment { get; set; } = string.Empty;
-
-        /// What they actually do, when the department alone does not say it.
-        /// Free text on purpose - the floor's vocabulary is not payroll's.
-        public string ActualWork { get; set; } = string.Empty;
+        /// Where they are now, and what they are doing now. Both, because
+        /// the two come apart in both directions: somebody can sit in the
+        /// right department doing a different job, and somebody can keep
+        /// their job while sitting in another department. Checking only one
+        /// would miss half of what the GM asked about.
+        public string CurrentDepartment { get; set; } = string.Empty;
+        public string CurrentDesignation { get; set; } = string.Empty;
 
         public string Remarks { get; set; } = string.Empty;
 

@@ -61,44 +61,17 @@ namespace FactoryManagementSystem.Controllers
             ("TEAM 5", new[] { (37, 38), (39, 40), (41, 42), (43, 44) }),
         };
 
-        /// The sheet's department rows, and the payroll DeptName values
-        /// each one covers.
-        ///
-        /// The names differ on both sides and the payroll spelling is the
-        /// one that matters: STORES not STORE, MAINTENENCE not MAINTANANCE.
-        /// FABRIC is not here because payroll has no such department - the
-        /// row was dropped rather than left permanently empty.
-        /// Every department row, in the order the table lists them - all of
-        /// them above TEAM 1, so the teams read as one unbroken block.
-        private static readonly (string Label, string[] Departments)[] DepartmentBlock =
-        {
-            ("ADMIN & STAFF", new[] { "ADMIN" }),
-            ("HR", new[] { "HR" }),
-            ("STORE", new[] { "STORE", "STORES" }),
-            ("CUTTING", new[] { "CUTTING" }),
-            ("QUALITY", new[] { "QUALITY" }),
-            ("MAINTANANCE", new[] { "MAINTENENCE", "MAINTENANCE" }),
-            ("PACKING FGS", new[] { "PACKING" }),
-            // Several spellings, because which one payroll uses has not
-            // been confirmed. Until somebody is filed under one of them
-            // this row reads 0 and those people stay in OTHER DEPARTMENTS;
-            // add the real spelling here when it is known.
-            ("TRAINING AND DEVELOPMENT", new[]
-            {
-                "TRAINING",
-                "TRAINING AND DEVELOPMENT",
-                "TRAINING & DEVELOPMENT",
-                "TRAINING AND DEVELOPEMENT",
-                "TRAINING DEVELOPMENT",
-                "T&D",
-            }),
-        };
-
         /// Departments that belong to a sewing line rather than to a
         /// department row. Their people are counted under the team they are
         /// allocated to, so listing them again by department would count
-        /// them twice.
+        /// them twice - and the ones with no line are the 451 the
+        /// UNALLOCATED SEWING row used to carry, which was dropped.
         private static readonly string[] LineDepartments = { "TAILOR", "SEWING" };
+
+        /// A department whose name payroll leaves blank. Shown rather than
+        /// dropped, so nobody disappears from a report that claims to cover
+        /// the whole roster.
+        private const string NoDepartment = "(NO DEPARTMENT)";
 
         /// One day, or a week/month averaged per day.
         ///
@@ -130,19 +103,39 @@ namespace FactoryManagementSystem.Controllers
                 var teamRows = new List<object>();
                 var counted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+                // The departments come from the roster, not from a list in
+                // this file. Payroll owns which departments exist and how
+                // they are spelled, and a hand-kept list could only ever be
+                // out of date: it had STORE for payroll's STORES and
+                // MAINTANANCE for its MAINTENENCE, carried a FABRIC row for
+                // a department that does not exist, and silently swept six
+                // real ones - TRANSPORTS, SECURITY, IED, CANTEEN, CIVIL,
+                // ELECTRICAL - into a single OTHER DEPARTMENTS line.
+                //
+                // Alphabetical rather than by headcount, so a row keeps its
+                // place on a report people read every day.
+                var departments = people
+                    .Where(p => !LineDepartments.Contains(p.Department, StringComparer.OrdinalIgnoreCase))
+                    .Select(p => p.Department.Trim().Length == 0 ? NoDepartment : p.Department.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
                 // A department row counts the people of that department who
                 // are NOT on a sewing line. Somebody from QUALITY allocated
                 // to line 1 is counted under TEAM 1, where the supervisor
                 // will look for them - counting them in both places made
                 // the rows add to 853 against a roster of 846.
-                foreach (var (label, departments) in DepartmentBlock)
+                foreach (var department in departments)
                 {
                     var members = people
-                        .Where(p => departments.Contains(p.Department, StringComparer.OrdinalIgnoreCase)
+                        .Where(p => string.Equals(
+                                        p.Department.Trim().Length == 0 ? NoDepartment : p.Department.Trim(),
+                                        department, StringComparison.OrdinalIgnoreCase)
                                     && !allocatedLineByCode.ContainsKey(p.Code))
                         .ToList();
                     foreach (var m in members) counted.Add(m.Code);
-                    departmentRows.Add(DepartmentRow(label, members, postedDays, load.ConfirmedCodes));
+                    departmentRows.Add(DepartmentRow(department, members, postedDays, load.ConfirmedCodes));
                 }
 
                 foreach (var (team, pairs) in Teams)
@@ -161,31 +154,20 @@ namespace FactoryManagementSystem.Controllers
                     teamRows.Add(TeamRow(team, "TEAM TOTAL", teamMembers, postedDays, isTotal: true));
                 }
 
-                // Everybody left, split in two. Sewing staff with no layout
-                // row would otherwise swamp the handful from departments
-                // the sheet has no row for, and they mean different things.
-                var remaining = people.Where(p => !counted.Contains(p.Code)).ToList();
-
-                var unallocatedSewing = remaining
-                    .Where(p => LineDepartments.Contains(p.Department, StringComparer.OrdinalIgnoreCase))
+                // Everybody left is sewing staff with no layout row: every
+                // other department now has a row of its own, so there is
+                // nothing else that can fall through here.
+                //
+                // They get no row either. The TAILOR block already reports
+                // them as BAL TO ALL, and a 451-strong row dwarfed every
+                // line on the table. They are still counted in TOTAL
+                // MANPOWER, which is worked out over the whole roster
+                // rather than by adding these rows up, so leaving them out
+                // puts the table short of the total by exactly this many
+                // people. The count goes out in the payload below.
+                var unallocatedSewing = people
+                    .Where(p => !counted.Contains(p.Code))
                     .ToList();
-                var otherDepartments = remaining
-                    .Where(p => !LineDepartments.Contains(p.Department, StringComparer.OrdinalIgnoreCase))
-                    .ToList();
-
-                // The sewing staff with no active layout row today get no
-                // row of their own: the TAILOR block already reports them
-                // as BAL TO ALL, and a 451-strong row dwarfed every line on
-                // the table. They are still counted in TOTAL MANPOWER,
-                // which is worked out over the whole roster rather than by
-                // adding these rows up, so dropping the row leaves the
-                // table short of the total by exactly this many people.
-                // The count still goes out in the payload below.
-
-                // TRANSPORTS, SECURITY, IED, CANTEEN, CIVIL, ELECTRICAL -
-                // real departments the sheet has no row for. Shown rather
-                // than dropped, so nobody vanishes from the report twice.
-                departmentRows.Add(DepartmentRow("OTHER DEPARTMENTS", otherDepartments, postedDays, load.ConfirmedCodes));
 
                 var rows = new List<object>(departmentRows.Count + teamRows.Count);
                 rows.AddRange(departmentRows);

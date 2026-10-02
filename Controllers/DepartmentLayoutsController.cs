@@ -59,28 +59,54 @@ namespace FactoryManagementSystem.Controllers
                     .GroupBy(e => Name(e.DeptName), StringComparer.OrdinalIgnoreCase)
                     .ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
 
-                var allocations = await _departments.GetActiveAllocationsAsync();
-                var allocated = new HashSet<string>(
-                    allocations.Select(a => a.EmployeeCode), StringComparer.OrdinalIgnoreCase);
+                // Payroll's departments, plus any that only exist because
+                // somebody laid one out. TRAINING AND DEVELOPMENT is real on
+                // the floor and absent from payroll - the layout is where
+                // that gets recorded, and the dropdown has to offer back
+                // what was put into it or the department would vanish the
+                // moment it was saved.
+                var names = new HashSet<string>(headcount.Keys, StringComparer.OrdinalIgnoreCase);
+                foreach (var laidOut in await _departments.GetDepartmentsWithLayoutsAsync())
+                {
+                    names.Add(laidOut);
+                }
+
+                var allocationsByWorkDetail = await _departments.GetActiveAllocationsAsync();
+                var allocatedCodes = new HashSet<string>(
+                    allocationsByWorkDetail.Select(a => a.EmployeeCode),
+                    StringComparer.OrdinalIgnoreCase);
 
                 var result = new List<object>();
-                foreach (var name in headcount.Keys.OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
+                foreach (var name in names.OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
                 {
                     var details = await _departments.GetWorkDetailsAsync(name);
-                    var people = roster
-                        .Where(e => string.Equals(Name(e.DeptName), name, StringComparison.OrdinalIgnoreCase))
-                        .Count(e => allocated.Contains((e.Tno ?? string.Empty).Trim()));
+
+                    // Counted off the layout, not off payroll. Somebody can
+                    // be scanned onto a TRAINING AND DEVELOPMENT work detail
+                    // while payroll still files them under HR - that gap is
+                    // the whole reason the department is being laid out.
+                    var ids = details.Select(d => d.Id).ToHashSet();
+                    var allocated = allocationsByWorkDetail.Count(a => ids.Contains(a.WorkDetailId));
 
                     result.Add(new
                     {
                         department = name,
-                        headcount = headcount[name],
+                        // 0 for a department payroll does not have. The
+                        // layout still says how many jobs it holds.
+                        headcount = headcount.TryGetValue(name, out var h) ? h : 0,
+                        inPayroll = headcount.ContainsKey(name),
                         workDetails = details.Count,
-                        allocated = people,
+                        allocated,
                     });
                 }
 
-                return Ok(new { count = result.Count, departments = result });
+                return Ok(new
+                {
+                    count = result.Count,
+                    departments = result,
+                    unallocatedCount = roster.Count(
+                        e => !allocatedCodes.Contains((e.Tno ?? string.Empty).Trim())),
+                });
             }
             catch (Exception ex)
             {

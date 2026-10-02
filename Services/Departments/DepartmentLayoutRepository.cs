@@ -214,6 +214,24 @@ namespace FactoryManagementSystem.Services.Departments
             return await cmd.ExecuteNonQueryAsync();
         }
 
+        /// Departments that have a layout, whether or not payroll has such
+        /// a department. TRAINING AND DEVELOPMENT is real on the floor and
+        /// absent from payroll; the layout is where that gets recorded, so
+        /// the dropdown has to offer back what was put into it.
+        public async Task<List<string>> GetDepartmentsWithLayoutsAsync()
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                select distinct department
+                  from public.department_work_details
+                 where is_active
+                """);
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var list = new List<string>();
+            while (await r.ReadAsync()) list.Add(r.GetString(0));
+            return list;
+        }
+
         /// Where everybody on a work detail is, keyed by employee code.
         ///
         /// Read in one query rather than per person, because the callers

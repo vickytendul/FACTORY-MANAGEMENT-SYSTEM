@@ -211,7 +211,7 @@ namespace FactoryManagementSystem.Controllers
                     // should be able to say so.
                     postedDayCount = postedDays.Count,
                     dayCount = days,
-                    tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays),
+                    tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays, load.PlacedCodes),
                     others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays, load.PlacedCodes),
 
                     // Two tables, not one list the screen has to sort out.
@@ -489,25 +489,28 @@ namespace FactoryManagementSystem.Controllers
             return Math.Round(total / postedDays.Count, 1);
         }
 
-        /// [confirmed] is passed for OTHERS and withheld for TAILOR, which
-        /// is deliberate and not an oversight.
+        /// [placed] is the people a department layout has put on a work
+        /// detail, and it counts for TAILOR as much as for OTHERS.
         ///
-        /// A tailor who is not on a line still has to be put on one -
-        /// confirming that he is a tailor in sewing does not place him at a
-        /// station, and letting a confirmation count here would collapse
-        /// the one number the floor uses to staff the lines each morning.
-        /// A department person is never going on a line, so a confirmation
-        /// is the only placement they will ever have.
+        /// It was withheld from TAILOR while the only thing in that set was
+        /// a confirmation - somebody agreeing that a tailor was a tailor in
+        /// sewing, which places him nowhere and would have collapsed the
+        /// one number the floor uses to staff the lines each morning.
+        ///
+        /// A work detail is not that. A tailor scanned onto one is standing
+        /// on a named job and is not waiting to be put on a line, so
+        /// leaving him out of TAILOR's allocated count left him in BAL TO
+        /// ALL as though nobody had placed him.
         private static object Block(
             IEnumerable<Person> people,
             Dictionary<string, int> allocatedLineByCode,
             IReadOnlyList<DateTime> postedDays,
-            IReadOnlySet<string>? confirmed = null)
+            IReadOnlySet<string>? placed = null)
         {
             var list = people.ToList();
             var allocated = list.Count(p =>
                 allocatedLineByCode.ContainsKey(p.Code)
-                || (confirmed is not null && confirmed.Contains(p.Code)));
+                || (placed is not null && placed.Contains(p.Code)));
             return new
             {
                 totalManpower = list.Count,

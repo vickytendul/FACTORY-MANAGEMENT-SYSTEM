@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Ccs;
+using FactoryManagementSystem.Services.Departments;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Placements;
 using FactoryManagementSystem.Services.Skills;
@@ -257,7 +258,10 @@ builder.Services.AddSingleton<ICcRepository>(sp => ccsSource switch
 // still boots; PlacementsController is the one thing that will not
 // resolve there, which is correct, because it has nowhere to read from.
 if (hasSupabase)
+{
     builder.Services.AddSingleton<EmployeePlacementRepository>();
+    builder.Services.AddSingleton<DepartmentLayoutRepository>();
+}
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch
 {

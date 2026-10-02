@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Departments;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Placements;
 using Microsoft.AspNetCore.Mvc;
@@ -35,6 +36,7 @@ namespace FactoryManagementSystem.Controllers
         private readonly CompanyApiClient _companyApiClient;
         private readonly ILayoutRepository _layouts;
         private readonly EmployeePlacementRepository _placements;
+        private readonly DepartmentLayoutRepository _departments;
         private readonly IConfiguration _configuration;
 
         private const int CompCode = 17;
@@ -43,11 +45,13 @@ namespace FactoryManagementSystem.Controllers
             CompanyApiClient companyApiClient,
             ILayoutRepository layouts,
             EmployeePlacementRepository placements,
+            DepartmentLayoutRepository departments,
             IConfiguration configuration)
         {
             _companyApiClient = companyApiClient;
             _layouts = layouts;
             _placements = placements;
+            _departments = departments;
             _configuration = configuration;
         }
 
@@ -112,10 +116,11 @@ namespace FactoryManagementSystem.Controllers
                     // Known = we can say where this person is. Either a
                     // layout row puts them at a station, or somebody
                     // confirmed them recently.
-                    known = rows.Count(r => r.State is States.OnLine or States.Confirmed),
+                    known = rows.Count(r => r.State is States.OnLine or States.OnWorkDetail or States.Confirmed),
                     unknown = rows.Count(r => r.State is States.Pending or States.Stale),
 
                     onLine = rows.Count(r => r.State == States.OnLine),
+                    onWorkDetail = rows.Count(r => r.State == States.OnWorkDetail),
                     confirmed = rows.Count(r => r.State == States.Confirmed),
                     stale = rows.Count(r => r.State == States.Stale),
                     pending = rows.Count(r => r.State == States.Pending),
@@ -132,7 +137,7 @@ namespace FactoryManagementSystem.Controllers
                         {
                             department = g.Key,
                             total = g.Count(),
-                            known = g.Count(r => r.State is States.OnLine or States.Confirmed),
+                            known = g.Count(r => r.State is States.OnLine or States.OnWorkDetail or States.Confirmed),
                             pending = g.Count(r => r.State == States.Pending),
                             stale = g.Count(r => r.State == States.Stale),
                             mismatch = g.Count(r => r.IsMismatch),
@@ -253,6 +258,11 @@ namespace FactoryManagementSystem.Controllers
 
         private static class States
         {
+            /// On a department work detail. Counts as known exactly the way
+            /// ON_LINE does: the layout names the job, which is a stronger
+            /// answer than somebody confirming a department.
+            public const string OnWorkDetail = "ON_WORK_DETAIL";
+
             public const string OnLine = "ON_LINE";
             public const string Confirmed = "CONFIRMED";
             public const string Stale = "STALE";
@@ -264,7 +274,7 @@ namespace FactoryManagementSystem.Controllers
             string PayrollDepartment, string PayrollDesignation,
             string CurrentDepartment, string CurrentDesignation, string Remarks,
             DateTime? VerifiedOn, string VerifiedBy,
-            int? LineId, string State, bool IsMismatch,
+            int? LineId, string WorkDetail, string State, bool IsMismatch,
             bool DepartmentDiffers, bool DesignationDiffers, bool PayrollChanged);
 
         private object Project(Row r) => new
@@ -279,6 +289,9 @@ namespace FactoryManagementSystem.Controllers
             verifiedOn = r.VerifiedOn,
             verifiedBy = r.VerifiedBy,
             lineId = r.LineId,
+            // "HR - Recruitment desk" when a department layout places them,
+            // so the screen can say where rather than only that it knows.
+            workDetail = r.WorkDetail,
             state = r.State,
             isMismatch = r.IsMismatch,
             // Which half is wrong, so the screen can say "department" or
@@ -319,6 +332,12 @@ namespace FactoryManagementSystem.Controllers
                 allocatedLineByCode[code] = t.LineId;
             }
 
+            // Where the department layouts put people. Counted here exactly
+            // as a sewing line is: whether somebody was placed through this
+            // screen or through Layout Allocation, they are placed, and the
+            // two screens must not disagree about how many that is.
+            var onWorkDetailByCode = await _departments.GetPlacementsByCodeAsync();
+
             var cutoff = DateTime.Now.Date.AddDays(-VerifyWithinDays);
             var rows = new List<Row>(roster.Count);
 
@@ -330,6 +349,7 @@ namespace FactoryManagementSystem.Controllers
 
                 placements.TryGetValue(code, out var placement);
                 var onLine = allocatedLineByCode.TryGetValue(code, out var lineId);
+                var onWorkDetail = onWorkDetailByCode.TryGetValue(code, out var workDetail);
 
                 var payrollChanged = placement is not null
                     && PlacementRules.PayrollChanged(
@@ -339,16 +359,18 @@ namespace FactoryManagementSystem.Controllers
                     && PlacementRules.IsFresh(
                         placement, payrollDepartment, payrollDesignation, cutoff);
 
-                // A layout row outranks a confirmation: it says where they
-                // are standing today, which is better evidence than
-                // somebody's note from six weeks ago.
+                // A layout row outranks a confirmation, sewing or
+                // department: it names the job somebody is doing today,
+                // which is better evidence than a note from six weeks ago.
                 var state = onLine
                     ? States.OnLine
-                    : placement is null
-                        ? States.Pending
-                        : fresh
-                            ? States.Confirmed
-                            : States.Stale;
+                    : onWorkDetail
+                        ? States.OnWorkDetail
+                        : placement is null
+                            ? States.Pending
+                            : fresh
+                                ? States.Confirmed
+                                : States.Stale;
 
                 // Either half counts. A person can sit in the right
                 // department doing a different job, or keep their job while
@@ -375,6 +397,9 @@ namespace FactoryManagementSystem.Controllers
                     placement?.VerifiedOn,
                     placement?.VerifiedBy ?? string.Empty,
                     onLine ? lineId : null,
+                    onWorkDetail
+                        ? $"{workDetail.Department} - {workDetail.WorkDetail}"
+                        : string.Empty,
                     state,
                     isMismatch,
                     departmentDiffers,

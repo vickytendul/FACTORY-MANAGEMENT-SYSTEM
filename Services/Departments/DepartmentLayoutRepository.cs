@@ -214,6 +214,30 @@ namespace FactoryManagementSystem.Services.Departments
             return await cmd.ExecuteNonQueryAsync();
         }
 
+        /// Where everybody on a work detail is, keyed by employee code.
+        ///
+        /// Read in one query rather than per person, because the callers
+        /// are reports asking about the whole roster at once.
+        public async Task<Dictionary<string, (string Department, string WorkDetail)>>
+            GetPlacementsByCodeAsync()
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                select a.employee_code, w.department, w.work_detail
+                  from public.department_allocations a
+                  join public.department_work_details w on w.id = a.work_detail_id
+                 where a.is_active and w.is_active
+                """);
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var map = new Dictionary<string, (string, string)>(
+                StringComparer.OrdinalIgnoreCase);
+            while (await r.ReadAsync())
+            {
+                map[r.GetString(0)] = (r.GetString(1), r.GetString(2));
+            }
+            return map;
+        }
+
         /// The department and work detail somebody is on, if any. Used to
         /// tell a supervisor where the person they just scanned already is,
         /// rather than silently moving them.

@@ -947,12 +947,22 @@ namespace FactoryManagementSystem.Controllers
         /// minutes, never from averaging the lines' own - a line of five
         /// and a line of fifty would otherwise count the same.
         ///
-        /// A line whose CC has no SAM contributes its people and its output
-        /// but no earned minutes, which would drag the factory's percentage
-        /// down for a reason that has nothing to do with the floor. Those
-        /// lines are left out of the percentages entirely and counted in
-        /// linesWithoutSam, so the screen can say the figure covers only
-        /// part of the floor rather than quietly reporting a low one.
+        /// Two kinds of line are left out of the percentages entirely.
+        ///
+        /// One whose CC has no SAM has no earned minutes, and counting its
+        /// people in the denominator while it adds nothing to the numerator
+        /// would drag the factory down for a reason that has nothing to do
+        /// with the floor.
+        ///
+        /// One with nobody recorded present is the same error the other way
+        /// round, and it is the worse of the two. Its output still earns
+        /// minutes, but it contributes no available minutes to divide them
+        /// by - so it lands wholly in the numerator. On a day payroll has
+        /// not posted, three such lines carried 33,000 earned minutes into
+        /// a factory figure of 97% that should have read 64%.
+        ///
+        /// Both counts go out so the screen can say the figure covers part
+        /// of the floor rather than quietly reporting a wrong one.
         private static object BuildOverall(List<FactoryLine> lines)
         {
             var tailorsOnRoll = lines.Sum(l => l.TailorsOnRoll);
@@ -960,7 +970,13 @@ namespace FactoryManagementSystem.Controllers
             var tailorsPresent = lines.Sum(l => l.Totals.TailorsPresent);
             var othersPresent = lines.Sum(l => l.Totals.OthersPresent);
 
-            var withSam = lines.Where(l => l.EarnedMinutes != null).ToList();
+            var linesWithoutSam = lines.Count(l => l.EarnedMinutes == null);
+            var linesWithoutAttendance = lines.Count(
+                l => l.EarnedMinutes != null && l.Totals.TotalPresent == 0);
+
+            var withSam = lines
+                .Where(l => l.EarnedMinutes != null && l.Totals.TotalPresent > 0)
+                .ToList();
             var earned = withSam.Sum(l => l.EarnedMinutes!.Value);
 
             return new
@@ -999,7 +1015,14 @@ namespace FactoryManagementSystem.Controllers
                     ? null
                     : Percent(earned, withSam.Sum(l => l.Totals.TailorsPresent)),
 
-                linesWithoutSam = lines.Count - withSam.Count,
+                linesWithoutSam,
+                linesWithoutAttendance,
+
+                // How many lines the percentages above actually cover. The
+                // screen says so, because a figure drawn from six lines out
+                // of nine looks exactly like one drawn from all nine.
+                linesInPercent = withSam.Count,
+                lineCount = lines.Count,
             };
         }
 

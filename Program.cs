@@ -98,6 +98,10 @@ builder.Services.AddSingleton<CompanyAttendanceService>();
 builder.Services.AddSingleton<ProductionLineService>();
 builder.Services.AddSingleton<EmployeeSyncService>();
 
+// Keeps the free Render instance from spinning down - see the service.
+// Does nothing unless KeepAwake:Url is set.
+builder.Services.AddHostedService<KeepAwakeService>();
+
 // =====================================================
 // Skill records: Firebase or Supabase, chosen by configuration
 // =====================================================

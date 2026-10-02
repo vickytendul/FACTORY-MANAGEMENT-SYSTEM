@@ -280,7 +280,14 @@ namespace FactoryManagementSystem.Controllers
 
                 var people = load.People
                     .Where(p => p.IsTailor == wantTailors)
+                    // Both ways of being placed, because the tile this
+                    // opens from counts both. Excluding only the sewing
+                    // lines listed everybody on a department work detail
+                    // as still to be allocated, so the list was longer
+                    // than the number that opened it - the one thing a
+                    // drill-down must never be.
                     .Where(p => !load.AllocatedLineByCode.ContainsKey(p.Code))
+                    .Where(p => !load.PlacedByCode.ContainsKey(p.Code))
                     .OrderBy(p => p.Department, StringComparer.OrdinalIgnoreCase)
                     .ThenBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
                     .Select(p => new

@@ -799,6 +799,323 @@ namespace FactoryManagementSystem.Controllers
             return byDate;
         }
 
+        /// Every allocated line side by side for one period, plus the
+        /// factory as a whole - the Line Summary turned on its side. There,
+        /// one line is fixed and the columns are days; here one period is
+        /// fixed and the columns are lines.
+        ///
+        /// Built as one request rather than one per line. The pieces it
+        /// needs are shared: the layout snapshot and the CC list are
+        /// cached, Employee_Att is cached for a minute, and the vendor's
+        /// production report already returns every line in one response -
+        /// asking per line would have fetched all of that again for each.
+        [HttpGet("factory")]
+        public async Task<IActionResult> Factory(
+            DateTime? date = null, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            try
+            {
+                var from = (fromDate ?? date ?? DateTime.Now).Date;
+                var to = (toDate ?? date ?? DateTime.Now).Date;
+                if (to < from) (from, to) = (to, from);
+
+                var days = new List<DateTime>();
+                for (var d = from; d <= to; d = d.AddDays(1)) days.Add(d);
+
+                // Only lines somebody is actually standing on. An empty
+                // column for each of the forty-four would bury the six that
+                // are running.
+                var active = await _layouts.GetActiveLayoutTransactionsAsync();
+                var lineIds = active
+                    .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                    .Select(x => x.LineId)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList();
+
+                var outputByLine = await FetchOutputAndRejForLinesAsync(lineIds, from, to);
+
+                var lines = new List<FactoryLine>();
+                foreach (var lineId in lineIds)
+                {
+                    var context = await ResolveLineContextAsync(lineId, null, null);
+                    if (context == null) continue;
+
+                    var outputByDate = outputByLine.TryGetValue(lineId, out var o)
+                        ? o
+                        : new Dictionary<DateTime, (double output, double rej)>();
+
+                    var totals = await AggregateLineOverDaysAsync(
+                        lineId, context, days, outputByDate);
+
+                    lines.Add(new FactoryLine(
+                        LineId: lineId,
+                        LineName: $"LINE NO {lineId}",
+                        CcNo: context.CcNo,
+                        Sam: context.Sam,
+                        TotalPositions: context.LayoutItems.Count,
+                        TailorsOnRoll: context.TailorsOnRoll,
+                        OthersOnRoll: context.OthersOnRoll,
+                        Totals: totals));
+                }
+
+                return Ok(new
+                {
+                    fromDate = from,
+                    toDate = to,
+                    dayCount = days.Count,
+                    lineCount = lines.Count,
+                    lines = lines.Select(Project),
+                    overall = BuildOverall(lines),
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        private const double WorkingMinutesPerDay = 480;
+
+        private sealed record LineTotals(
+            int TailorsPresent, int OthersPresent, int TotalPresent,
+            int Absent, int Unknown, int LentOut, int BorrowedIn,
+            double Output, double Rej, bool AnyEstimated);
+
+        private sealed record FactoryLine(
+            int LineId, string LineName, string CcNo, double? Sam, int TotalPositions,
+            int TailorsOnRoll, int OthersOnRoll, LineTotals Totals)
+        {
+            public double? EarnedMinutes =>
+                Sam == null ? null : Math.Round(Totals.Output * Sam.Value, 2);
+        }
+
+        private static double? Percent(double? earned, int presentDays)
+        {
+            if (earned == null) return null;
+            var available = presentDays * WorkingMinutesPerDay;
+            if (available <= 0) return null;
+            return Math.Round(earned.Value / available * 100, 2);
+        }
+
+        private static object Project(FactoryLine line) => new
+        {
+            lineId = (int?)line.LineId,
+            lineName = line.LineName,
+            ccNo = line.CcNo,
+            sam = line.Sam,
+            totalPositions = line.TotalPositions,
+
+            // A current-state snapshot, not summed over the period: there
+            // is no historical allocation timeline to read a past day's
+            // roll from, and adding today's roll up over thirty days would
+            // produce a number nobody could use.
+            tailorsOnRoll = line.TailorsOnRoll,
+            othersOnRoll = line.OthersOnRoll,
+            totalOnRoll = line.TailorsOnRoll + line.OthersOnRoll,
+
+            // Summed over the period, so a month is person-days rather than
+            // people. That is what the minutes below are derived from, and
+            // what the Line Summary's own weekly and monthly columns
+            // already show.
+            tailorsPresent = line.Totals.TailorsPresent,
+            othersPresent = line.Totals.OthersPresent,
+            totalPresent = line.Totals.TotalPresent,
+            absent = line.Totals.Absent,
+            unknownAttendance = line.Totals.Unknown,
+            lentOut = line.Totals.LentOut,
+            borrowedIn = line.Totals.BorrowedIn,
+            attendanceEstimated = line.Totals.AnyEstimated,
+
+            output = line.Totals.Output,
+            rej = line.Totals.Rej,
+
+            workingMinutes = line.Totals.TotalPresent * WorkingMinutesPerDay,
+            availableMinutesOwe = line.Totals.TotalPresent * WorkingMinutesPerDay,
+            availableMinutesEff = line.Totals.TailorsPresent * WorkingMinutesPerDay,
+            earnedMinutes = line.EarnedMinutes,
+            owePercent = Percent(line.EarnedMinutes, line.Totals.TotalPresent),
+            effPercent = Percent(line.EarnedMinutes, line.Totals.TailorsPresent),
+        };
+
+        /// The factory column.
+        ///
+        /// Earned minutes are worked out PER LINE and then added, because
+        /// every line has its own SAM: multiplying the factory's total
+        /// output by some average SAM would credit a slow line's pieces at
+        /// a fast line's rate. The percentages come from the summed
+        /// minutes, never from averaging the lines' own - a line of five
+        /// and a line of fifty would otherwise count the same.
+        ///
+        /// A line whose CC has no SAM contributes its people and its output
+        /// but no earned minutes, which would drag the factory's percentage
+        /// down for a reason that has nothing to do with the floor. Those
+        /// lines are left out of the percentages entirely and counted in
+        /// linesWithoutSam, so the screen can say the figure covers only
+        /// part of the floor rather than quietly reporting a low one.
+        private static object BuildOverall(List<FactoryLine> lines)
+        {
+            var tailorsOnRoll = lines.Sum(l => l.TailorsOnRoll);
+            var othersOnRoll = lines.Sum(l => l.OthersOnRoll);
+            var tailorsPresent = lines.Sum(l => l.Totals.TailorsPresent);
+            var othersPresent = lines.Sum(l => l.Totals.OthersPresent);
+
+            var withSam = lines.Where(l => l.EarnedMinutes != null).ToList();
+            var earned = withSam.Sum(l => l.EarnedMinutes!.Value);
+
+            return new
+            {
+                lineId = (int?)null,
+                lineName = "FACTORY OVERALL",
+                ccNo = string.Empty,
+                sam = (double?)null,
+                totalPositions = lines.Sum(l => l.TotalPositions),
+
+                tailorsOnRoll,
+                othersOnRoll,
+                totalOnRoll = tailorsOnRoll + othersOnRoll,
+
+                tailorsPresent,
+                othersPresent,
+                totalPresent = tailorsPresent + othersPresent,
+                absent = lines.Sum(l => l.Totals.Absent),
+                unknownAttendance = lines.Sum(l => l.Totals.Unknown),
+                lentOut = lines.Sum(l => l.Totals.LentOut),
+                borrowedIn = lines.Sum(l => l.Totals.BorrowedIn),
+                attendanceEstimated = lines.Any(l => l.Totals.AnyEstimated),
+
+                output = lines.Sum(l => l.Totals.Output),
+                rej = lines.Sum(l => l.Totals.Rej),
+
+                workingMinutes = (tailorsPresent + othersPresent) * WorkingMinutesPerDay,
+                availableMinutesOwe = (tailorsPresent + othersPresent) * WorkingMinutesPerDay,
+                availableMinutesEff = tailorsPresent * WorkingMinutesPerDay,
+
+                earnedMinutes = withSam.Count == 0 ? (double?)null : Math.Round(earned, 2),
+                owePercent = withSam.Count == 0
+                    ? null
+                    : Percent(earned, withSam.Sum(l => l.Totals.TotalPresent)),
+                effPercent = withSam.Count == 0
+                    ? null
+                    : Percent(earned, withSam.Sum(l => l.Totals.TailorsPresent)),
+
+                linesWithoutSam = lines.Count - withSam.Count,
+            };
+        }
+
+        /// One line's figures across the period, by exactly the rules the
+        /// per-day endpoints use: payroll first, this app's own attendance
+        /// when payroll has not posted and a supervisor marked something,
+        /// and nothing inferred from silence.
+        private async Task<LineTotals> AggregateLineOverDaysAsync(
+            int lineId,
+            LineContext context,
+            List<DateTime> days,
+            Dictionary<DateTime, (double output, double rej)> outputByDate)
+        {
+            var from = days[0];
+            var to = days[^1];
+
+            var loansByDate = await FetchLoansForRangeAsync(lineId, from, to, context);
+            var borrowedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dayLoans in loansByDate.Values)
+                foreach (var code in dayLoans.BorrowedIn.Keys) borrowedCodes.Add(code);
+
+            var attendanceByDate = await FetchAttendanceRangeAsync(
+                from, to, context.EmployeeSectionMap.Keys.Concat(borrowedCodes));
+            var ownByDate = await FetchOwnAttendanceRangeAsync(lineId, days);
+
+            int tp = 0, op = 0, ab = 0, un = 0, lo = 0, bi = 0;
+            double output = 0, rej = 0;
+            var anyEstimated = false;
+
+            foreach (var d in days)
+            {
+                var attendanceForDay = attendanceByDate.TryGetValue(d, out var m)
+                    ? m
+                    : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceForDay);
+                var canEstimate = !payrollPosted
+                    && ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own)
+                    && own.Count > 0;
+                if (canEstimate)
+                {
+                    attendanceForDay = ownByDate[DateTime.SpecifyKind(d, DateTimeKind.Utc)];
+                    anyEstimated = true;
+                }
+
+                var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
+                    ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d],
+                        treatMissingAsPresent: canEstimate);
+
+                tp += tailorsPresent;
+                op += othersPresent;
+                ab += absent;
+                un += unknown;
+                lo += lentOut;
+                bi += borrowedIn;
+
+                var (o, r) = outputByDate.TryGetValue(d, out var v) ? v : (0, 0);
+                output += o;
+                rej += r;
+            }
+
+            return new LineTotals(tp, op, tp + op, ab, un, lo, bi, output, rej, anyEstimated);
+        }
+
+        /// The production report for every line at once.
+        ///
+        /// The vendor is asked with Line_No = 0, which is what the per-line
+        /// version already does - it returns every line, and each row
+        /// carries one column per line. Reading them all out of one
+        /// response is the difference between one vendor call and one per
+        /// line.
+        private async Task<Dictionary<int, Dictionary<DateTime, (double output, double rej)>>>
+            FetchOutputAndRejForLinesAsync(List<int> lineIds, DateTime fromDate, DateTime toDate)
+        {
+            var byLine = new Dictionary<int, Dictionary<DateTime, (double output, double rej)>>();
+            foreach (var lineId in lineIds)
+            {
+                var byDate = new Dictionary<DateTime, (double output, double rej)>();
+                for (var d = fromDate; d <= toDate; d = d.AddDays(1)) byDate[d] = (0, 0);
+                byLine[lineId] = byDate;
+            }
+            if (lineIds.Count == 0) return byLine;
+
+            var report = await _companyApiClient.FetchSewingProductionReportAsync(new SewingProdReptRequest
+            {
+                FDate = CompanyApiClient.FormatDate(fromDate).ToLowerInvariant(),
+                TDate = CompanyApiClient.FormatDate(toDate).ToLowerInvariant(),
+                Line_No = 0,
+                CC_No = "-",
+                Unit_Code = SewingProdReptUnitCode
+            });
+
+            foreach (var row in report)
+            {
+                if (!DateTime.TryParse(row.EffectFrom, out var effectDate)) continue;
+                var dateOnly = effectDate.Date;
+                if (dateOnly < fromDate || dateOnly > toDate) continue;
+
+                var isOk = string.Equals(row.Type, "OK", StringComparison.OrdinalIgnoreCase);
+                var isRej = string.Equals(row.Type, "REJ", StringComparison.OrdinalIgnoreCase);
+                if (!isOk && !isRej) continue;
+
+                foreach (var lineId in lineIds)
+                {
+                    var byDate = byLine[lineId];
+                    if (!byDate.ContainsKey(dateOnly)) continue;
+
+                    var value = (double)row.GetOperation(lineId.ToString());
+                    var (output, rej) = byDate[dateOnly];
+                    byDate[dateOnly] = isOk ? (value, rej) : (output, value);
+                }
+            }
+
+            return byLine;
+        }
+
         private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
     }
 }

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Departments;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Placements;
 using Microsoft.AspNetCore.Mvc;
@@ -28,6 +29,7 @@ namespace FactoryManagementSystem.Controllers
         private readonly CompanyApiClient _companyApiClient;
         private readonly ILayoutRepository _layouts;
         private readonly EmployeePlacementRepository? _placements;
+        private readonly DepartmentLayoutRepository? _departmentLayouts;
         private readonly IConfiguration _configuration;
 
         private const int CompCode = 17;
@@ -46,6 +48,7 @@ namespace FactoryManagementSystem.Controllers
             _companyApiClient = companyApiClient;
             _layouts = layouts;
             _placements = services.GetService<EmployeePlacementRepository>();
+            _departmentLayouts = services.GetService<DepartmentLayoutRepository>();
             _configuration = configuration;
         }
 
@@ -356,13 +359,31 @@ namespace FactoryManagementSystem.Controllers
                 await ConfirmedCodesAsync(people));
         }
 
-        /// Everyone whose confirmed placement is still believed. These are
-        /// the people a department row can call allocated: they will never
-        /// have a layout row, so somebody saying where they are is the only
-        /// placement they will ever get.
+        /// Everyone a department row can call allocated. Two ways to get
+        /// here, and either will do:
+        ///
+        ///   a department layout puts them on a work detail - the stronger
+        ///   of the two, since it names the job they are doing
+        ///
+        ///   somebody confirmed where they are, and that confirmation has
+        ///   not gone stale
+        ///
+        /// Neither will ever have a sewing layout row, which is why a
+        /// department row cannot read allocation off the layouts the way a
+        /// team row does.
         private async Task<HashSet<string>> ConfirmedCodesAsync(IEnumerable<Person> people)
         {
             var confirmed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (_departmentLayouts is not null)
+            {
+                foreach (var allocation in await _departmentLayouts.GetActiveAllocationsAsync())
+                {
+                    var code = (allocation.EmployeeCode ?? string.Empty).Trim();
+                    if (code.Length > 0) confirmed.Add(code);
+                }
+            }
+
             if (_placements is null) return confirmed;
 
             var placements = await _placements.GetAllAsync();
@@ -501,6 +522,16 @@ namespace FactoryManagementSystem.Controllers
                 allocated = confirmed is null
                     ? (int?)null
                     : members.Count(m => confirmed.Contains(m.Code)),
+                // The same count split the way the two column groups are,
+                // so TAILOR and OTHERS each say how many of their own are
+                // placed rather than leaving one total to be divided by
+                // eye against the present and absent figures beside it.
+                tailorAllocated = confirmed is null
+                    ? (int?)null
+                    : members.Count(m => m.IsTailor && confirmed.Contains(m.Code)),
+                othersAllocated = confirmed is null
+                    ? (int?)null
+                    : members.Count(m => !m.IsTailor && confirmed.Contains(m.Code)),
                 tailorPresent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsPresentOn(d)),
                 tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
                 othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),
@@ -523,7 +554,11 @@ namespace FactoryManagementSystem.Controllers
             {
                 group,
                 label,
+                // Everybody on a team row is on a line, so all of them are
+                // allocated - the split is simply which kind they are.
                 allocated = (int?)members.Count,
+                tailorAllocated = (int?)members.Count(m => m.IsTailor),
+                othersAllocated = (int?)members.Count(m => !m.IsTailor),
                 tailorPresent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsPresentOn(d)),
                 tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
                 othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),

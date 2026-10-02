@@ -3,7 +3,6 @@ using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
 using FactoryManagementSystem.Services.Departments;
 using FactoryManagementSystem.Services.Layouts;
-using FactoryManagementSystem.Services.Placements;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -28,28 +27,23 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly CompanyApiClient _companyApiClient;
         private readonly ILayoutRepository _layouts;
-        private readonly EmployeePlacementRepository? _placements;
         private readonly DepartmentLayoutRepository? _departmentLayouts;
-        private readonly IConfiguration _configuration;
 
         private const int CompCode = 17;
 
-        /// Placements are resolved rather than injected because the
-        /// repository is only registered when Supabase is configured. A
+        /// The department layouts are resolved rather than injected because
+        /// the repository is only registered when Supabase is configured. A
         /// Firestore-only deployment gets null here and the department rows
-        /// simply go back to showing a dash, which is what they showed
-        /// before confirmations existed.
+        /// go back to showing a dash, which is what they showed before
+        /// department layouts existed.
         public StrengthSummaryController(
             CompanyApiClient companyApiClient,
             ILayoutRepository layouts,
-            IServiceProvider services,
-            IConfiguration configuration)
+            IServiceProvider services)
         {
             _companyApiClient = companyApiClient;
             _layouts = layouts;
-            _placements = services.GetService<EmployeePlacementRepository>();
             _departmentLayouts = services.GetService<DepartmentLayoutRepository>();
-            _configuration = configuration;
         }
 
         /// The sewing teams, exactly as the sheet lays them out: four line
@@ -359,45 +353,28 @@ namespace FactoryManagementSystem.Controllers
                 await ConfirmedCodesAsync(people));
         }
 
-        /// Everyone a department row can call allocated. Two ways to get
-        /// here, and either will do:
+        /// Everyone a department row can call allocated: the people a
+        /// department layout puts on a work detail.
         ///
-        ///   a department layout puts them on a work detail - the stronger
-        ///   of the two, since it names the job they are doing
-        ///
-        ///   somebody confirmed where they are, and that confirmation has
-        ///   not gone stale
-        ///
-        /// Neither will ever have a sewing layout row, which is why a
+        /// Nobody here will ever have a sewing layout row, which is why a
         /// department row cannot read allocation off the layouts the way a
         /// team row does.
+        ///
+        /// Confirmed placements used to count here too. They no longer do.
+        /// A confirmation says which department somebody is in; a work
+        /// detail says which job they are doing, and once the layouts can
+        /// answer that for every department, the weaker answer is not worth
+        /// having two ways of being allocated for. The table and the screen
+        /// behind it are kept, unused, rather than dropped.
         private async Task<HashSet<string>> ConfirmedCodesAsync(IEnumerable<Person> people)
         {
             var confirmed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (_departmentLayouts is null) return confirmed;
 
-            if (_departmentLayouts is not null)
+            foreach (var allocation in await _departmentLayouts.GetActiveAllocationsAsync())
             {
-                foreach (var allocation in await _departmentLayouts.GetActiveAllocationsAsync())
-                {
-                    var code = (allocation.EmployeeCode ?? string.Empty).Trim();
-                    if (code.Length > 0) confirmed.Add(code);
-                }
-            }
-
-            if (_placements is null) return confirmed;
-
-            var placements = await _placements.GetAllAsync();
-            if (placements.Count == 0) return confirmed;
-
-            var cutoff = DateTime.Now.Date.AddDays(-PlacementRules.VerifyWithinDays(_configuration));
-
-            foreach (var p in people)
-            {
-                if (placements.TryGetValue(p.Code, out var placement)
-                    && PlacementRules.IsFresh(placement, p.Department, p.Designation, cutoff))
-                {
-                    confirmed.Add(p.Code);
-                }
+                var code = (allocation.EmployeeCode ?? string.Empty).Trim();
+                if (code.Length > 0) confirmed.Add(code);
             }
             return confirmed;
         }

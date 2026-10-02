@@ -65,29 +65,23 @@ namespace FactoryManagementSystem.Controllers
                 // that gets recorded, and the dropdown has to offer back
                 // what was put into it or the department would vanish the
                 // moment it was saved.
-                var names = new HashSet<string>(headcount.Keys, StringComparer.OrdinalIgnoreCase);
-                foreach (var laidOut in await _departments.GetDepartmentsWithLayoutsAsync())
-                {
-                    names.Add(laidOut);
-                }
+                // Counted off the layout, not off payroll. Somebody can be
+                // scanned onto a TRAINING AND DEVELOPMENT work detail while
+                // payroll still files them under HR - that gap is the whole
+                // reason the department is being laid out.
+                //
+                // One query for every department. This used to ask for one
+                // department's work details at a time: fifteen round trips
+                // to draw a list of fifteen names.
+                var counts = await _departments.GetLayoutCountsAsync();
 
-                var allocationsByWorkDetail = await _departments.GetActiveAllocationsAsync();
-                var allocatedCodes = new HashSet<string>(
-                    allocationsByWorkDetail.Select(a => a.EmployeeCode),
-                    StringComparer.OrdinalIgnoreCase);
+                var names = new HashSet<string>(headcount.Keys, StringComparer.OrdinalIgnoreCase);
+                foreach (var laidOut in counts.Keys) names.Add(laidOut);
 
                 var result = new List<object>();
                 foreach (var name in names.OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
                 {
-                    var details = await _departments.GetWorkDetailsAsync(name);
-
-                    // Counted off the layout, not off payroll. Somebody can
-                    // be scanned onto a TRAINING AND DEVELOPMENT work detail
-                    // while payroll still files them under HR - that gap is
-                    // the whole reason the department is being laid out.
-                    var ids = details.Select(d => d.Id).ToHashSet();
-                    var allocated = allocationsByWorkDetail.Count(a => ids.Contains(a.WorkDetailId));
-
+                    counts.TryGetValue(name, out var count);
                     result.Add(new
                     {
                         department = name,
@@ -95,18 +89,12 @@ namespace FactoryManagementSystem.Controllers
                         // layout still says how many jobs it holds.
                         headcount = headcount.TryGetValue(name, out var h) ? h : 0,
                         inPayroll = headcount.ContainsKey(name),
-                        workDetails = details.Count,
-                        allocated,
+                        workDetails = count.WorkDetails,
+                        allocated = count.Allocated,
                     });
                 }
 
-                return Ok(new
-                {
-                    count = result.Count,
-                    departments = result,
-                    unallocatedCount = roster.Count(
-                        e => !allocatedCodes.Contains((e.Tno ?? string.Empty).Trim())),
-                });
+                return Ok(new { count = result.Count, departments = result });
             }
             catch (Exception ex)
             {

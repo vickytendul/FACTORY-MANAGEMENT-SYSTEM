@@ -214,6 +214,35 @@ namespace FactoryManagementSystem.Services.Departments
             return await cmd.ExecuteNonQueryAsync();
         }
 
+        /// How many work details each department has, and how many of them
+        /// somebody is standing on. One query for every department.
+        ///
+        /// The dropdown used to get these by asking for one department's
+        /// work details at a time - fifteen round trips to draw a list of
+        /// fifteen names.
+        public async Task<Dictionary<string, (int WorkDetails, int Allocated)>>
+            GetLayoutCountsAsync()
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                select w.department,
+                       count(*) as work_details,
+                       count(a.id) as allocated
+                  from public.department_work_details w
+                  left join public.department_allocations a
+                         on a.work_detail_id = w.id and a.is_active
+                 where w.is_active
+                 group by w.department
+                """);
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var map = new Dictionary<string, (int, int)>(StringComparer.OrdinalIgnoreCase);
+            while (await r.ReadAsync())
+            {
+                map[r.GetString(0)] = (r.GetInt32(1), (int)r.GetInt64(2));
+            }
+            return map;
+        }
+
         /// Departments that have a layout, whether or not payroll has such
         /// a department. TRAINING AND DEVELOPMENT is real on the floor and
         /// absent from payroll; the layout is where that gets recorded, so

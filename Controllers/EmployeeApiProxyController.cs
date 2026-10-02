@@ -46,8 +46,11 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                // Uncached: this endpoint exists to show what the vendor
+                // says right now, and answering from a minute ago would
+                // make it useless for the thing it is used for.
                 var (success, statusCode, body) = await _companyApiClient.FetchRawAsync(
-                    request.Compcode, request.Fromdt, request.Todt);
+                    request.Compcode, request.Fromdt, request.Todt, allowCache: false);
 
                 if (!success)
                 {

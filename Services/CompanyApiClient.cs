@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
@@ -46,17 +47,73 @@ namespace FactoryManagementSystem.Services
         private readonly SemaphoreSlim _authLock = new(1, 1);
         private string? _cachedToken;
 
+        /// How long an Employee_Att response is reused.
+        ///
+        /// Every screen that needs the roster was fetching it again: the
+        /// Strength Summary once a load, the department dropdown once, the
+        /// department layout once more, and every barcode scan three times
+        /// over - each one a 200 KB download from the vendor before the
+        /// request could start doing its own work. Scanning sixteen people
+        /// onto a layout pulled the whole roster around fifty times.
+        ///
+        /// A minute is short enough that attendance posted during the day
+        /// shows up on the next refresh, and long enough that a burst of
+        /// scanning pays for the roster once.
+        private static readonly TimeSpan RosterCacheTtl = TimeSpan.FromSeconds(60);
+
+        /// Keyed by the exact request, so a different date range is a
+        /// different entry and never serves the wrong days.
+        ///
+        /// The value is the in-flight task, not the finished body, so
+        /// callers arriving together share one fetch instead of starting
+        /// four of their own.
+        private static readonly ConcurrentDictionary<
+            string,
+            (DateTime Expires, Task<(bool success, int statusCode, string body)> Task)
+        > _rosterCache = new();
+
         /// Returns the raw response exactly as the vendor sent it - used by
         /// the relay endpoint, which must keep passing through unchanged
         /// JSON with no parsing/business logic. Authentication is handled
         /// transparently: callers see the same signature and return shape
         /// as before this phase.
+        ///
+        /// [allowCache] is on by default and off for the relay, which exists
+        /// to show what the vendor says right now and would be useless
+        /// answering from a minute ago.
         public async Task<(bool success, int statusCode, string body)> FetchRawAsync(
-            int compCode, string fromDt, string toDt)
+            int compCode, string fromDt, string toDt, bool allowCache = true)
         {
             var payload = JsonSerializer.Serialize(new { Compcode = compCode, fromdt = fromDt, todt = toDt });
-            return await SendWithAuthRetryAsync(CompanyApiUrl, payload);
+
+            if (!allowCache) return await SendWithAuthRetryAsync(CompanyApiUrl, payload);
+
+            var now = DateTime.UtcNow;
+            if (_rosterCache.TryGetValue(payload, out var hit) && hit.Expires > now)
+            {
+                var cached = await hit.Task;
+                // A failure is not worth keeping for a minute - the next
+                // caller should get a fresh attempt rather than the same
+                // error until the entry expires.
+                if (cached.success) return cached;
+                _rosterCache.TryRemove(payload, out _);
+            }
+
+            var entry = _rosterCache.AddOrUpdate(
+                payload,
+                _ => (now.Add(RosterCacheTtl), SendWithAuthRetryAsync(CompanyApiUrl, payload)),
+                (_, existing) => existing.Expires > now
+                    ? existing
+                    : (now.Add(RosterCacheTtl), SendWithAuthRetryAsync(CompanyApiUrl, payload)));
+
+            var result = await entry.Task;
+            if (!result.success) _rosterCache.TryRemove(payload, out _);
+            return result;
         }
+
+        /// Drops everything cached. For a caller that has just changed
+        /// something on the vendor's side and needs to see it.
+        public static void InvalidateRosterCache() => _rosterCache.Clear();
 
         /// Shared by every Company API POST endpoint (Employee_Att,
         /// SewingProdRept, and any future one): obtains the cached token,

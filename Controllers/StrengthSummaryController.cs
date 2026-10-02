@@ -111,9 +111,36 @@ namespace FactoryManagementSystem.Controllers
                 //
                 // Alphabetical rather than by headcount, so a row keeps its
                 // place on a report people read every day.
+                // Which department a person is reported under. A department
+                // layout outranks payroll: payroll says where somebody is
+                // filed, the layout says what they are actually doing, and
+                // the gap between the two is what this report exists to
+                // show. Somebody payroll files under HR who is standing on
+                // a TRAINING AND DEVELOPMENT work detail is reported there,
+                // not under HR - reporting them under HR would hide exactly
+                // the thing the layout was built to record.
+                string DepartmentOf(Person p) =>
+                    load.PlacedByCode.TryGetValue(p.Code, out var placed)
+                        ? placed.Department
+                        : p.Department.Trim().Length == 0
+                            ? NoDepartment
+                            : p.Department.Trim();
+
+                // Sewing staff with no layout of either kind. They get no
+                // row - see below - but a tailor standing on a department
+                // work detail is not one of them.
+                bool IsUnplacedSewing(Person p) =>
+                    !load.PlacedByCode.ContainsKey(p.Code)
+                    && LineDepartments.Contains(p.Department, StringComparer.OrdinalIgnoreCase);
+
                 var departments = people
-                    .Where(p => !LineDepartments.Contains(p.Department, StringComparer.OrdinalIgnoreCase))
-                    .Select(p => p.Department.Trim().Length == 0 ? NoDepartment : p.Department.Trim())
+                    .Where(p => !IsUnplacedSewing(p))
+                    .Select(DepartmentOf)
+                    // A department that has been laid out but has nobody in
+                    // it yet still gets a row, so one just created can be
+                    // seen to exist rather than looking like it failed to
+                    // save.
+                    .Concat(load.LaidOutDepartments)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(d => d, StringComparer.OrdinalIgnoreCase)
                     .ToList();
@@ -133,13 +160,13 @@ namespace FactoryManagementSystem.Controllers
                 {
                     var members = people
                         .Where(p => string.Equals(
-                                        p.Department.Trim().Length == 0 ? NoDepartment : p.Department.Trim(),
-                                        department, StringComparison.OrdinalIgnoreCase)
+                                        DepartmentOf(p), department,
+                                        StringComparison.OrdinalIgnoreCase)
                                     && !allocatedLineByCode.ContainsKey(p.Code))
                         .ToList();
                     foreach (var m in members) counted.Add(m.Code);
                     indirectMembers.AddRange(members);
-                    departmentRows.Add(DepartmentRow(department, members, postedDays, load.ConfirmedCodes));
+                    departmentRows.Add(DepartmentRow(department, members, postedDays, load.PlacedCodes));
                 }
 
                 foreach (var (team, pairs) in Teams)
@@ -159,9 +186,10 @@ namespace FactoryManagementSystem.Controllers
                     teamRows.Add(TeamRow(team, "TEAM TOTAL", teamMembers, postedDays, isTotal: true));
                 }
 
-                // Everybody left is sewing staff with no layout row: every
-                // other department now has a row of its own, so there is
-                // nothing else that can fall through here.
+                // Everybody left is sewing staff with no layout of either
+                // kind: every other department has a row of its own, and a
+                // tailor standing on a department work detail is reported
+                // under that department, so nothing else falls through.
                 //
                 // They get no row either. The TAILOR block already reports
                 // them as BAL TO ALL, and a 451-strong row dwarfed every
@@ -184,7 +212,7 @@ namespace FactoryManagementSystem.Controllers
                     postedDayCount = postedDays.Count,
                     dayCount = days,
                     tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays),
-                    others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays, load.ConfirmedCodes),
+                    others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays, load.PlacedCodes),
 
                     // Two tables, not one list the screen has to sort out.
                     //
@@ -198,7 +226,7 @@ namespace FactoryManagementSystem.Controllers
                     // checkers working alongside them.
                     indirect = departmentRows,
                     indirectTotal = DepartmentRow(
-                        "INDIRECT TOTAL", indirectMembers, postedDays, load.ConfirmedCodes),
+                        "INDIRECT TOTAL", indirectMembers, postedDays, load.PlacedCodes),
                     direct = teamRows,
                     directTotal = TeamRow(
                         "", "DIRECT TOTAL", directMembers, postedDays, isTotal: true),
@@ -209,7 +237,7 @@ namespace FactoryManagementSystem.Controllers
                     // a confirmation says so for the departments.
                     totalManpower = DepartmentRow(
                         "TOTAL MANPOWER", people, postedDays,
-                        load.ConfirmedCodes
+                        load.PlacedCodes
                             .Concat(allocatedLineByCode.Keys)
                             .ToHashSet(StringComparer.OrdinalIgnoreCase)),
                     // Sewing people on the roster with no active layout row
@@ -305,7 +333,13 @@ namespace FactoryManagementSystem.Controllers
             Dictionary<string, int> AllocatedLineByCode,
             DateTime From,
             DateTime To,
-            HashSet<string> ConfirmedCodes);
+            Dictionary<string, (string Department, string WorkDetail)> PlacedByCode,
+            List<string> LaidOutDepartments)
+        {
+            /// Everyone a department layout has placed somewhere.
+            public HashSet<string> PlacedCodes =>
+                new(PlacedByCode.Keys, StringComparer.OrdinalIgnoreCase);
+        }
 
         /// The roster, the days payroll has posted and who is on a line -
         /// the three things every action here starts from. Shared so the
@@ -350,34 +384,39 @@ namespace FactoryManagementSystem.Controllers
 
             return new RosterLoad(
                 people, postedDays, allocatedLineByCode, from, day,
-                await ConfirmedCodesAsync(people));
+                await PlacedByCodeAsync(),
+                await LaidOutDepartmentsAsync());
         }
 
-        /// Everyone a department row can call allocated: the people a
-        /// department layout puts on a work detail.
+        /// Where the department layouts put people, keyed by employee code.
         ///
-        /// Nobody here will ever have a sewing layout row, which is why a
+        /// These are the people a department row calls allocated. Nobody
+        /// here will ever have a sewing layout row, which is why a
         /// department row cannot read allocation off the layouts the way a
         /// team row does.
         ///
-        /// Confirmed placements used to count here too. They no longer do.
-        /// A confirmation says which department somebody is in; a work
-        /// detail says which job they are doing, and once the layouts can
-        /// answer that for every department, the weaker answer is not worth
-        /// having two ways of being allocated for. The table and the screen
-        /// behind it are kept, unused, rather than dropped.
-        private async Task<HashSet<string>> ConfirmedCodesAsync(IEnumerable<Person> people)
+        /// Confirmed placements used to count too. They no longer do: a
+        /// confirmation says which department somebody is in, a work detail
+        /// says which job they are doing, and the weaker answer is not
+        /// worth a second route to the same number.
+        private async Task<Dictionary<string, (string Department, string WorkDetail)>>
+            PlacedByCodeAsync()
         {
-            var confirmed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            if (_departmentLayouts is null) return confirmed;
-
-            foreach (var allocation in await _departmentLayouts.GetActiveAllocationsAsync())
+            if (_departmentLayouts is null)
             {
-                var code = (allocation.EmployeeCode ?? string.Empty).Trim();
-                if (code.Length > 0) confirmed.Add(code);
+                return new Dictionary<string, (string, string)>(
+                    StringComparer.OrdinalIgnoreCase);
             }
-            return confirmed;
+            return await _departmentLayouts.GetPlacementsByCodeAsync();
         }
+
+        /// Departments that have a layout, whether or not payroll has one.
+        /// They get a row even with nobody in it yet, so a department
+        /// somebody has just laid out can be seen to exist.
+        private async Task<List<string>> LaidOutDepartmentsAsync() =>
+            _departmentLayouts is null
+                ? new List<string>()
+                : await _departmentLayouts.GetDepartmentsWithLayoutsAsync();
 
         private sealed record Person(
             string Code, string Name, string Department, string Designation,

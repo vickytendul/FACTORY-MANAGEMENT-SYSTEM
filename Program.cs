@@ -302,7 +302,13 @@ builder.Services.AddSingleton<ICcRepository>(sp => ccsSource switch
 // across, not for running on.
 builder.Services.AddSingleton<FirestoreUserRepository>();
 
-if (usersSource is "supabase" or "dual")
+// Registered whenever Supabase is configured at all, not only when the
+// flag has moved. The copy endpoint needs to WRITE to Supabase while the
+// flag still says firebase - that is the whole point of it - and gating
+// this on the flag made the two steps impossible to order: the data
+// could not be copied until the flag moved, and the flag must not move
+// until the data is copied.
+if (hasSupabase || usersSource is "supabase" or "dual")
     builder.Services.AddSingleton<SupabaseUserRepository>();
 
 builder.Services.AddSingleton<IUserRepository>(sp => usersSource switch
@@ -336,7 +342,9 @@ builder.Services.AddSingleton<IUserRepository>(sp => usersSource switch
 // different risk from moving a read.
 builder.Services.AddSingleton<FirestoreEmployeeRepository>();
 
-if (employeesSource is "supabase" or "dual")
+// Same reasoning as the accounts above: the copy, and the sync's mirror
+// write, both need this before the flag has moved.
+if (hasSupabase || employeesSource is "supabase" or "dual")
     builder.Services.AddSingleton<SupabaseEmployeeRepository>();
 
 builder.Services.AddSingleton<IEmployeeRepository>(sp => employeesSource switch

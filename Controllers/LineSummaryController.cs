@@ -890,6 +890,45 @@ namespace FactoryManagementSystem.Controllers
                 Sam == null ? null : Math.Round(Totals.Output * Sam.Value, 2);
         }
 
+        /// The sewing teams, as the Strength Summary lays them out: four
+        /// line pairs each, every ninth line skipped because it does not
+        /// exist on the floor.
+        ///
+        /// Kept here as line ranges rather than pairs - the report groups
+        /// by team and does not care which pair a line sits in.
+        private static readonly (string Team, int First, int Last)[] TeamRanges =
+        {
+            ("TEAM-1", 1, 8),
+            ("TEAM-2", 10, 17),
+            ("TEAM-3", 19, 26),
+            ("TEAM-4", 28, 35),
+            ("TEAM-5", 37, 44),
+        };
+
+        private static string TeamOf(int lineId)
+        {
+            foreach (var (team, first, last) in TeamRanges)
+            {
+                if (lineId >= first && lineId <= last) return team;
+            }
+            // A line outside every team still gets a row - it is running,
+            // and dropping it would make the totals disagree with the floor.
+            return "OTHER";
+        }
+
+        /// Right first time: the share of pieces that passed.
+        ///
+        /// Null when nothing was made - a line that produced nothing is not
+        /// a line with bad quality, and 0% would say it was. Rejects with
+        /// no output would be 0% by the same formula, which is the one case
+        /// where that reading is right.
+        private static double? RftPercent(double output, double rej)
+        {
+            var made = output + rej;
+            if (made <= 0) return null;
+            return Math.Round(output / made * 100, 2);
+        }
+
         private static double? Percent(double? earned, int presentDays)
         {
             if (earned == null) return null;
@@ -902,6 +941,7 @@ namespace FactoryManagementSystem.Controllers
         {
             lineId = (int?)line.LineId,
             lineName = line.LineName,
+            team = TeamOf(line.LineId),
             ccNo = line.CcNo,
             sam = line.Sam,
             totalPositions = line.TotalPositions,
@@ -936,6 +976,7 @@ namespace FactoryManagementSystem.Controllers
             earnedMinutes = line.EarnedMinutes,
             owePercent = Percent(line.EarnedMinutes, line.Totals.TotalPresent),
             effPercent = Percent(line.EarnedMinutes, line.Totals.TailorsPresent),
+            rftPercent = RftPercent(line.Totals.Output, line.Totals.Rej),
         };
 
         /// The factory column.
@@ -983,6 +1024,7 @@ namespace FactoryManagementSystem.Controllers
             {
                 lineId = (int?)null,
                 lineName = "FACTORY OVERALL",
+                team = "",
                 ccNo = string.Empty,
                 sam = (double?)null,
                 totalPositions = lines.Sum(l => l.TotalPositions),
@@ -1014,6 +1056,13 @@ namespace FactoryManagementSystem.Controllers
                 effPercent = withSam.Count == 0
                     ? null
                     : Percent(earned, withSam.Sum(l => l.Totals.TailorsPresent)),
+
+                // Pieces across the whole floor, not the lines' own
+                // percentages averaged - a line that made forty pieces
+                // would otherwise weigh as much as one that made six
+                // hundred.
+                rftPercent = RftPercent(
+                    lines.Sum(l => l.Totals.Output), lines.Sum(l => l.Totals.Rej)),
 
                 linesWithoutSam,
                 linesWithoutAttendance,

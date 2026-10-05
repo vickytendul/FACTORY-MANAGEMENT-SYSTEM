@@ -30,14 +30,23 @@ namespace FactoryManagementSystem.Services
             "jul", "aug", "sep", "oct", "nov", "dec",
         };
 
+        /// Null unless Supabase is wired up. The sync writes Firestore and
+        /// then mirrors into Supabase, rather than writing one or the
+        /// other: Firestore is still where the ids are allocated and where
+        /// the audits read from, and the app may already be READING the
+        /// roster out of Supabase.
+        private readonly Employees.SupabaseEmployeeRepository? _supabaseEmployees;
+
         public EmployeeSyncService(
             CompanyApiClient companyApiClient,
             FirestoreService firestore,
-            ILogger<EmployeeSyncService> logger)
+            ILogger<EmployeeSyncService> logger,
+            Employees.SupabaseEmployeeRepository? supabaseEmployees = null)
         {
             _companyApiClient = companyApiClient;
             _firestore = firestore;
             _logger = logger;
+            _supabaseEmployees = supabaseEmployees;
         }
 
         public async Task<EmployeeSyncResult> RunAsync(DateTime fromDate, DateTime toDate)
@@ -272,7 +281,11 @@ namespace FactoryManagementSystem.Services
             // EmployeeMaster documents count toward that (the counter is no
             // longer part of this batch - it already committed above).
             var writeOps = toWrite
-                .Select(w => (docRef: _firestore.EmployeeMasters.Document(w.code), document: (object)w.document, isNew: w.isNew))
+                .Select(w => (
+                    docRef: _firestore.EmployeeMasters.Document(w.code),
+                    document: (object)w.document,
+                    employee: w.document,
+                    isNew: w.isNew))
                 .ToList();
 
             var batches = writeOps.Chunk(BatchLimit).ToList();
@@ -300,6 +313,34 @@ namespace FactoryManagementSystem.Services
                     _logger.LogInformation(
                         "Employee sync - batch {Successful}/{Total} committed ({Ops} operations)",
                         successfulBatches, batches.Count, chunk.Length);
+
+                    // Mirrored into Supabase after Firestore has committed,
+                    // so the roster the app READS stays current once
+                    // Employees__Source has moved. The upsert there never
+                    // writes grade over an existing row - the vendor has no
+                    // grade to send, and this would otherwise blank every
+                    // one of them.
+                    //
+                    // A failure here is logged and swallowed. Firestore has
+                    // already committed, so there is nothing left to undo,
+                    // and the copy endpoint repairs whatever was missed.
+                    if (_supabaseEmployees != null)
+                    {
+                        foreach (var op in chunk)
+                        {
+                            try
+                            {
+                                await _supabaseEmployees.UpsertAsync(op.employee);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(
+                                    ex,
+                                    "Employee sync - supabase mirror failed: {Code}",
+                                    op.employee.EmployeeCode);
+                            }
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {

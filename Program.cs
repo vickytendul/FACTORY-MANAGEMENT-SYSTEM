@@ -141,6 +141,7 @@ if (skillsSource is "supabase" or "dual"
     || attendanceSource is "supabase" or "dual"
     || usersSource is "supabase" or "dual"
     || employeesSource is "supabase" or "dual"
+    || (builder.Configuration["LayoutIds:Source"] ?? "").Trim().ToLowerInvariant() == "supabase"
     || hasSupabase)
 {
     var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
@@ -205,7 +206,23 @@ builder.Services.AddSingleton<ISkillRepository>(sp => skillsSource switch
 // allocated from Counters/LayoutMasterId and Counters/LayoutMasterOperation
 // so that an id means the same row in both stores, and so that switching
 // back to firebase mode cannot re-issue ids Supabase already handed out.
-builder.Services.AddSingleton<ILayoutIdAllocator, FirestoreLayoutIdAllocator>();
+//
+// LayoutIds__Source = firebase | supabase   (default firebase)
+//
+// The exception above holds while this is firebase, which it is unless
+// somebody says otherwise. Set it to supabase only on a deployment that
+// has stopped going back - see SupabaseLayoutIdAllocator.
+var layoutIdsSource =
+    (builder.Configuration["LayoutIds:Source"] ?? "firebase").Trim().ToLowerInvariant();
+
+builder.Services.AddSingleton<FirestoreLayoutIdAllocator>();
+
+if (layoutIdsSource == "supabase")
+    builder.Services.AddSingleton<SupabaseLayoutIdAllocator>();
+
+builder.Services.AddSingleton<ILayoutIdAllocator>(sp => layoutIdsSource == "supabase"
+    ? sp.GetRequiredService<SupabaseLayoutIdAllocator>()
+    : sp.GetRequiredService<FirestoreLayoutIdAllocator>());
 
 // =====================================================
 // CC master: Firebase or Supabase, on its OWN flag

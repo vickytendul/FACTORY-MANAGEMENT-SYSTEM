@@ -1,7 +1,9 @@
+using FactoryManagementSystem.Services;
 using FactoryManagementSystem.Services.Employees;
 using FactoryManagementSystem.Services.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Npgsql;
 
 namespace FactoryManagementSystem.Controllers
 {
@@ -31,23 +33,29 @@ namespace FactoryManagementSystem.Controllers
         private readonly SupabaseUserRepository? _supabaseUsers;
         private readonly FirestoreEmployeeRepository _firebaseEmployees;
         private readonly SupabaseEmployeeRepository? _supabaseEmployees;
+        private readonly FirestoreService _firestore;
+        private readonly NpgsqlDataSource? _dataSource;
         private readonly IConfiguration _config;
         private readonly ILogger<SupabaseMigrationController> _log;
 
         public SupabaseMigrationController(
             FirestoreUserRepository firebaseUsers,
             FirestoreEmployeeRepository firebaseEmployees,
+            FirestoreService firestore,
             IConfiguration config,
             ILogger<SupabaseMigrationController> log,
             SupabaseUserRepository? supabaseUsers = null,
-            SupabaseEmployeeRepository? supabaseEmployees = null)
+            SupabaseEmployeeRepository? supabaseEmployees = null,
+            NpgsqlDataSource? dataSource = null)
         {
             _firebaseUsers = firebaseUsers;
             _firebaseEmployees = firebaseEmployees;
+            _firestore = firestore;
             _config = config;
             _log = log;
             _supabaseUsers = supabaseUsers;
             _supabaseEmployees = supabaseEmployees;
+            _dataSource = dataSource;
         }
 
         // ── accounts ─────────────────────────────────────────────────────
@@ -207,6 +215,133 @@ namespace FactoryManagementSystem.Controllers
                     ? "The employee master is in Supabase. Set Employees__Source=supabase."
                     : "Some employees did not copy - see Failed. Do NOT switch yet.",
             });
+        }
+
+        // ── layout id allocators ─────────────────────────────────────────
+
+        /// Where both allocators stand. Worth looking at before AND after
+        /// the switch: if Postgres is ever behind Firestore, the next
+        /// layout saved will reuse an id that already means another row.
+        [HttpGet("layout-ids/status")]
+        public async Task<IActionResult> LayoutIdStatus([FromQuery] string key)
+        {
+            if (!KeyOk(key)) return BadKey();
+            if (_dataSource == null) return SupabaseMissing();
+
+            var (fbLayout, fbOperation) = await ReadFirestoreCountersAsync();
+
+            await using var cmd = _dataSource.CreateCommand("""
+                select
+                    coalesce((select value from public.layout_counters
+                              where name = 'LayoutMasterId'), 0),
+                    coalesce((select last_value from public.operation_id_seq), 0),
+                    (select count(*) from public.operation_id_lookup)
+                """);
+            await using var r = await cmd.ExecuteReaderAsync();
+            await r.ReadAsync();
+
+            var pgLayout = r.GetInt32(0);
+            var pgOperation = (int)r.GetInt64(1);
+            var pgLookupRows = r.GetInt64(2);
+
+            return Ok(new
+            {
+                Success = true,
+                Firestore = new { LayoutMasterId = fbLayout, NextOperationId = fbOperation },
+                Supabase = new
+                {
+                    LayoutMasterId = pgLayout,
+                    OperationIdSeq = pgOperation,
+                    LookupRows = pgLookupRows,
+                },
+                SafeToSwitch = pgLayout >= fbLayout && pgOperation >= fbOperation,
+                Message = pgLayout >= fbLayout && pgOperation >= fbOperation
+                    ? "Postgres is level with or ahead of Firestore."
+                    : "Postgres is BEHIND Firestore. Run layout-ids/copy before switching.",
+            });
+        }
+
+        /// Seeds the Postgres counters from Firestore's and copies the
+        /// operation lookup across.
+        ///
+        /// Safe to re-run: the counters only ever move forward, and the
+        /// lookup rows are keyed by the same string Firestore used.
+        [HttpPost("layout-ids/copy")]
+        public async Task<IActionResult> CopyLayoutIds([FromQuery] string key)
+        {
+            if (!KeyOk(key)) return BadKey();
+            if (_dataSource == null) return SupabaseMissing();
+
+            var (fbLayout, fbOperation) = await ReadFirestoreCountersAsync();
+
+            var lookup = await _firestore.OperationIdLookup.GetSnapshotAsync();
+            var rows = lookup.Documents
+                .Where(d => d.ContainsField("OperationId"))
+                .Select(d => (Key: d.Id, Id: d.GetValue<int>("OperationId")))
+                .ToList();
+
+            var copied = 0;
+            foreach (var row in rows)
+            {
+                await using var ins = _dataSource.CreateCommand("""
+                    insert into public.operation_id_lookup
+                        (lookup_key, operation_id, last_updated_on)
+                    values (@k, @i, now())
+                    on conflict (lookup_key) do nothing
+                    """);
+                ins.Parameters.AddWithValue("k", row.Key);
+                ins.Parameters.AddWithValue("i", row.Id);
+                copied += await ins.ExecuteNonQueryAsync();
+            }
+
+            // The sequence is set above the highest id actually in use, not
+            // merely to Firestore's counter: that counter has been found
+            // behind reality before - 1222 against a real maximum of 1403 -
+            // and seeding from it would hand out ids already taken.
+            var highest = rows.Count == 0 ? 0 : rows.Max(x => x.Id);
+            var operationFloor = Math.Max(Math.Max(fbOperation, highest + 1), 1000);
+
+            await using (var seed = _dataSource.CreateCommand("""
+                insert into public.layout_counters (name, value)
+                values ('LayoutMasterId', @v)
+                on conflict (name) do update
+                    set value = greatest(public.layout_counters.value, @v);
+                select setval('public.operation_id_seq', @o, false);
+                """))
+            {
+                seed.Parameters.AddWithValue("v", fbLayout);
+                seed.Parameters.AddWithValue("o", (long)operationFloor);
+                await seed.ExecuteNonQueryAsync();
+            }
+
+            return Ok(new
+            {
+                Success = true,
+                LayoutMasterIdSeededTo = fbLayout,
+                OperationIdSeqSeededTo = operationFloor,
+                LookupRowsInFirestore = rows.Count,
+                LookupRowsInserted = copied,
+                Message =
+                    "Counters seeded and the lookup copied. Check "
+                    + "layout-ids/status, then set LayoutIds__Source=supabase.",
+            });
+        }
+
+        private async Task<(int layoutMasterId, int nextOperationId)>
+            ReadFirestoreCountersAsync()
+        {
+            var layoutSnap = await _firestore.Counters.Document("LayoutMasterId")
+                .GetSnapshotAsync();
+            var operationSnap = await _firestore.Counters
+                .Document("LayoutMasterOperation").GetSnapshotAsync();
+
+            return (
+                layoutSnap.Exists && layoutSnap.ContainsField("Value")
+                    ? layoutSnap.GetValue<int>("Value")
+                    : 0,
+                operationSnap.Exists && operationSnap.ContainsField("NextOperationId")
+                    ? operationSnap.GetValue<int>("NextOperationId")
+                    : 1000);
         }
 
         // ── shared ───────────────────────────────────────────────────────

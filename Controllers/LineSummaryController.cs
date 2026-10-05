@@ -431,10 +431,27 @@ namespace FactoryManagementSystem.Controllers
                     raw));
             }
 
-            // The ones nobody has a record for come first: that is the
-            // list somebody is going to act on.
+            // Leavers are out of the figures but not out of the list: they
+            // are the reason a supervisor is reading it, because each one
+            // is a layout row that still has to be freed.
+            foreach (var code in context.LeftOnLayout)
+            {
+                var row = context.LayoutItems.FirstOrDefault(x =>
+                    string.Equals(x.EmployeeCode, code, StringComparison.OrdinalIgnoreCase));
+                var sec = (row?.Section ?? "").Trim().ToUpper();
+                people.Add(new AttendancePerson(
+                    code,
+                    row?.EmployeeName ?? string.Empty,
+                    row?.Section ?? string.Empty,
+                    sec == "MAIN" || sec == "SUPER TEAM" ? "TAILOR" : "OTHERS",
+                    "Left",
+                    null));
+            }
+
+            // Leavers first, then the ones nobody has a record for: that is
+            // the order somebody acts on them in.
             var ordered = people
-                .OrderBy(p => p.State == "NoRecord" ? 0 : 1)
+                .OrderBy(p => p.State switch { "Left" => 0, "NoRecord" => 1, _ => 2 })
                 .ThenBy(p => p.EmployeeCode, StringComparer.Ordinal)
                 .ToList();
 
@@ -443,7 +460,8 @@ namespace FactoryManagementSystem.Controllers
                 lineId,
                 date = dateOnly,
                 attendanceEstimated = canEstimate,
-                onRoll = ordered.Count,
+                onRoll = ordered.Count(p => p.State != "Left"),
+                leftOnLayout = ordered.Count(p => p.State == "Left"),
                 noRecordCount = ordered.Count(p => p.State == "NoRecord"),
                 people = ordered,
             });
@@ -463,7 +481,11 @@ namespace FactoryManagementSystem.Controllers
             List<LayoutTransaction> LayoutItems,
             Dictionary<string, string> EmployeeSectionMap,
             int TailorsOnRoll,
-            int OthersOnRoll);
+            int OthersOnRoll,
+            /// Codes still on the layout belonging to people who have left.
+            /// Out of every figure above, and reported so the line can be
+            /// cleaned up rather than quietly carrying them.
+            List<string> LeftOnLayout);
 
         /// Resolves the Line <-> Employee/Section/CC mapping exactly once
         /// (current Firestore state only - no historical timeline exists),
@@ -532,9 +554,26 @@ namespace FactoryManagementSystem.Controllers
             int tailorsOnRoll = 0;
             int othersOnRoll = 0;
 
+            // People who have left the company but are still standing on
+            // this layout. They are NOT on roll - they are not employed -
+            // and counting them was reading as "attendance unknown" for a
+            // third of a line, which is a payroll gap somebody would go and
+            // chase and never find.
+            var left = await FetchLeftCodesAsync(
+                layoutItems.Select(x => x.EmployeeCode).Where(c => !string.IsNullOrWhiteSpace(c))!);
+
+            var leftOnLayout = new List<string>();
+
             foreach (var item in layoutItems)
             {
                 if (string.IsNullOrWhiteSpace(item.EmployeeCode)) continue;
+
+                if (left.Contains(item.EmployeeCode))
+                {
+                    if (!leftOnLayout.Contains(item.EmployeeCode, StringComparer.OrdinalIgnoreCase))
+                        leftOnLayout.Add(item.EmployeeCode);
+                    continue;
+                }
 
                 if (!employeeSectionMap.ContainsKey(item.EmployeeCode))
                 {
@@ -548,7 +587,66 @@ namespace FactoryManagementSystem.Controllers
                     othersOnRoll++;
             }
 
-            return new LineContext(ccNo, sam, layoutItems, employeeSectionMap, tailorsOnRoll, othersOnRoll);
+            return new LineContext(
+                ccNo, sam, layoutItems, employeeSectionMap,
+                tailorsOnRoll, othersOnRoll, leftOnLayout);
+        }
+
+        /// Which of these codes belong to somebody who has left.
+        ///
+        /// Payroll renames a leaver's code by appending Z - GUL1578 becomes
+        /// GUL1578Z - and the layout keeps the old one, so the old code
+        /// simply stops appearing in the roster and every lookup for it
+        /// misses. Read as "we have no attendance for this person", which
+        /// is true and useless; what it means is that they are gone.
+        ///
+        /// Verified against the whole roster rather than assumed: of 853
+        /// rows, the 26 ending in Z all carry a real release date and the
+        /// 827 that do not all carry the 9999-01-01 sentinel for still
+        /// employed. No exceptions either way.
+        ///
+        /// A code missing from the roster WITHOUT a Z twin is left alone -
+        /// that is a genuine unknown, and guessing at it would be the same
+        /// mistake in the other direction.
+        private async Task<HashSet<string>> FetchLeftCodesAsync(IEnumerable<string> codes)
+        {
+            var wanted = new HashSet<string>(codes, StringComparer.OrdinalIgnoreCase);
+            var left = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (wanted.Count == 0) return left;
+
+            // The roster for today, from the same 60s-cached call every
+            // other consumer uses. Who has left is a current-state fact,
+            // not a per-day one - the vendor carries one release date per
+            // person, not a history - so the range asked for does not
+            // change the answer.
+            var today = DateTime.UtcNow.Date;
+            var (success, _, body) = await _companyApiClient.FetchRawAsync(
+                CompanyApiCompCode,
+                CompanyApiClient.FormatDate(today),
+                CompanyApiClient.FormatDate(today));
+
+            if (!success || string.IsNullOrWhiteSpace(body)) return left;
+
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return left;
+
+            var roster = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var employee in doc.RootElement.EnumerateArray())
+            {
+                if (!employee.TryGetProperty("tno", out var tnoProp)) continue;
+                var tno = tnoProp.ValueKind == JsonValueKind.String
+                    ? tnoProp.GetString()
+                    : tnoProp.ToString();
+                if (!string.IsNullOrWhiteSpace(tno)) roster.Add(tno.Trim());
+            }
+
+            foreach (var code in wanted)
+            {
+                if (!roster.Contains(code) && roster.Contains(code + "Z"))
+                    left.Add(code);
+            }
+
+            return left;
         }
 
         /// Calls Employee_Att ONCE for the whole [fromDate, toDate] range
@@ -975,7 +1073,8 @@ namespace FactoryManagementSystem.Controllers
                         TotalPositions: context.LayoutItems.Count,
                         TailorsOnRoll: context.TailorsOnRoll,
                         OthersOnRoll: context.OthersOnRoll,
-                        Totals: totals));
+                        Totals: totals,
+                        LeftOnLayout: context.LeftOnLayout.Count));
                 }
 
                 return Ok(new
@@ -1003,7 +1102,9 @@ namespace FactoryManagementSystem.Controllers
 
         private sealed record FactoryLine(
             int LineId, string LineName, string CcNo, double? Sam, int TotalPositions,
-            int TailorsOnRoll, int OthersOnRoll, LineTotals Totals)
+            int TailorsOnRoll, int OthersOnRoll, LineTotals Totals,
+            /// Still on this line's layout, but no longer employed.
+            int LeftOnLayout = 0)
         {
             public double? EarnedMinutes =>
                 Sam == null ? null : Math.Round(Totals.Output * Sam.Value, 2);
@@ -1064,6 +1165,12 @@ namespace FactoryManagementSystem.Controllers
             ccNo = line.CcNo,
             sam = line.Sam,
             totalPositions = line.TotalPositions,
+
+            // People still standing on this layout who have left the
+            // company. Out of every figure below - they are not employed -
+            // and reported so the line gets cleaned up rather than quietly
+            // carrying them as unknown attendance forever.
+            leftOnLayout = line.LeftOnLayout,
 
             // A current-state snapshot, not summed over the period: there
             // is no historical allocation timeline to read a past day's
@@ -1202,6 +1309,10 @@ namespace FactoryManagementSystem.Controllers
                 // hundred.
                 rftPercent = RftPercent(
                     lines.Sum(l => l.Totals.Output), lines.Sum(l => l.Totals.Rej)),
+
+                // Across the whole floor: layout rows held by people who
+                // have left. One number somebody can act on.
+                leftOnLayout = lines.Sum(l => l.LeftOnLayout),
 
                 linesWithoutSam,
                 linesWithoutAttendance,

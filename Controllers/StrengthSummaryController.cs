@@ -213,6 +213,13 @@ namespace FactoryManagementSystem.Controllers
                     // should be able to say so.
                     postedDayCount = postedDays.Count,
                     dayCount = days,
+
+                    // On the roster payroll sent, but already released, so
+                    // in none of the figures below. Reported because a
+                    // headcount on its own invites "is that everybody?"
+                    // every time somebody reads it.
+                    leavers = load.Leavers,
+
                     tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays, load.PlacedCodes),
                     others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays, load.PlacedCodes),
 
@@ -349,7 +356,9 @@ namespace FactoryManagementSystem.Controllers
             DateTime From,
             DateTime To,
             Dictionary<string, (string Department, string WorkDetail)> PlacedByCode,
-            List<string> LaidOutDepartments)
+            List<string> LaidOutDepartments,
+            /// On the roster but already released - in none of the figures.
+            int Leavers)
         {
             /// Everyone a department layout has placed somewhere.
             public HashSet<string> PlacedCodes =>
@@ -381,7 +390,7 @@ namespace FactoryManagementSystem.Controllers
             var days = new List<DateTime>();
             for (var d = from; d <= day; d = d.AddDays(1)) days.Add(d);
 
-            var people = ParseRoster(body, days);
+            var (people, leavers) = ParseRoster(body, days);
 
             // Only the days payroll has actually posted. A day nobody has a
             // status on is not a day everybody was absent.
@@ -414,7 +423,8 @@ namespace FactoryManagementSystem.Controllers
             return new RosterLoad(
                 people, postedDays, allocatedLineByCode, from, day,
                 await PlacedByCodeAsync(),
-                await LaidOutDepartmentsAsync());
+                await LaidOutDepartmentsAsync(),
+                leavers);
         }
 
         /// Where the department layouts put people, keyed by employee code.
@@ -492,13 +502,25 @@ namespace FactoryManagementSystem.Controllers
 
         /// Active employees, each carrying their status for every requested
         /// day keyed by that day.
-        private static List<Person> ParseRoster(string body, IReadOnlyList<DateTime> days)
+        /// The roster, and how many it carried who have already left.
+        ///
+        /// The leaver count is returned rather than recomputed, so it
+        /// cannot drift from the filter that produced it - and it is
+        /// returned rather than stashed on the controller, because two
+        /// requests in flight would otherwise report each other's.
+        ///
+        /// It goes on the screen because 827 on its own invites the
+        /// question "is that everybody?" every time somebody reads it, and
+        /// "827, 26 left" answers it without anybody having to ask.
+        private static (List<Person> People, int Leavers) ParseRoster(
+            string body, IReadOnlyList<DateTime> days)
         {
             var people = new List<Person>();
-            if (string.IsNullOrWhiteSpace(body)) return people;
+            var leavers = 0;
+            if (string.IsNullOrWhiteSpace(body)) return (people, leavers);
 
             using var doc = JsonDocument.Parse(body);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array) return people;
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return (people, leavers);
 
             static string Read(JsonElement e, string name) =>
                 e.TryGetProperty(name, out var v)
@@ -517,7 +539,10 @@ namespace FactoryManagementSystem.Controllers
                 var leaving = Read(e, "DateOfReleave");
                 if (leaving.Length > 0 && DateTime.TryParse(leaving, out var left)
                     && left.Date <= DateTime.Now.Date)
+                {
+                    leavers++;
                     continue;
+                }
 
                 var byDay = new Dictionary<DateTime, string>();
                 foreach (var d in days) byDay[d.Date] = Read(e, CompanyApiClient.FormatDate(d));
@@ -525,7 +550,7 @@ namespace FactoryManagementSystem.Controllers
                 people.Add(new Person(
                     code, Read(e, "Name"), Read(e, "DeptName"), Read(e, "DesignationName"), byDay));
             }
-            return people;
+            return (people, leavers);
         }
 
         /// Average headcount per posted day. With one posted day this is

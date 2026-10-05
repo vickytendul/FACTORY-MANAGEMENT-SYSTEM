@@ -3,6 +3,7 @@ using FactoryManagementSystem.Services.Employees;
 using FactoryManagementSystem.Services.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.Filters;
 using Npgsql;
 
 namespace FactoryManagementSystem.Controllers
@@ -24,9 +25,35 @@ namespace FactoryManagementSystem.Controllers
     /// you need in order to log in cannot be satisfied when that is what is
     /// broken. It is protected instead by Migration__Key, and by refusing
     /// to overwrite anything that is already there.
+    /// Reports what actually went wrong instead of a bare 500.
+    ///
+    /// A migration tool is run by somebody standing at a terminal deciding
+    /// whether it is safe to switch a live system over. "Internal server
+    /// error" tells them nothing; "relation public.app_users does not
+    /// exist" tells them they have not run the SQL yet. The message is
+    /// from Npgsql or Firestore and names tables and columns, which is
+    /// exactly what is wanted here and nothing a caller holding the
+    /// migration key does not already know.
+    public sealed class ReportTheErrorAttribute : ExceptionFilterAttribute
+    {
+        public override void OnException(ExceptionContext context)
+        {
+            context.Result = new ObjectResult(new
+            {
+                Success = false,
+                Error = context.Exception.GetType().Name,
+                Message = context.Exception.Message,
+                Inner = context.Exception.InnerException?.Message,
+            })
+            { StatusCode = 500 };
+            context.ExceptionHandled = true;
+        }
+    }
+
     [ApiController]
     [Route("api/[controller]")]
     [AllowAnonymous]
+    [ReportTheError]
     public class SupabaseMigrationController : ControllerBase
     {
         private readonly FirestoreUserRepository _firebaseUsers;

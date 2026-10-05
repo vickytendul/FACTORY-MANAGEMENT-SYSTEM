@@ -390,11 +390,25 @@ namespace FactoryManagementSystem.Controllers
                 .ToList();
 
             var allocatedLineByCode = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var sectionByCode = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var t in await _layouts.GetActiveLayoutTransactionsAsync())
             {
                 var code = (t.EmployeeCode ?? string.Empty).Trim();
                 if (code.Length == 0) continue;
+                sectionByCode[code] = t.Section ?? string.Empty;
                 allocatedLineByCode[code] = t.LineId;
+            }
+
+            // Stamped onto the roster rather than looked up at every call
+            // site: IsTailor is read inside a dozen lambdas, and threading
+            // the map through all of them is how one of them ends up using
+            // the old rule.
+            foreach (var p in people)
+            {
+                if (sectionByCode.TryGetValue(p.Code, out var section))
+                {
+                    p.Section = section;
+                }
             }
 
             return new RosterLoad(
@@ -437,10 +451,37 @@ namespace FactoryManagementSystem.Controllers
             string Code, string Name, string Department, string Designation,
             Dictionary<DateTime, string> StatusByDay)
         {
-            /// TAILOR vs OTHERS uses the same rule the manpower categories
-            /// use, so this page and Employee Master cannot disagree about
-            /// who is a tailor.
-            public bool IsTailor => SummaryService.CategoryFor(Department, Designation) == "Tailor";
+            /// The layout section this person is standing in - MAIN,
+            /// BACKUP, SUPER TEAM, OTHERS - or empty when no layout has
+            /// them. Filled in by LoadAsync once the layouts are read.
+            public string Section { get; set; } = string.Empty;
+
+            /// TAILOR vs OTHERS, decided by the layout section wherever
+            /// there is one.
+            ///
+            /// It used to come from the payroll department and designation,
+            /// which is what Employee Master uses. The two disagreed about
+            /// the same people on the same day: somebody payroll files
+            /// under QUALITY who stands in MAIN is a tailor on the line and
+            /// the Line Summary counted them as one, while this page called
+            /// them OTHERS. The floor goes by where somebody stands, so the
+            /// section wins.
+            ///
+            /// Payroll is the fallback and not a second opinion - it is the
+            /// only thing left to go on for the people no layout places,
+            /// who have no section to read.
+            public bool IsTailor
+            {
+                get
+                {
+                    var section = Section.Trim().ToUpperInvariant();
+                    if (section.Length > 0)
+                    {
+                        return section == "MAIN" || section == "SUPER TEAM";
+                    }
+                    return SummaryService.CategoryFor(Department, Designation) == "Tailor";
+                }
+            }
 
             public string StatusOn(DateTime day) =>
                 StatusByDay.TryGetValue(day.Date, out var s) ? s : string.Empty;

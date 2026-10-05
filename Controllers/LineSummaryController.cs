@@ -505,13 +505,42 @@ namespace FactoryManagementSystem.Controllers
             // single-purpose Firestore queries on every Line Summary load.
             var activeLayoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
 
+            // A line can be running two CCs at once, and line 19 was: 47
+            // people on CC 305836 and 3 on CC 339725. Resolving the CC from
+            // whichever row came back first then filtering the line to that
+            // CC threw the other 47 away - the line reported 3 on roll
+            // against 5 present and an OWE of 456%, because the output of
+            // fifty people was being divided by the minutes of five.
+            //
+            // So when no CC is asked for, the line is the whole line. Only
+            // a caller that names a CC gets a CC-filtered view.
+            var wholeLine = ccId == null;
+
             string? resolvedCcNo = null;
             if (ccId == null)
             {
-                var layout = activeLayoutTransactions.FirstOrDefault(x => x.LineId == lineId);
+                // The CC the line is mostly running, by allocated rows -
+                // it decides SAM, and "mostly" is the honest answer when
+                // the vendor reports one output figure for the whole line
+                // and cannot say which CC made which piece. Deterministic,
+                // where first-row-wins was not.
+                var dominant = activeLayoutTransactions
+                    .Where(x => x.LineId == lineId
+                        && !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                    .GroupBy(x => x.CCId)
+                    .OrderByDescending(g => g.Count())
+                    .ThenBy(g => g.Key)
+                    .FirstOrDefault()
+                    ?? activeLayoutTransactions
+                        .Where(x => x.LineId == lineId)
+                        .GroupBy(x => x.CCId)
+                        .OrderByDescending(g => g.Count())
+                        .ThenBy(g => g.Key)
+                        .FirstOrDefault();
 
-                if (layout != null)
+                if (dominant != null)
                 {
+                    var layout = dominant.First();
                     ccId = layout.CCId;
                     resolvedCcNo = layout.CCNo;
                     layoutNo ??= NormalizeLayoutNo(layout.LayoutNo);
@@ -541,8 +570,13 @@ namespace FactoryManagementSystem.Controllers
             // the same cached snapshot fetched above, instead of a second
             // fresh Firestore query for the same collection/filter shape.
             var layoutItems = activeLayoutTransactions
-                .Where(x => x.LineId == lineId && x.CCId == ccId)
-                .Where(x => !layoutNo.HasValue || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
+                .Where(x => x.LineId == lineId)
+                // Everybody standing on the line when no CC was asked for -
+                // see the note above. A named CC still narrows to it.
+                .Where(x => wholeLine || x.CCId == ccId)
+                .Where(x => wholeLine
+                    || !layoutNo.HasValue
+                    || NormalizeLayoutNo(x.LayoutNo) == layoutNo.Value)
                 .ToList();
 
             var ccNo = cc?.CCNo ?? layoutItems.FirstOrDefault()?.CCNo ?? resolvedCcNo ?? string.Empty;

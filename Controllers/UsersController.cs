@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -10,25 +11,23 @@ namespace FactoryManagementSystem.Controllers
     [Authorize(Roles = "Admin")]
     public class UsersController : ControllerBase
     {
-        private readonly FirestoreService _firestore;
+        private readonly IUserRepository _users;
         private readonly CompanyApiClient _companyApiClient;
 
         // Compcode 17 - the same constant EmployeeSyncService uses for every
         // other Company API call in this backend.
         private const int CompCode = 17;
 
-        public UsersController(FirestoreService firestore, CompanyApiClient companyApiClient)
+        public UsersController(IUserRepository users, CompanyApiClient companyApiClient)
         {
-            _firestore = firestore;
+            _users = users;
             _companyApiClient = companyApiClient;
         }
 
         [HttpGet]
         public async Task<IActionResult> GetUsers()
         {
-            var snapshot = await _firestore.Users.OrderBy(nameof(AppUser.Username)).GetSnapshotAsync();
-            var users = snapshot.Documents
-                .Select(d => d.ConvertTo<AppUser>())
+            var users = (await _users.GetAllAsync())
                 .Select(u => new
                 {
                     username = u.Username,
@@ -74,9 +73,7 @@ namespace FactoryManagementSystem.Controllers
             if (employee == null)
                 return BadRequest(new { Success = false, Message = "No employee found with this Employee Code." });
 
-            var docRef = _firestore.Users.Document(employeeCode);
-            var existing = await docRef.GetSnapshotAsync();
-            if (existing.Exists)
+            if (await _users.FindByUsernameAsync(employeeCode) != null)
                 return BadRequest(new { Success = false, Message = "This employee already has a login." });
 
             var user = new AppUser
@@ -89,7 +86,7 @@ namespace FactoryManagementSystem.Controllers
                 CreatedOn = DateTime.UtcNow
             };
 
-            await docRef.SetAsync(user);
+            await _users.CreateAsync(user);
 
             return Ok(new { Success = true, Message = "User created successfully." });
         }
@@ -97,13 +94,14 @@ namespace FactoryManagementSystem.Controllers
         [HttpPatch("{username}/toggle-status")]
         public async Task<IActionResult> ToggleStatus(string username)
         {
-            var docRef = _firestore.Users.Document(username);
-            var snapshot = await docRef.GetSnapshotAsync();
-            if (!snapshot.Exists)
+            var user = await _users.FindByUsernameAsync(username);
+            if (user == null)
                 return NotFound(new { Success = false, Message = "User not found." });
 
-            var user = snapshot.ConvertTo<AppUser>();
-            await docRef.UpdateAsync(nameof(AppUser.IsActive), !user.IsActive);
+            // Written back under the stored username rather than the one in
+            // the route, so a route that differs only in case still updates
+            // the row it just read.
+            await _users.SetActiveAsync(user.Username, !user.IsActive);
 
             return Ok(new { Success = true, Message = "User status updated." });
         }
@@ -114,12 +112,12 @@ namespace FactoryManagementSystem.Controllers
             if (string.IsNullOrWhiteSpace(request.NewPassword))
                 return BadRequest(new { Success = false, Message = "A new password is required." });
 
-            var docRef = _firestore.Users.Document(username);
-            var snapshot = await docRef.GetSnapshotAsync();
-            if (!snapshot.Exists)
+            var user = await _users.FindByUsernameAsync(username);
+            if (user == null)
                 return NotFound(new { Success = false, Message = "User not found." });
 
-            await docRef.UpdateAsync(nameof(AppUser.PasswordHash), BCrypt.Net.BCrypt.HashPassword(request.NewPassword));
+            await _users.SetPasswordHashAsync(
+                user.Username, BCrypt.Net.BCrypt.HashPassword(request.NewPassword));
 
             return Ok(new { Success = true, Message = "Password updated." });
         }

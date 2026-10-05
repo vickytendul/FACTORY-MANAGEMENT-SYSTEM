@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,12 +10,12 @@ namespace FactoryManagementSystem.Controllers
     [Route("api/[controller]")]
     public class AuthController : ControllerBase
     {
-        private readonly FirestoreService _firestore;
+        private readonly IUserRepository _users;
         private readonly JwtTokenService _jwt;
 
-        public AuthController(FirestoreService firestore, JwtTokenService jwt)
+        public AuthController(IUserRepository users, JwtTokenService jwt)
         {
-            _firestore = firestore;
+            _users = users;
             _jwt = jwt;
         }
 
@@ -35,17 +36,11 @@ namespace FactoryManagementSystem.Controllers
                 return BadRequest(new { Success = false, Message = "Employee Code and password are required." });
 
             LogStage("User lookup started");
-            var snapshot = await _firestore.Users
-                .WhereEqualTo(nameof(AppUser.Username), request.Username.Trim())
-                .Limit(1)
-                .GetSnapshotAsync();
+            var user = await _users.FindByUsernameAsync(request.Username);
             LogStage("User lookup completed");
 
-            var doc = snapshot.Documents.FirstOrDefault();
-            if (doc == null)
+            if (user == null)
                 return Unauthorized(new { Success = false, Message = "Invalid Employee Code or password." });
-
-            var user = doc.ConvertTo<AppUser>();
 
             if (!user.IsActive)
                 return Unauthorized(new { Success = false, Message = "This account has been deactivated." });
@@ -77,7 +72,7 @@ namespace FactoryManagementSystem.Controllers
             if (storedWorkFactor > targetWorkFactor)
             {
                 var newHash = BCrypt.Net.BCrypt.HashPassword(request.Password, targetWorkFactor);
-                await doc.Reference.UpdateAsync(nameof(AppUser.PasswordHash), newHash);
+                await _users.SetPasswordHashAsync(user.Username, newHash);
                 LogStage($"Password rehashed (work factor {storedWorkFactor} -> {targetWorkFactor})");
             }
 
@@ -105,8 +100,7 @@ namespace FactoryManagementSystem.Controllers
             if (string.IsNullOrWhiteSpace(request.Username) || string.IsNullOrWhiteSpace(request.Password))
                 return BadRequest(new { Success = false, Message = "Username and password are required." });
 
-            var existing = await _firestore.Users.Limit(1).GetSnapshotAsync();
-            if (existing.Documents.Any())
+            if (await _users.AnyAsync())
                 return BadRequest(new { Success = false, Message = "Setup already completed. Ask an existing Admin to create your account." });
 
             var admin = new AppUser
@@ -119,7 +113,7 @@ namespace FactoryManagementSystem.Controllers
                 CreatedOn = DateTime.UtcNow
             };
 
-            await _firestore.Users.Document(admin.Username).SetAsync(admin);
+            await _users.CreateAsync(admin);
 
             return Ok(new { Success = true, Message = "Admin account created. You can now log in." });
         }

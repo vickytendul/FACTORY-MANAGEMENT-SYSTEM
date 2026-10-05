@@ -4,6 +4,7 @@ using FactoryManagementSystem.Services.Departments;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Placements;
 using FactoryManagementSystem.Services.Skills;
+using FactoryManagementSystem.Services.Users;
 using Npgsql;
 using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Services;
@@ -122,6 +123,7 @@ var skillsSource = (builder.Configuration["Skills:Source"] ?? "firebase").Trim()
 var layoutsSource = (builder.Configuration["Layouts:Source"] ?? "firebase").Trim().ToLowerInvariant();
 var ccsSource = (builder.Configuration["CCs:Source"] ?? "firebase").Trim().ToLowerInvariant();
 var attendanceSource = (builder.Configuration["Attendance:Source"] ?? "firebase").Trim().ToLowerInvariant();
+var usersSource = (builder.Configuration["Users:Source"] ?? "firebase").Trim().ToLowerInvariant();
 
 // One shared connection pool, registered when EITHER migration needs it.
 // Scoping this to the Skills flag alone would mean Layouts:Source=dual with
@@ -135,12 +137,13 @@ if (skillsSource is "supabase" or "dual"
     || layoutsSource is "supabase" or "dual"
     || ccsSource is "supabase" or "dual"
     || attendanceSource is "supabase" or "dual"
+    || usersSource is "supabase" or "dual"
     || hasSupabase)
 {
     var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
         ?? throw new Exception(
             "Supabase:ConnectionString is required when Skills:Source, Layouts:Source, "
-            + "CCs:Source or Attendance:Source is 'supabase' or 'dual'.");
+            + "CCs:Source, Attendance:Source or Users:Source is 'supabase' or 'dual'.");
 
     builder.Services.AddSingleton(_ =>
     {
@@ -255,6 +258,41 @@ builder.Services.AddSingleton<ICcRepository>(sp => ccsSource switch
         sp.GetRequiredService<SupabaseCcRepository>(),
         sp.GetRequiredService<ILogger<DualReadCcRepository>>()),
     _ => sp.GetRequiredService<FirestoreCcRepository>(),
+});
+
+// =====================================================
+// Login accounts: Firebase or Supabase, on their OWN flag
+// =====================================================
+//
+// Users__Source = firebase | dual | supabase   (default firebase)
+//
+// Separate from the other four for the same reason they are separate
+// from each other, and more urgently: this is the only store whose
+// failure shuts the whole application. If Firestore cannot be read -
+// a quota exhausted, a credential expired - nobody can log in and no
+// other migration matters, because nobody gets as far as using it.
+//
+// Identity is the username (the employee code). It was already the
+// Firestore document id and it is the primary key in Postgres, so
+// there is no firebase_doc_id here: a row means the same account in
+// both stores by its own name.
+//
+// Note that dual mode reads BOTH stores and so costs MORE Firestore
+// reads than firebase mode. It is for proving the accounts copied
+// across, not for running on.
+builder.Services.AddSingleton<FirestoreUserRepository>();
+
+if (usersSource is "supabase" or "dual")
+    builder.Services.AddSingleton<SupabaseUserRepository>();
+
+builder.Services.AddSingleton<IUserRepository>(sp => usersSource switch
+{
+    "supabase" => sp.GetRequiredService<SupabaseUserRepository>(),
+    "dual" => new DualReadUserRepository(
+        sp.GetRequiredService<FirestoreUserRepository>(),
+        sp.GetRequiredService<SupabaseUserRepository>(),
+        sp.GetRequiredService<ILogger<DualReadUserRepository>>()),
+    _ => sp.GetRequiredService<FirestoreUserRepository>(),
 });
 
 // Supabase only, no flag - see EmployeePlacementRepository. Registered

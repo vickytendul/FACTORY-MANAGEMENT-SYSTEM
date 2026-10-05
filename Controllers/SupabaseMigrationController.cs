@@ -354,6 +354,73 @@ namespace FactoryManagementSystem.Controllers
             });
         }
 
+        /// Seeds the counters from the Supabase layout rows instead of from
+        /// Firestore's counters.
+        ///
+        /// For when Firestore cannot be read at all. The layouts are
+        /// already in Postgres, so the ids they use are already here - and
+        /// the highest id IN USE is the only thing that actually has to be
+        /// cleared, which is a better floor than the Firestore counter
+        /// anyway. That counter has been found behind reality before, at
+        /// 1222 against a real maximum of 1403.
+        ///
+        /// What it cannot do is bring the operation LOOKUP across: that
+        /// maps an operation's identity to its id and lives only in
+        /// Firestore. Without it, an operation saved after this will be
+        /// given a NEW id rather than the id it already had. So this is the
+        /// fallback, not the preferred path - run layout-ids/copy instead
+        /// as soon as Firestore can be read, which fills the lookup and
+        /// leaves these counters alone.
+        [HttpPost("layout-ids/seed-from-supabase")]
+        public async Task<IActionResult> SeedLayoutIdsFromSupabase(
+            [FromQuery] string key)
+        {
+            if (!KeyOk(key)) return BadKey();
+            if (_dataSource == null) return SupabaseMissing();
+
+            int maxLayoutId, maxOperationId;
+            await using (var read = _dataSource.CreateCommand("""
+                select coalesce(max(layout_master_id), 0),
+                       coalesce(max(operation_id), 0)
+                from public.layout_masters
+                """))
+            await using (var r = await read.ExecuteReaderAsync())
+            {
+                await r.ReadAsync();
+                maxLayoutId = r.GetInt32(0);
+                maxOperationId = r.GetInt32(1);
+            }
+
+            var operationFloor = Math.Max(maxOperationId + 1, 1000);
+
+            await using (var seed = _dataSource.CreateCommand("""
+                insert into public.layout_counters (name, value)
+                values ('LayoutMasterId', @v)
+                on conflict (name) do update
+                    set value = greatest(public.layout_counters.value, @v);
+                select setval('public.operation_id_seq', @o, false);
+                """))
+            {
+                seed.Parameters.AddWithValue("v", maxLayoutId);
+                seed.Parameters.AddWithValue("o", (long)operationFloor);
+                await seed.ExecuteNonQueryAsync();
+            }
+
+            return Ok(new
+            {
+                Success = true,
+                HighestLayoutMasterIdInUse = maxLayoutId,
+                HighestOperationIdInUse = maxOperationId,
+                LayoutMasterIdSeededTo = maxLayoutId,
+                OperationIdSeqSeededTo = operationFloor,
+                Message =
+                    "Counters seeded from the Supabase layouts. Set "
+                    + "LayoutIds__Source=supabase to save layouts without "
+                    + "Firestore. Run layout-ids/copy later, when Firestore "
+                    + "can be read, to bring the operation lookup across.",
+            });
+        }
+
         private async Task<(int layoutMasterId, int nextOperationId)>
             ReadFirestoreCountersAsync()
         {

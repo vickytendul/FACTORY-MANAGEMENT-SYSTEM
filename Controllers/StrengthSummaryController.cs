@@ -166,7 +166,9 @@ namespace FactoryManagementSystem.Controllers
                         .ToList();
                     foreach (var m in members) counted.Add(m.Code);
                     indirectMembers.AddRange(members);
-                    departmentRows.Add(DepartmentRow(department, members, postedDays, load.PlacedCodes));
+                    departmentRows.Add(DepartmentRow(
+                        department, members, postedDays, load.PlacedCodes,
+                        attendanceOfAllocatedOnly: true));
                 }
 
                 foreach (var (team, pairs) in Teams)
@@ -226,15 +228,21 @@ namespace FactoryManagementSystem.Controllers
                     // checkers working alongside them.
                     indirect = departmentRows,
                     indirectTotal = DepartmentRow(
-                        "INDIRECT TOTAL", indirectMembers, postedDays, load.PlacedCodes),
+                        "INDIRECT TOTAL", indirectMembers, postedDays, load.PlacedCodes,
+                        attendanceOfAllocatedOnly: true),
                     direct = teamRows,
                     directTotal = TeamRow(
                         "", "DIRECT TOTAL", directMembers, postedDays, isTotal: true),
 
                     // Allocated across the whole roster means the same
                     // thing it means on every row above: we know where
-                    // this person is. A layout row says so for the teams,
-                    // a confirmation says so for the departments.
+                    // this person is. A sewing layout row says so for the
+                    // teams, a work detail for the departments.
+                    //
+                    // Present and absent stay over EVERYBODY here, unlike
+                    // the rows above. This is the roster line, and it has
+                    // to go on matching the TAILOR and OTHERS cards at the
+                    // top of the screen - they count the whole category.
                     totalManpower = DepartmentRow(
                         "TOTAL MANPOWER", people, postedDays,
                         load.PlacedCodes
@@ -528,51 +536,73 @@ namespace FactoryManagementSystem.Controllers
             };
         }
 
+        /// A department row.
+        ///
+        /// [attendanceOfAllocatedOnly] narrows present and absent to the
+        /// people who have a work detail, leaving the rest of the
+        /// department out of both.
+        ///
+        /// Without it ADMIN read 8 allocated, 4 present and 5 absent: the
+        /// ninth person had no work detail, so he was in neither the
+        /// allocated count nor the present one, and fell into absent on his
+        /// own. Present and absent were measuring the whole department
+        /// while Allocated beside them measured part of it, and the row
+        /// could not be read across.
+        ///
+        /// Not used for TOTAL MANPOWER, which is the roster and has to go
+        /// on matching the TAILOR and OTHERS cards above the table.
         private static object DepartmentRow(
             string label, IReadOnlyCollection<Person> members, IReadOnlyList<DateTime> postedDays,
-            IReadOnlySet<string>? confirmed = null) => new
+            IReadOnlySet<string>? confirmed = null, bool attendanceOfAllocatedOnly = false)
+        {
+            // How many of this row's people a layout has placed. Nobody
+            // here will ever have a sewing layout row - a department row
+            // counts exactly the people who are NOT on a line - so a work
+            // detail is the only placement they can get, and counting it is
+            // what makes this column mean the same thing as it does on a
+            // team row: we know where this person is.
+            //
+            // Null, and so a dash, when placements are unavailable. A zero
+            // there would read as "nobody is placed", which is a claim
+            // rather than an absence of one.
+            int? Allocated(Func<Person, bool> which) => confirmed is null
+                ? null
+                : members.Count(m => which(m) && confirmed.Contains(m.Code));
+
+            var attendanceMembers = attendanceOfAllocatedOnly && confirmed is not null
+                ? members.Where(m => confirmed.Contains(m.Code)).ToList()
+                : members;
+
+            return new
             {
                 group = (string?)null,
                 label,
-                // How many of this row's people somebody has confirmed the
-                // whereabouts of. Nobody here will ever have a layout row -
-                // a department row counts exactly the people who are NOT on
-                // a line - so a confirmation is the only placement they can
-                // get, and counting it is what makes this column mean the
-                // same thing as it does on a team row: we know where this
-                // person is.
-                //
-                // Null, and so a dash, when confirmations are unavailable.
-                // A zero there would read as "nobody is placed", which is a
-                // claim rather than an absence of one.
-                allocated = confirmed is null
-                    ? (int?)null
-                    : members.Count(m => confirmed.Contains(m.Code)),
+                allocated = Allocated(_ => true),
                 // The same count split the way the two column groups are,
                 // so TAILOR and OTHERS each say how many of their own are
                 // placed rather than leaving one total to be divided by
                 // eye against the present and absent figures beside it.
-                tailorAllocated = confirmed is null
-                    ? (int?)null
-                    : members.Count(m => m.IsTailor && confirmed.Contains(m.Code)),
-                othersAllocated = confirmed is null
-                    ? (int?)null
-                    : members.Count(m => !m.IsTailor && confirmed.Contains(m.Code)),
-                tailorPresent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsPresentOn(d)),
-                tailorAbsent = AveragePerDay(members, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
-                othersPresent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),
-                othersAbsent = AveragePerDay(members, postedDays, (p, d) => !p.IsTailor && p.IsAbsentOn(d)),
-                // Everybody, tailor or not. The indirect table shows this
-                // instead of the split, because a department has no tailors
-                // to speak of and those columns read 0 all the way down.
+                tailorAllocated = Allocated(m => m.IsTailor),
+                othersAllocated = Allocated(m => !m.IsTailor),
+
+                tailorPresent = AveragePerDay(attendanceMembers, postedDays, (p, d) => p.IsTailor && p.IsPresentOn(d)),
+                tailorAbsent = AveragePerDay(attendanceMembers, postedDays, (p, d) => p.IsTailor && p.IsAbsentOn(d)),
+                othersPresent = AveragePerDay(attendanceMembers, postedDays, (p, d) => !p.IsTailor && p.IsPresentOn(d)),
+                othersAbsent = AveragePerDay(attendanceMembers, postedDays, (p, d) => !p.IsTailor && p.IsAbsentOn(d)),
+
+                // Everybody on the row, tailor or not.
                 //
                 // Worked out here rather than added up on the screen. Both
                 // halves are averages rounded to a decimal, and adding two
                 // rounded numbers is not the same as rounding their sum.
-                present = AveragePerDay(members, postedDays, (p, d) => p.IsPresentOn(d)),
-                absent = AveragePerDay(members, postedDays, (p, d) => p.IsAbsentOn(d)),
+                present = AveragePerDay(attendanceMembers, postedDays, (p, d) => p.IsPresentOn(d)),
+                absent = AveragePerDay(attendanceMembers, postedDays, (p, d) => p.IsAbsentOn(d)),
+
+                // The whole department, not the allocated part of it -
+                // this is what the allocated count is measured out of.
                 total = members.Count,
             };
+        }
 
         private static object TeamRow(
             string group, string label, IReadOnlyCollection<Person> members,

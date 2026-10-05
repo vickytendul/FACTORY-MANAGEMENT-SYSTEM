@@ -341,14 +341,36 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
 builder.Services.AddAuthorization();
 
 // =====================================================
+// Auth__Required = true | false   (default true)
+// =====================================================
+//
+// false opens the API: no token is asked for, and the app opens straight
+// onto the Home screen with no login. Asked for when the Firestore read
+// quota ran out and login - a Firestore query - was the one thing
+// standing between everybody and the whole application.
+//
+// It is a flag and not a deletion so it can be put back in one
+// environment variable, with the login page, the accounts and the JWT
+// plumbing all still here.
+//
+// Said plainly: with this off, anybody who knows the URL can read and
+// write this factory's data over the public internet.
+var authRequired = builder.Configuration.GetValue("Auth:Required", true);
+
+if (!authRequired)
+    builder.Services.AddSingleton<IAuthorizationPolicyProvider, OpenAccessPolicyProvider>();
+
+// =====================================================
 // Services
 // =====================================================
 
 // Every endpoint requires a valid JWT by default; controllers/actions opt
 // out with [AllowAnonymous] (e.g. AuthController's login/bootstrap).
+// With Auth__Required=false the filter is not added at all, and the
+// policy provider above satisfies the per-controller [Authorize] besides.
 builder.Services.AddControllers(options =>
 {
-    options.Filters.Add(new AuthorizeFilter());
+    if (authRequired) options.Filters.Add(new AuthorizeFilter());
 });
 
 builder.Services.AddDbContext<ApplicationDbContext>(options =>

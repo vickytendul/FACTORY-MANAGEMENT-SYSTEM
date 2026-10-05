@@ -2,6 +2,7 @@ using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Employees;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
@@ -20,13 +21,18 @@ namespace FactoryManagementSystem.Controllers
             FirestoreService firestore,
             CompanyAttendanceService companyAttendance,
             ILayoutRepository layouts,
-            IAttendanceRepository attendance)
+            IAttendanceRepository attendance,
+            IEmployeeRepository employees)
         {
             _layouts = layouts;
             _attendance = attendance;
             _firestore = firestore;
+            _employees = employees;
             _companyAttendance = companyAttendance;
         }
+
+        /// So the roster follows Employees__Source like the rest of the app.
+        private readonly IEmployeeRepository _employees;
 
         [HttpGet]
         public async Task<IActionResult> Get(DateTime date)
@@ -37,7 +43,7 @@ namespace FactoryManagementSystem.Controllers
 
                 // All active employees (needed for complete list) - cached, shared
                 // with the Dashboard/Skill Update Operators tab.
-                var employees = (await _firestore.GetAllEmployeesAsync())
+                var employees = (await _employees.GetAllAsync())
                     .Where(x => x.IsActive)
                     .ToList();
 

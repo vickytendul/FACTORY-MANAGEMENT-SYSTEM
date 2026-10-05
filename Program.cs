@@ -1,6 +1,7 @@
 using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Departments;
+using FactoryManagementSystem.Services.Employees;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Placements;
 using FactoryManagementSystem.Services.Skills;
@@ -124,6 +125,7 @@ var layoutsSource = (builder.Configuration["Layouts:Source"] ?? "firebase").Trim
 var ccsSource = (builder.Configuration["CCs:Source"] ?? "firebase").Trim().ToLowerInvariant();
 var attendanceSource = (builder.Configuration["Attendance:Source"] ?? "firebase").Trim().ToLowerInvariant();
 var usersSource = (builder.Configuration["Users:Source"] ?? "firebase").Trim().ToLowerInvariant();
+var employeesSource = (builder.Configuration["Employees:Source"] ?? "firebase").Trim().ToLowerInvariant();
 
 // One shared connection pool, registered when EITHER migration needs it.
 // Scoping this to the Skills flag alone would mean Layouts:Source=dual with
@@ -138,6 +140,7 @@ if (skillsSource is "supabase" or "dual"
     || ccsSource is "supabase" or "dual"
     || attendanceSource is "supabase" or "dual"
     || usersSource is "supabase" or "dual"
+    || employeesSource is "supabase" or "dual"
     || hasSupabase)
 {
     var supabaseConnection = builder.Configuration["Supabase:ConnectionString"]
@@ -293,6 +296,36 @@ builder.Services.AddSingleton<IUserRepository>(sp => usersSource switch
         sp.GetRequiredService<SupabaseUserRepository>(),
         sp.GetRequiredService<ILogger<DualReadUserRepository>>()),
     _ => sp.GetRequiredService<FirestoreUserRepository>(),
+});
+
+// =====================================================
+// Employee master: Firebase or Supabase, on its OWN flag
+// =====================================================
+//
+// Employees__Source = firebase | supabase   (default firebase)
+//
+// No dual mode here. Dual reads both stores and the whole point of this
+// one is a roster that is fetched once and filtered in memory - Skill
+// Update's search calls it on every keystroke - so reading twice is the
+// opposite of what it is for. Rollback is the flag.
+//
+// Grade is why this store exists. The Company API carries the roster but
+// no grade, and grade is what Layout Allocation matches an operator to
+// an operation with. The roster can be re-fetched from the vendor any
+// time; the grade cannot, because it is only ever entered here.
+//
+// Only the READS move. Add, update, sync and the audits still write to
+// Firestore - they are off-menu admin tools, and moving a write is a
+// different risk from moving a read.
+builder.Services.AddSingleton<FirestoreEmployeeRepository>();
+
+if (employeesSource is "supabase" or "dual")
+    builder.Services.AddSingleton<SupabaseEmployeeRepository>();
+
+builder.Services.AddSingleton<IEmployeeRepository>(sp => employeesSource switch
+{
+    "supabase" => sp.GetRequiredService<SupabaseEmployeeRepository>(),
+    _ => sp.GetRequiredService<FirestoreEmployeeRepository>(),
 });
 
 // Supabase only, no flag - see EmployeePlacementRepository. Registered

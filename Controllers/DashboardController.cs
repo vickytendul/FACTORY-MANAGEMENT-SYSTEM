@@ -3,6 +3,7 @@ using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Services.Skills;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Employees;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Mvc;
 
@@ -14,6 +15,9 @@ namespace FactoryManagementSystem.Controllers
     {
         private const double WorkingMinutesPerDay = 480;
         private readonly FirestoreService _firestore;
+
+        /// So the roster follows Employees__Source like the rest of the app.
+        private readonly IEmployeeRepository _employees;
 
         /// Skill records only - this controller is currently a disabled
         /// stub, but wiring it to the repository means re-enabling it can
@@ -30,8 +34,10 @@ namespace FactoryManagementSystem.Controllers
             FirestoreService firestore,
             ISkillRepository skills,
             ILayoutRepository layouts,
-            ICcRepository ccs)
+            ICcRepository ccs,
+            IEmployeeRepository employees)
         {
+            _employees = employees;
             _firestore = firestore;
             _skills = skills;
             _layouts = layouts;
@@ -114,7 +120,7 @@ namespace FactoryManagementSystem.Controllers
                 // vs. total), so this can't be filtered server-side by IsActive.
                 // Cached instead: EmployeeMasters changes rarely relative to how
                 // often the dashboard is loaded.
-                var employees = await _firestore.GetAllEmployeesAsync();
+                var employees = await _employees.GetAllAsync();
                 var tailors = employees.Where(x => (x.Designation ?? string.Empty).Contains("TAILOR", StringComparison.OrdinalIgnoreCase)).ToList();
 
                 var skills = await _skills.GetAllActiveAsync();

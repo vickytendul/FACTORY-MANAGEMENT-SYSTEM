@@ -1,6 +1,7 @@
 using FactoryManagementSystem.Data;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Employees;
 using FactoryManagementSystem.Services.Layouts;
 using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Authorization;
@@ -29,16 +30,23 @@ namespace FactoryManagementSystem.Controllers
         /// this backend uses.
         private const int CompCode = 17;
 
+        /// The roster reads go through here, so they follow
+        /// Employees__Source. The writes below still go straight to
+        /// Firestore - see the note on the repository.
+        private readonly IEmployeeRepository _employees;
+
         public EmployeesController(
             ApplicationDbContext context,
             FirestoreService firestore,
             SummaryService summaryService,
             EmployeeSyncService syncService,
             CompanyApiClient companyApiClient,
-            ILayoutRepository layouts)
+            ILayoutRepository layouts,
+            IEmployeeRepository employees)
         {
             _context = context;
             _firestore = firestore;
+            _employees = employees;
             _summaryService = summaryService;
             _syncService = syncService;
             _companyApiClient = companyApiClient;
@@ -331,7 +339,7 @@ namespace FactoryManagementSystem.Controllers
             [FromQuery] bool? activeOnly = null,
             [FromQuery] string? lastEmployeeCode = null)
         {
-            var all = await _firestore.GetAllEmployeesAsync();
+            var all = await _employees.GetAllAsync();
 
             IEnumerable<EmployeeMaster> filtered = all;
             if (activeOnly == true)
@@ -566,21 +574,14 @@ namespace FactoryManagementSystem.Controllers
         [HttpGet("code/{code}")]
         public async Task<IActionResult> GetEmployeeByCode(string code)
         {
-            var snapshot = await _firestore.EmployeeMasters
-                .WhereEqualTo(nameof(EmployeeMaster.EmployeeCode), code)
-                .Limit(1)
-                .GetSnapshotAsync();
+            var employee = await _employees.FindByCodeAsync(code);
 
-            var document = snapshot.Documents.FirstOrDefault();
-
-            if (document == null)
+            if (employee == null)
                 return NotFound(new
                 {
                     Success = false,
                     Message = "Employee not found."
                 });
-
-            var employee = document.ConvertTo<EmployeeMaster>();
 
             return Ok(employee);
         }

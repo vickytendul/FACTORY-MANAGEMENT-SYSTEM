@@ -338,6 +338,125 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// The people behind one line's figures, named.
+        ///
+        /// The summary says 11 present, 26 absent and 23 unknown; this says
+        /// WHICH 23. A line reading a third unknown is either a payroll gap
+        /// somebody has to chase or a line that genuinely was not working,
+        /// and the only way to tell them apart is to look at the names.
+        ///
+        /// Classified exactly as ClassifyAttendance does, from the same
+        /// data in the same order, so this list can never disagree with the
+        /// figure it explains.
+        [HttpGet("attendance-detail")]
+        public async Task<IActionResult> AttendanceDetail(
+            [FromQuery] int lineId, [FromQuery] DateTime date)
+        {
+            var context = await ResolveLineContextAsync(lineId, null, null);
+            if (context == null)
+                return Ok(new { lineId, date, people = Array.Empty<object>() });
+
+            var dateOnly = date.Date;
+            var loansByDate = await FetchLoansForRangeAsync(lineId, dateOnly, dateOnly, context);
+            var loans = loansByDate[DateTime.SpecifyKind(dateOnly, DateTimeKind.Utc)];
+            var codesToAsk = context.EmployeeSectionMap.Keys.Concat(loans.BorrowedIn.Keys);
+
+            var attendanceByDate = await FetchAttendanceRangeAsync(dateOnly, dateOnly, codesToAsk);
+            var attendanceByCode = attendanceByDate.TryGetValue(dateOnly, out var m)
+                ? m
+                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceByCode);
+            var ownForDay = payrollPosted
+                ? null
+                : (await FetchOwnAttendanceRangeAsync(lineId, new[] { dateOnly }))
+                    [DateTime.SpecifyKind(dateOnly, DateTimeKind.Utc)];
+            var canEstimate = ownForDay is { Count: > 0 };
+            if (canEstimate) attendanceByCode = ownForDay!;
+
+            // Names come off the layout rows, which is where the allocation
+            // put them - the same place the section came from.
+            var nameByCode = context.LayoutItems
+                .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                .GroupBy(x => x.EmployeeCode!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => g.First().EmployeeName ?? string.Empty,
+                    StringComparer.OrdinalIgnoreCase);
+
+            var people = new List<AttendancePerson>();
+            foreach (var (code, section) in context.EmployeeSectionMap)
+            {
+                var sec = (section ?? "").Trim().ToUpper();
+                var isTailor = sec == "MAIN" || sec == "SUPER TEAM";
+
+                string state;
+                string? raw = null;
+
+                if (loans.LentOut.Contains(code))
+                {
+                    state = "LentOut";
+                }
+                else if (!attendanceByCode.TryGetValue(code, out var status))
+                {
+                    // Two different things wear this label. Without payroll
+                    // for the day the app's own marks are being read, and a
+                    // missing row there means nobody flagged them, which is
+                    // taken as present. With payroll posted, a missing row
+                    // means payroll simply has nothing for this person.
+                    state = canEstimate ? "Present" : "NoRecord";
+                }
+                else
+                {
+                    raw = status.Trim();
+                    state = raw.Equals("P", StringComparison.OrdinalIgnoreCase)
+                            || raw.Equals("Present", StringComparison.OrdinalIgnoreCase)
+                        ? "Present"
+                        : raw.Equals("A", StringComparison.OrdinalIgnoreCase)
+                          || raw.Equals("AB", StringComparison.OrdinalIgnoreCase)
+                          || raw.Equals("Absent", StringComparison.OrdinalIgnoreCase)
+                            ? "Absent"
+                            // A status payroll sent that is neither present
+                            // nor absent - leave, on duty, comp off. Counted
+                            // as unknown by the summary, but it is a
+                            // different thing from no record at all, so the
+                            // code itself is reported.
+                            : "OtherStatus";
+                }
+
+                people.Add(new AttendancePerson(
+                    code,
+                    nameByCode.GetValueOrDefault(code, string.Empty),
+                    section ?? string.Empty,
+                    isTailor ? "TAILOR" : "OTHERS",
+                    state,
+                    raw));
+            }
+
+            // The ones nobody has a record for come first: that is the
+            // list somebody is going to act on.
+            var ordered = people
+                .OrderBy(p => p.State == "NoRecord" ? 0 : 1)
+                .ThenBy(p => p.EmployeeCode, StringComparer.Ordinal)
+                .ToList();
+
+            return Ok(new
+            {
+                lineId,
+                date = dateOnly,
+                attendanceEstimated = canEstimate,
+                onRoll = ordered.Count,
+                noRecordCount = ordered.Count(p => p.State == "NoRecord"),
+                people = ordered,
+            });
+        }
+
+        private sealed record AttendancePerson(
+            string EmployeeCode,
+            string EmployeeName,
+            string Section,
+            string Category,
+            string State,
+            string? PayrollStatus);
+
         private sealed record LineContext(
             string CcNo,
             double? Sam,

@@ -1004,6 +1004,12 @@ namespace FactoryManagementSystem.Controllers
         ///
         /// Both counts go out so the screen can say the figure covers part
         /// of the floor rather than quietly reporting a wrong one.
+        ///
+        /// Those exclusions apply to the PERCENTAGES only. The earned and
+        /// output totals are the whole floor's, because they sit at the
+        /// foot of columns the sheet has already printed line by line - a
+        /// total that quietly drops rows above it is not a total, and the
+        /// first person to add the column by hand finds it out.
         private static object BuildOverall(List<FactoryLine> lines)
         {
             var tailorsOnRoll = lines.Sum(l => l.TailorsOnRoll);
@@ -1015,10 +1021,22 @@ namespace FactoryManagementSystem.Controllers
             var linesWithoutAttendance = lines.Count(
                 l => l.EarnedMinutes != null && l.Totals.TotalPresent == 0);
 
+            // The lines the percentages are worked out from.
             var withSam = lines
                 .Where(l => l.EarnedMinutes != null && l.Totals.TotalPresent > 0)
                 .ToList();
-            var earned = withSam.Sum(l => l.EarnedMinutes!.Value);
+            var earnedForPercent = withSam.Sum(l => l.EarnedMinutes!.Value);
+
+            // The figure the sheet prints under its EARNED MINUTES column,
+            // which is every line that earned any - including the ones left
+            // out of the percentages above. They are different questions.
+            // "How many minutes did the factory earn" is answered by the
+            // whole floor; "what is the factory's OWE" cannot be, because
+            // a line with no attendance brings minutes to the numerator and
+            // nothing to the denominator.
+            var earnedTotal = lines
+                .Where(l => l.EarnedMinutes != null)
+                .Sum(l => l.EarnedMinutes!.Value);
 
             return new
             {
@@ -1049,13 +1067,15 @@ namespace FactoryManagementSystem.Controllers
                 availableMinutesOwe = (tailorsPresent + othersPresent) * WorkingMinutesPerDay,
                 availableMinutesEff = tailorsPresent * WorkingMinutesPerDay,
 
-                earnedMinutes = withSam.Count == 0 ? (double?)null : Math.Round(earned, 2),
+                earnedMinutes = lines.All(l => l.EarnedMinutes == null)
+                    ? (double?)null
+                    : Math.Round(earnedTotal, 2),
                 owePercent = withSam.Count == 0
                     ? null
-                    : Percent(earned, withSam.Sum(l => l.Totals.TotalPresent)),
+                    : Percent(earnedForPercent, withSam.Sum(l => l.Totals.TotalPresent)),
                 effPercent = withSam.Count == 0
                     ? null
-                    : Percent(earned, withSam.Sum(l => l.Totals.TailorsPresent)),
+                    : Percent(earnedForPercent, withSam.Sum(l => l.Totals.TailorsPresent)),
 
                 // Pieces across the whole floor, not the lines' own
                 // percentages averaged - a line that made forty pieces

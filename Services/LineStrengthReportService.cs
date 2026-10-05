@@ -14,18 +14,22 @@ public class LineStrengthReportService
     private readonly ILayoutRepository _layouts;
     private readonly IAttendanceRepository _attendance;
 
+    private readonly ILogger<LineStrengthReportService> _logger;
+
     public LineStrengthReportService(
         FirestoreService firestore,
         CompanyAttendanceService companyAttendance,
         ProductionLineService productionLines,
         ILayoutRepository layouts,
-        IAttendanceRepository attendance)
+        IAttendanceRepository attendance,
+        ILogger<LineStrengthReportService> logger)
     {
         _layouts = layouts;
         _attendance = attendance;
         _firestore = firestore;
         _companyAttendance = companyAttendance;
         _productionLines = productionLines;
+        _logger = logger;
     }
 
     public async Task<List<LineStrengthReportDto>> GetReportAsync(DateTime date)
@@ -258,7 +262,27 @@ public class LineStrengthReportService
     /// than emptying out.
     private async Task<List<Line>> ResolveLinesAsync()
     {
-        var firestoreLines = await _firestore.GetActiveLinesAsync();
+        // Firestore is consulted for line NAMES only - which lines there
+        // are comes from the production report below, and a line it does
+        // not know already falls back to "Line 7". So a Firestore that
+        // cannot be read costs the nicer name and nothing else, and the
+        // Home screen is not worth failing over a label.
+        //
+        // It is caught rather than flagged because there is no second
+        // store to switch to: the Lines master was never migrated, and
+        // the only other thing that reads it is this.
+        List<Line> firestoreLines;
+        try
+        {
+            firestoreLines = await _firestore.GetActiveLinesAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex, "Line names unavailable from Firestore - using Line <n>");
+            firestoreLines = new List<Line>();
+        }
+
         var productionLineNumbers = await _productionLines.GetLineNumbersAsync(DateTime.Today);
 
         if (productionLineNumbers.Count == 0) return firestoreLines;

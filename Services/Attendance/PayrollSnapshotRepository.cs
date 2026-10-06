@@ -33,10 +33,14 @@ namespace FactoryManagementSystem.Services.Attendance
         {
             var byDate = new Dictionary<DateTime, Dictionary<string, string>>();
 
+            // Blank statuses are skipped on the way in now, but a day was
+            // written before that and would otherwise come back as a day
+            // on which nobody was anything.
             await using var cmd = _dataSource.CreateCommand("""
                 select attendance_date, employee_code, status
                 from public.payroll_attendance
                 where attendance_date between @from and @to
+                  and coalesce(trim(status), '') <> ''
                 """);
             cmd.Parameters.AddWithValue("from", fromDate.Date);
             cmd.Parameters.AddWithValue("to", toDate.Date);
@@ -66,15 +70,30 @@ namespace FactoryManagementSystem.Services.Attendance
         /// codes and statuses go down as arrays and Postgres unnests them.
         public async Task SaveAsync(DateTime date, Dictionary<string, string> statuses)
         {
-            if (statuses.Count == 0) return;
+            // Only the people payroll actually said something about.
+            //
+            // Asked for a range that includes today, the vendor answers
+            // with today's roster and leaves a past day's column BLANK -
+            // it does not refuse, it returns everybody with nothing
+            // against them. Keeping that wrote 831 rows of empty string
+            // for 05 Oct, which is not a record of a day, it is a record
+            // of having asked too late.
+            var real = statuses
+                .Where(kv => !string.IsNullOrWhiteSpace(kv.Value))
+                .ToList();
 
-            var codes = new string[statuses.Count];
-            var values = new string[statuses.Count];
+            // Nothing said about anybody means the day is still
+            // uncaptured, and it has to stay that way - a day marked as
+            // kept is a day nothing will ever try to keep again.
+            if (real.Count == 0) return;
+
+            var codes = new string[real.Count];
+            var values = new string[real.Count];
             var i = 0;
-            foreach (var (code, status) in statuses)
+            foreach (var (code, status) in real)
             {
                 codes[i] = code;
-                values[i] = status;
+                values[i] = status.Trim();
                 i++;
             }
 

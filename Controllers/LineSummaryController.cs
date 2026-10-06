@@ -79,18 +79,29 @@ namespace FactoryManagementSystem.Controllers
         private readonly IAttendanceRepository _attendance;
         private readonly ICcRepository _ccs;
 
+        /// Null when Supabase is not configured. Without it a past day
+        /// still falls back to this app's own marks, as it did before -
+        /// the report works, it just cannot keep payroll's answer.
+        private readonly Services.Attendance.PayrollSnapshotRepository? _payrollSnapshots;
+
+        private readonly ILogger<LineSummaryController> _logger;
+
         public LineSummaryController(
             FirestoreService firestore,
             CompanyApiClient companyApiClient,
             ILayoutRepository layouts,
             IAttendanceRepository attendance,
-            ICcRepository ccs)
+            ICcRepository ccs,
+            ILogger<LineSummaryController> logger,
+            Services.Attendance.PayrollSnapshotRepository? payrollSnapshots = null)
         {
             _layouts = layouts;
             _attendance = attendance;
             _ccs = ccs;
             _firestore = firestore;
             _companyApiClient = companyApiClient;
+            _logger = logger;
+            _payrollSnapshots = payrollSnapshots;
         }
 
         [HttpGet]
@@ -759,6 +770,41 @@ namespace FactoryManagementSystem.Controllers
                                     : statusProp.ToString();
                             }
                         }
+                    }
+                }
+            }
+
+            // Payroll's answer only covers a range that includes today. For
+            // any day it did not answer for, what was kept the day it did
+            // is used instead - without this the same date reads one way
+            // today and another way tomorrow, off the same output.
+            if (_payrollSnapshots != null)
+            {
+                Dictionary<DateTime, Dictionary<string, string>> kept;
+                try
+                {
+                    kept = await _payrollSnapshots.LoadAsync(fromDate, toDate);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Kept attendance could not be read");
+                    kept = new Dictionary<DateTime, Dictionary<string, string>>();
+                }
+
+                foreach (var (day, statuses) in byDate.ToList())
+                {
+                    if (statuses.Count > 0)
+                    {
+                        // Payroll answered for this day. Keep it - today's
+                        // is written over on every view, because payroll
+                        // posts through the day and the last word is the
+                        // right one.
+                        await _payrollSnapshots.SaveAsync(day, statuses);
+                    }
+                    else if (kept.TryGetValue(day, out var saved))
+                    {
+                        byDate[day] = saved;
+                        foreach (var code in saved.Keys) codes.Add(code);
                     }
                 }
             }

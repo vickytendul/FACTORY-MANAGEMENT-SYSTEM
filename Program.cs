@@ -263,6 +263,19 @@ builder.Services.AddSingleton<ILayoutIdAllocator>(sp => layoutIdsSource == "supa
 // Identity is the Firestore document id, in firebase_doc_id, the same
 // choice LayoutTransaction made. AttendanceId is 0 on every row and is
 // deliberately not stored.
+// Payroll's attendance, kept so a past day still reads the same. New
+// data with no Firestore history, so no source flag - it exists when
+// Supabase is configured and not otherwise.
+if (hasSupabase)
+{
+    builder.Services.AddSingleton<PayrollSnapshotRepository>();
+
+    // And a timer to catch the days nobody opens the app. The vendor
+    // only answers for a range that includes today, so a day that goes
+    // uncaptured can never be captured afterwards.
+    builder.Services.AddHostedService<PayrollCaptureService>();
+}
+
 builder.Services.AddSingleton<FirestoreAttendanceRepository>();
 
 builder.Services.AddSingleton<FirestoreCcRepository>();

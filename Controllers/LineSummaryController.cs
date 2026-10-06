@@ -780,38 +780,69 @@ namespace FactoryManagementSystem.Controllers
             // today and another way tomorrow, off the same output.
             if (_payrollSnapshots != null)
             {
-                Dictionary<DateTime, Dictionary<string, string>> kept;
-                try
+                var missing = byDate
+                    .Where(kv => kv.Value.Count == 0)
+                    .Select(kv => kv.Key)
+                    .ToList();
+
+                // Only when payroll left a day blank. Reading the table for
+                // days it already answered for is a query whose result is
+                // thrown away.
+                if (missing.Count > 0)
                 {
-                    kept = await _payrollSnapshots.LoadAsync(fromDate, toDate);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Kept attendance could not be read");
-                    kept = new Dictionary<DateTime, Dictionary<string, string>>();
+                    try
+                    {
+                        var kept = await _payrollSnapshots.LoadAsync(fromDate, toDate);
+                        foreach (var day in missing)
+                        {
+                            if (!kept.TryGetValue(day, out var saved)) continue;
+                            byDate[day] = saved;
+                            foreach (var code in saved.Keys) codes.Add(code);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Kept attendance could not be read");
+                    }
                 }
 
-                foreach (var (day, statuses) in byDate.ToList())
+                foreach (var (day, statuses) in byDate)
                 {
-                    if (statuses.Count > 0)
-                    {
-                        // Payroll answered for this day. Keep it - today's
-                        // is written over on every view, because payroll
-                        // posts through the day and the last word is the
-                        // right one.
-                        await _payrollSnapshots.SaveAsync(day, statuses);
-                    }
-                    else if (kept.TryGetValue(day, out var saved))
-                    {
-                        byDate[day] = saved;
-                        foreach (var code in saved.Keys) codes.Add(code);
-                    }
+                    if (statuses.Count > 0) await KeepAsync(day, statuses);
                 }
             }
 
             var loaded = (byDate, codes);
             _rosterByRange[(fromDate, toDate)] = loaded;
             return loaded;
+        }
+
+        /// When each day was last written, so a day is not written again on
+        /// every view.
+        ///
+        /// Keeping a day costs an upsert of eight hundred rows. Doing that
+        /// per page load put two seconds on the factory report, for a row
+        /// that in the usual case is identical to the one already there.
+        /// Payroll does not post minute by minute, and the capture timer
+        /// writes today every hour regardless, so five minutes loses
+        /// nothing.
+        ///
+        /// Static because it is about what this process has already
+        /// written, not about one request.
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<DateTime, DateTime>
+            _lastKept = new();
+
+        private static readonly TimeSpan KeepEvery = TimeSpan.FromMinutes(5);
+
+        private async Task KeepAsync(DateTime day, Dictionary<string, string> statuses)
+        {
+            var now = DateTime.UtcNow;
+            if (_lastKept.TryGetValue(day, out var last) && now - last < KeepEvery) return;
+
+            // Claimed before the write, so two requests arriving together
+            // do not both do it.
+            _lastKept[day] = now;
+            await _payrollSnapshots!.SaveAsync(day, statuses);
         }
 
         /// One line's slice of the roster above. A dictionary lookup per

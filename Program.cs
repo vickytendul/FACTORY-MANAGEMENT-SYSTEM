@@ -169,6 +169,26 @@ if (skillsSource is "supabase" or "dual"
                 SslMode = SslMode.Require,
             }.ConnectionString;
         }
+
+        // Supabase's session-mode pooler allows fifteen clients for the
+        // whole project, and it refuses the sixteenth outright:
+        // "EMAXCONNSESSION ... max clients are limited to pool_size: 15".
+        // Npgsql's own default ceiling is a hundred, so nothing here
+        // stopped the factory report - which asks for every line at once -
+        // from opening more than the pooler would give and failing the
+        // whole page.
+        //
+        // Eight leaves room for the rest of the application while that
+        // report runs. Overridable for a deployment on a bigger pool.
+        var maxPool = builder.Configuration.GetValue("Supabase:MaxPoolSize", 8);
+        connectionString = new NpgsqlConnectionStringBuilder(connectionString)
+        {
+            MaxPoolSize = maxPool,
+            // Rather than fail when all eight are busy: the work queues for
+            // a moment instead of the page showing an error.
+            Timeout = 30,
+        }.ConnectionString;
+
         return NpgsqlDataSource.Create(connectionString);
     });
 }

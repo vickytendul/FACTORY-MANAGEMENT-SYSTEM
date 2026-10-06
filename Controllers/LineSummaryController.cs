@@ -1105,6 +1105,35 @@ namespace FactoryManagementSystem.Controllers
             return byDate;
         }
 
+        /// One line's column of the factory report. Null when the line has
+        /// no active layout to read.
+        private async Task<FactoryLine?> BuildFactoryLineAsync(
+            int lineId,
+            List<DateTime> days,
+            Dictionary<int, Dictionary<DateTime, (double output, double rej)>> outputByLine)
+        {
+            var context = await ResolveLineContextAsync(lineId, null, null);
+            if (context == null) return null;
+
+            var outputByDate = outputByLine.TryGetValue(lineId, out var o)
+                ? o
+                : new Dictionary<DateTime, (double output, double rej)>();
+
+            var totals = await AggregateLineOverDaysAsync(
+                lineId, context, days, outputByDate);
+
+            return new FactoryLine(
+                LineId: lineId,
+                LineName: $"LINE NO {lineId}",
+                CcNo: context.CcNo,
+                Sam: context.Sam,
+                TotalPositions: context.LayoutItems.Count,
+                TailorsOnRoll: context.TailorsOnRoll,
+                OthersOnRoll: context.OthersOnRoll,
+                Totals: totals,
+                LeftOnLayout: context.LeftOnLayout.Count);
+        }
+
         /// Every allocated line side by side for one period, plus the
         /// factory as a whole - the Line Summary turned on its side. There,
         /// one line is fixed and the columns are days; here one period is
@@ -1153,28 +1182,26 @@ namespace FactoryManagementSystem.Controllers
                 // Supabase for attendance and loans. Done one after
                 // another that was most of the rest of the response; the
                 // lines do not depend on each other, so they go together.
+                //
+                // Four at a time, not fifteen. Supabase's session-mode
+                // pooler allows fifteen clients for the ENTIRE project and
+                // refuses the sixteenth - letting every line go at once
+                // took the whole pool and failed the page with
+                // "EMAXCONNSESSION". Four keeps most of the speed and
+                // leaves the rest of the application its connections.
+                using var gate = new SemaphoreSlim(4);
                 var built = await Task.WhenAll(lineIds.Select(async lineId =>
                 {
-                    var context = await ResolveLineContextAsync(lineId, null, null);
-                    if (context == null) return null;
-
-                    var outputByDate = outputByLine.TryGetValue(lineId, out var o)
-                        ? o
-                        : new Dictionary<DateTime, (double output, double rej)>();
-
-                    var totals = await AggregateLineOverDaysAsync(
-                        lineId, context, days, outputByDate);
-
-                    return new FactoryLine(
-                        LineId: lineId,
-                        LineName: $"LINE NO {lineId}",
-                        CcNo: context.CcNo,
-                        Sam: context.Sam,
-                        TotalPositions: context.LayoutItems.Count,
-                        TailorsOnRoll: context.TailorsOnRoll,
-                        OthersOnRoll: context.OthersOnRoll,
-                        Totals: totals,
-                        LeftOnLayout: context.LeftOnLayout.Count);
+                    await gate.WaitAsync();
+                    try
+                    {
+                        return await BuildFactoryLineAsync(
+                            lineId, days, outputByLine);
+                    }
+                    finally
+                    {
+                        gate.Release();
+                    }
                 }));
 
                 // Ordered by line, not by whichever finished first.

@@ -648,30 +648,24 @@ namespace FactoryManagementSystem.Controllers
             var left = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             if (wanted.Count == 0) return left;
 
-            // The roster for today, from the same 60s-cached call every
-            // other consumer uses. Who has left is a current-state fact,
-            // not a per-day one - the vendor carries one release date per
-            // person, not a history - so the range asked for does not
-            // change the answer.
+            // The roster for today, through the same per-request load the
+            // attendance uses, so the response is fetched once and parsed
+            // once however many lines ask. Who has left is a current-state
+            // fact, not a per-day one - the vendor carries one release date
+            // per person, not a history - so the range does not change the
+            // answer.
             var today = DateTime.UtcNow.Date;
-            var (success, _, body) = await _companyApiClient.FetchRawAsync(
-                CompanyApiCompCode,
-                CompanyApiClient.FormatDate(today),
-                CompanyApiClient.FormatDate(today));
-
-            if (!success || string.IsNullOrWhiteSpace(body)) return left;
-
-            using var doc = JsonDocument.Parse(body);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array) return left;
-
-            var roster = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var employee in doc.RootElement.EnumerateArray())
+            HashSet<string> roster;
+            try
             {
-                if (!employee.TryGetProperty("tno", out var tnoProp)) continue;
-                var tno = tnoProp.ValueKind == JsonValueKind.String
-                    ? tnoProp.GetString()
-                    : tnoProp.ToString();
-                if (!string.IsNullOrWhiteSpace(tno)) roster.Add(tno.Trim());
+                (_, roster) = await LoadRosterAsync(today, today);
+            }
+            catch (InvalidOperationException)
+            {
+                // No roster, no way to tell a leaver from anybody else.
+                // Reported as nobody having left, which leaves the figures
+                // where they were rather than emptying a line.
+                return left;
             }
 
             foreach (var code in wanted)
@@ -695,6 +689,87 @@ namespace FactoryManagementSystem.Controllers
         /// FetchRawAsync's raw body carries them. Reuses the same
         /// CompanyApiClient instance/login mechanism either way - no second
         /// Company API client or auth flow is introduced.
+        /// The whole roster's attendance for a range, parsed ONCE.
+        ///
+        /// The factory report asks for fifteen lines, and each line used to
+        /// parse this response for itself - two hundred kilobytes of JSON,
+        /// fifteen times for attendance and fifteen more for the leaver
+        /// check. The HTTP call was already shared through the client's
+        /// cache; the parsing was not, and it was most of a thirty-second
+        /// response.
+        ///
+        /// Controllers are built per request, so these fields hold for one
+        /// request and cannot leak between callers.
+        private readonly Dictionary<(DateTime, DateTime),
+            (Dictionary<DateTime, Dictionary<string, string>> Attendance,
+             HashSet<string> Codes)> _rosterByRange = new();
+
+        private async Task<(Dictionary<DateTime, Dictionary<string, string>> Attendance,
+                            HashSet<string> Codes)>
+            LoadRosterAsync(DateTime fromDate, DateTime toDate)
+        {
+            if (_rosterByRange.TryGetValue((fromDate, toDate), out var cached)) return cached;
+
+            var byDate = new Dictionary<DateTime, Dictionary<string, string>>();
+            for (var d = fromDate; d <= toDate; d = d.AddDays(1))
+            {
+                byDate[d] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+            var codes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var (success, statusCode, body) = await _companyApiClient.FetchRawAsync(
+                CompanyApiCompCode,
+                CompanyApiClient.FormatDate(fromDate),
+                CompanyApiClient.FormatDate(toDate));
+
+            if (!success)
+            {
+                throw new InvalidOperationException(
+                    $"Company API (Employee_Att) returned HTTP {statusCode}.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    // The date keys are built once rather than per employee:
+                    // formatting them inside the loop was eight hundred
+                    // allocations a day of range, per line.
+                    var dayKeys = new List<(DateTime Day, string Key)>();
+                    for (var d = fromDate; d <= toDate; d = d.AddDays(1))
+                        dayKeys.Add((d, CompanyApiClient.FormatDate(d)));
+
+                    foreach (var employee in doc.RootElement.EnumerateArray())
+                    {
+                        if (!employee.TryGetProperty("tno", out var tnoProp)) continue;
+                        var tno = tnoProp.ValueKind == JsonValueKind.String
+                            ? tnoProp.GetString()
+                            : tnoProp.ToString();
+                        if (string.IsNullOrWhiteSpace(tno)) continue;
+
+                        codes.Add(tno.Trim());
+
+                        foreach (var (day, key) in dayKeys)
+                        {
+                            if (employee.TryGetProperty(key, out var statusProp))
+                            {
+                                byDate[day][tno] = statusProp.ValueKind == JsonValueKind.String
+                                    ? statusProp.GetString() ?? string.Empty
+                                    : statusProp.ToString();
+                            }
+                        }
+                    }
+                }
+            }
+
+            var loaded = (byDate, codes);
+            _rosterByRange[(fromDate, toDate)] = loaded;
+            return loaded;
+        }
+
+        /// One line's slice of the roster above. A dictionary lookup per
+        /// person, where this used to be a parse of the whole response.
         private async Task<Dictionary<DateTime, Dictionary<string, string>>> FetchAttendanceRangeAsync(
             DateTime fromDate, DateTime toDate, IEnumerable<string> mappedEmployeeCodes)
         {
@@ -707,34 +782,14 @@ namespace FactoryManagementSystem.Controllers
             var mappedCodes = new HashSet<string>(mappedEmployeeCodes, StringComparer.OrdinalIgnoreCase);
             if (mappedCodes.Count == 0) return byDate;
 
-            var (success, statusCode, body) = await _companyApiClient.FetchRawAsync(
-                CompanyApiCompCode, CompanyApiClient.FormatDate(fromDate), CompanyApiClient.FormatDate(toDate));
+            var (all, _) = await LoadRosterAsync(fromDate, toDate);
 
-            if (!success)
+            foreach (var (day, statuses) in all)
             {
-                throw new InvalidOperationException($"Company API (Employee_Att) returned HTTP {statusCode}.");
-            }
-
-            if (string.IsNullOrWhiteSpace(body)) return byDate;
-
-            using var doc = JsonDocument.Parse(body);
-            if (doc.RootElement.ValueKind != JsonValueKind.Array) return byDate;
-
-            foreach (var employee in doc.RootElement.EnumerateArray())
-            {
-                if (!employee.TryGetProperty("tno", out var tnoProp)) continue;
-                var tno = tnoProp.ValueKind == JsonValueKind.String ? tnoProp.GetString() : tnoProp.ToString();
-                if (string.IsNullOrWhiteSpace(tno) || !mappedCodes.Contains(tno)) continue;
-
-                for (var d = fromDate; d <= toDate; d = d.AddDays(1))
+                var slice = byDate[day];
+                foreach (var code in mappedCodes)
                 {
-                    var dateKey = CompanyApiClient.FormatDate(d);
-                    if (employee.TryGetProperty(dateKey, out var statusProp))
-                    {
-                        byDate[d][tno] = statusProp.ValueKind == JsonValueKind.String
-                            ? statusProp.GetString() ?? string.Empty
-                            : statusProp.ToString();
-                    }
+                    if (statuses.TryGetValue(code, out var status)) slice[code] = status;
                 }
             }
 
@@ -1086,11 +1141,22 @@ namespace FactoryManagementSystem.Controllers
 
                 var outputByLine = await FetchOutputAndRejForLinesAsync(lineIds, from, to);
 
-                var lines = new List<FactoryLine>();
-                foreach (var lineId in lineIds)
+                // Both roster ranges are loaded here, before anything runs
+                // in parallel. The per-request cache they fill is a plain
+                // dictionary, which is safe to read from many tasks at once
+                // and not safe to write to - so every write happens now,
+                // while this is still the only thread.
+                await LoadRosterAsync(from, to);
+                await LoadRosterAsync(DateTime.UtcNow.Date, DateTime.UtcNow.Date);
+
+                // Fifteen lines, each waiting on its own round trips to
+                // Supabase for attendance and loans. Done one after
+                // another that was most of the rest of the response; the
+                // lines do not depend on each other, so they go together.
+                var built = await Task.WhenAll(lineIds.Select(async lineId =>
                 {
                     var context = await ResolveLineContextAsync(lineId, null, null);
-                    if (context == null) continue;
+                    if (context == null) return null;
 
                     var outputByDate = outputByLine.TryGetValue(lineId, out var o)
                         ? o
@@ -1099,7 +1165,7 @@ namespace FactoryManagementSystem.Controllers
                     var totals = await AggregateLineOverDaysAsync(
                         lineId, context, days, outputByDate);
 
-                    lines.Add(new FactoryLine(
+                    return new FactoryLine(
                         LineId: lineId,
                         LineName: $"LINE NO {lineId}",
                         CcNo: context.CcNo,
@@ -1108,8 +1174,15 @@ namespace FactoryManagementSystem.Controllers
                         TailorsOnRoll: context.TailorsOnRoll,
                         OthersOnRoll: context.OthersOnRoll,
                         Totals: totals,
-                        LeftOnLayout: context.LeftOnLayout.Count));
-                }
+                        LeftOnLayout: context.LeftOnLayout.Count);
+                }));
+
+                // Ordered by line, not by whichever finished first.
+                var lines = built
+                    .Where(l => l != null)
+                    .Select(l => l!)
+                    .OrderBy(l => l.LineId)
+                    .ToList();
 
                 return Ok(new
                 {

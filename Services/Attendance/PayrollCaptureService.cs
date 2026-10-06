@@ -66,6 +66,21 @@ namespace FactoryManagementSystem.Services.Attendance
             }
         }
 
+        /// How far back each run looks.
+        ///
+        /// Not just today. Payroll posts late - 03 and 05 Oct were still
+        /// entirely blank on the 6th, every one of 858 people - and a day
+        /// posted tomorrow is a day this never sees if it only ever asks
+        /// about today. The vendor answers for any range that includes
+        /// today, so a run that asks for the fortnight behind it catches a
+        /// late posting on the next tick after it lands.
+        ///
+        /// Days already kept are written again, which is right: if payroll
+        /// corrects a day, the correction is the truth. A day payroll
+        /// still has nothing for is not written at all - see
+        /// PayrollSnapshotRepository.SaveAsync.
+        private const int LookBackDays = 14;
+
         private async Task CaptureTodayAsync()
         {
             using var scope = _services.CreateScope();
@@ -76,10 +91,12 @@ namespace FactoryManagementSystem.Services.Attendance
             var client = scope.ServiceProvider.GetRequiredService<CompanyApiClient>();
 
             var today = DateTime.Now.Date;
-            var key = CompanyApiClient.FormatDate(today);
+            var from = today.AddDays(-LookBackDays);
 
             var (success, statusCode, body) = await client.FetchRawAsync(
-                CompCode, key, key);
+                CompCode,
+                CompanyApiClient.FormatDate(from),
+                CompanyApiClient.FormatDate(today));
 
             if (!success)
             {
@@ -92,7 +109,19 @@ namespace FactoryManagementSystem.Services.Attendance
             using var doc = JsonDocument.Parse(body);
             if (doc.RootElement.ValueKind != JsonValueKind.Array) return;
 
-            var statuses = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            // One pass over the response filling every day at once, rather
+            // than parsing two hundred kilobytes once per day of the
+            // fortnight.
+            var dayKeys = new List<(DateTime Day, string Key)>();
+            for (var d = from; d <= today; d = d.AddDays(1))
+                dayKeys.Add((d, CompanyApiClient.FormatDate(d)));
+
+            var byDay = new Dictionary<DateTime, Dictionary<string, string>>();
+            foreach (var (day, _) in dayKeys)
+            {
+                byDay[day] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            }
+
             foreach (var employee in doc.RootElement.EnumerateArray())
             {
                 if (!employee.TryGetProperty("tno", out var tnoProp)) continue;
@@ -100,26 +129,37 @@ namespace FactoryManagementSystem.Services.Attendance
                     ? tnoProp.GetString()
                     : tnoProp.ToString();
                 if (string.IsNullOrWhiteSpace(tno)) continue;
+                var code = tno.Trim();
 
-                if (employee.TryGetProperty(key, out var statusProp))
+                foreach (var (day, key) in dayKeys)
                 {
-                    statuses[tno.Trim()] = statusProp.ValueKind == JsonValueKind.String
+                    if (!employee.TryGetProperty(key, out var statusProp)) continue;
+                    var status = statusProp.ValueKind == JsonValueKind.String
                         ? statusProp.GetString() ?? string.Empty
                         : statusProp.ToString();
+                    if (!string.IsNullOrWhiteSpace(status)) byDay[day][code] = status;
                 }
             }
 
-            if (statuses.Count == 0)
+            var kept = new List<string>();
+            foreach (var (day, key) in dayKeys)
+            {
+                var statuses = byDay[day];
+                if (statuses.Count == 0) continue;
+                await snapshots.SaveAsync(day, statuses);
+                kept.Add($"{key} ({statuses.Count})");
+            }
+
+            if (kept.Count == 0)
             {
                 _logger.LogInformation(
-                    "Payroll capture - nothing posted for {Date} yet.", key);
+                    "Payroll capture - nothing posted in the last {Days} days.",
+                    LookBackDays);
                 return;
             }
 
-            await snapshots.SaveAsync(today, statuses);
             _logger.LogInformation(
-                "Payroll capture - kept {Count} statuses for {Date}.",
-                statuses.Count, key);
+                "Payroll capture - kept {Days}.", string.Join(", ", kept));
         }
     }
 }

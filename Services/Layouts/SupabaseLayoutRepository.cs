@@ -1,4 +1,5 @@
 using FactoryManagementSystem.Entities;
+using Microsoft.Extensions.Caching.Memory;
 using Npgsql;
 using NpgsqlTypes;
 
@@ -39,10 +40,26 @@ namespace FactoryManagementSystem.Services.Layouts
         /// ids Supabase already used.
         private readonly ILayoutIdAllocator _ids;
 
-        public SupabaseLayoutRepository(NpgsqlDataSource dataSource, ILayoutIdAllocator ids)
+        /// The active layout, briefly.
+        ///
+        /// The Firestore store cached this and the move here dropped it,
+        /// which was not free: the active allocation snapshot is read by
+        /// the Dashboard, the Strength Summary, and ONCE PER LINE by the
+        /// factory report - fifteen full-table reads for one page. The same
+        /// windows the Firestore path used, so staleness behaves as it did.
+        private const string TransactionsKey = "supabase_active_layout_transactions";
+        private const string MasterCountsKey = "supabase_active_main_master_counts";
+        private static readonly TimeSpan TransactionTtl = TimeSpan.FromSeconds(60);
+        private static readonly TimeSpan MasterTtl = TimeSpan.FromSeconds(45);
+
+        private readonly IMemoryCache _cache;
+
+        public SupabaseLayoutRepository(
+            NpgsqlDataSource dataSource, ILayoutIdAllocator ids, IMemoryCache cache)
         {
             _dataSource = dataSource;
             _ids = ids;
+            _cache = cache;
         }
 
         private static int NormalizeLayoutNo(int layoutNo) => layoutNo <= 0 ? 1 : layoutNo;
@@ -135,14 +152,30 @@ namespace FactoryManagementSystem.Services.Layouts
         // without that pressure, and a second cache layer would only add a
         // way for the two stores to disagree during dual-read comparison.
 
-        public Task<List<LayoutTransaction>> GetActiveLayoutTransactionsAsync() =>
-            QueryAsync(TxCols + " where is_active", ReadTx);
+        public async Task<List<LayoutTransaction>> GetActiveLayoutTransactionsAsync()
+        {
+            if (_cache.TryGetValue(TransactionsKey, out List<LayoutTransaction>? cached)
+                && cached != null)
+            {
+                return cached;
+            }
+
+            var result = await QueryAsync(TxCols + " where is_active", ReadTx);
+            _cache.Set(TransactionsKey, result, TransactionTtl);
+            return result;
+        }
 
         public Task<List<LayoutMaster>> GetActiveLayoutMastersByCcAsync(int ccId) =>
             QueryAsync(MasterCols + " where is_active and cc_id = @cc", ReadMaster, new NpgsqlParameter("cc", ccId));
 
         public async Task<Dictionary<(int CCId, int LayoutNo), int>> GetActiveMainLayoutMasterCountsAsync()
         {
+            if (_cache.TryGetValue(
+                    MasterCountsKey, out Dictionary<(int, int), int>? hit) && hit != null)
+            {
+                return hit;
+            }
+
             // coalesce(layout_no,1) is the SQL spelling of NormalizeLayoutNo,
             // so an absent layout counts under layout 1 exactly as it does
             // on the Firestore path.
@@ -157,12 +190,16 @@ namespace FactoryManagementSystem.Services.Layouts
             var result = new Dictionary<(int, int), int>();
             while (await r.ReadAsync())
                 result[(r.GetInt32(0), r.GetInt32(1))] = (int)r.GetInt64(2);
+
+            _cache.Set(MasterCountsKey, result, MasterTtl);
             return result;
         }
 
-        // Nothing to invalidate - there is no cache in this implementation.
-        public void InvalidateLayoutTransactionsCache() { }
-        public void InvalidateLayoutMastersCache() { }
+        // Called by the controllers after every write, which is what keeps
+        // a saved layout from being invisible for the next minute.
+        public void InvalidateLayoutTransactionsCache() => _cache.Remove(TransactionsKey);
+
+        public void InvalidateLayoutMastersCache() => _cache.Remove(MasterCountsKey);
 
         // ── LayoutMaster reads ──────────────────────────────────────────
 

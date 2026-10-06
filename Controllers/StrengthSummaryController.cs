@@ -480,16 +480,34 @@ namespace FactoryManagementSystem.Controllers
             /// Payroll is the fallback and not a second opinion - it is the
             /// only thing left to go on for the people no layout places,
             /// who have no section to read.
+            /// A tailor by trade, or standing at a tailor's station today.
+            ///
+            /// Payroll decides what somebody IS and the layout decides what
+            /// they are DOING, and this page counts manpower - so a tailor
+            /// who spent today as a line leader is still a tailor the
+            /// factory employs. The section used to override payroll, which
+            /// put 34 tailors in OTHERS: 15 on OTHERS rows, 8 leading
+            /// lines, 6 checking, 5 helping. They are trained tailors who
+            /// can be put back on a machine tomorrow, and a headcount that
+            /// says otherwise is no use for planning.
+            ///
+            /// The other way round still holds: somebody payroll does not
+            /// call a tailor, standing on a MAIN or SUPER TEAM row, is
+            /// doing tailor work and counts here.
+            ///
+            /// Note this is the MANPOWER question, not the minutes one.
+            /// The OWE report asks what work was actually done and keeps
+            /// the section as its only rule, which is why a line leader's
+            /// minutes never land in the tailor pool there.
             public bool IsTailor
             {
                 get
                 {
+                    if (SummaryService.CategoryFor(Department, Designation) == "Tailor")
+                        return true;
+
                     var section = Section.Trim().ToUpperInvariant();
-                    if (section.Length > 0)
-                    {
-                        return section == "MAIN" || section == "SUPER TEAM";
-                    }
-                    return SummaryService.CategoryFor(Department, Designation) == "Tailor";
+                    return section == "MAIN" || section == "SUPER TEAM";
                 }
             }
 

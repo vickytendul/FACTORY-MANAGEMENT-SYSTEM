@@ -15,6 +15,32 @@ namespace FactoryManagementSystem.Services.Departments
             _dataSource = dataSource;
         }
 
+        /// Renames a department everywhere it appears.
+        ///
+        /// A department here is a name typed into Layout Master, not a row
+        /// in a table of its own, so it exists in as many places as it has
+        /// work details and there is nothing to rename but the string. Two
+        /// of them were typed with a letter missing - TRAING AND
+        /// DEVELOPMENT, MAINTENENCE - and carried the typo onto every
+        /// report that groups by department.
+        ///
+        /// Renaming onto an existing name MERGES the two, which is the
+        /// point for MAINTENENCE: payroll already carries MAINTENANCE, and
+        /// the two were being counted as separate departments.
+        ///
+        /// Returns how many work details moved.
+        public async Task<int> RenameDepartmentAsync(string from, string to)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                update public.department_work_details
+                   set department = @to
+                 where department = @from
+                """);
+            cmd.Parameters.AddWithValue("from", from);
+            cmd.Parameters.AddWithValue("to", to);
+            return await cmd.ExecuteNonQueryAsync();
+        }
+
         // ── work details ──────────────────────────────────────────────────
 
         private const string WorkDetailCols = """

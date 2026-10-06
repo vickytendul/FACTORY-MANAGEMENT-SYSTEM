@@ -178,6 +178,54 @@ namespace FactoryManagementSystem.Controllers
         /// take its allocation history with it, and leaving the allocation
         /// behind would keep somebody counted as placed in a job that no
         /// longer exists.
+        /// Renames a department everywhere it appears.
+        ///
+        /// A department is a name typed into Layout Master, not a row in a
+        /// table of its own, so a typo in it is carried onto every report
+        /// that groups by department until somebody retypes it everywhere.
+        ///
+        /// Renaming onto a name that already exists MERGES the two, which
+        /// is wanted: MAINTENENCE and MAINTENANCE were being counted as
+        /// two departments because one of them was typed with a letter
+        /// missing.
+        [HttpPost("rename")]
+        public async Task<IActionResult> Rename([FromBody] RenameRequest request)
+        {
+            try
+            {
+                var from = (request.From ?? string.Empty).Trim();
+                var to = (request.To ?? string.Empty).Trim();
+
+                if (from.Length == 0 || to.Length == 0)
+                    return BadRequest(new { Success = false, Message = "Both names are required." });
+                if (string.Equals(from, to, StringComparison.Ordinal))
+                    return BadRequest(new { Success = false, Message = "The two names are the same." });
+
+                var moved = await _departments.RenameDepartmentAsync(from, to);
+
+                return Ok(new
+                {
+                    Success = true,
+                    From = from,
+                    To = to,
+                    WorkDetailsMoved = moved,
+                    Message = moved == 0
+                        ? "Nothing was named that. Check the spelling of From."
+                        : $"{moved} work details moved from '{from}' to '{to}'.",
+                });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { Success = false, Message = ex.Message });
+            }
+        }
+
+        public class RenameRequest
+        {
+            public string? From { get; set; }
+            public string? To { get; set; }
+        }
+
         [HttpPost("{department}")]
         public async Task<IActionResult> Save(string department, [FromBody] SaveRequest request)
         {

@@ -607,13 +607,24 @@ namespace FactoryManagementSystem.Controllers
             IReadOnlySet<string>? placed = null)
         {
             var list = people.ToList();
-            var allocated = list.Count(p =>
-                allocatedLineByCode.ContainsKey(p.Code)
-                || (placed is not null && placed.Contains(p.Code)));
+
+            // On a sewing line, or on a department's work detail. Split
+            // because "613 tailors" says nothing about where they are, and
+            // the 31 standing in Cutting, Training and HR are the ones
+            // worth knowing about - they are trained tailors who are not
+            // on a machine.
+            var onLine = list.Count(p => allocatedLineByCode.ContainsKey(p.Code));
+            var inDepartment = list.Count(p =>
+                !allocatedLineByCode.ContainsKey(p.Code)
+                && placed is not null && placed.Contains(p.Code));
+            var allocated = onLine + inDepartment;
+
             return new
             {
                 totalManpower = list.Count,
                 allocated,
+                onLine,
+                inDepartment,
                 present = AveragePerDay(list, postedDays, (p, d) => p.IsPresentOn(d)),
                 absent = AveragePerDay(list, postedDays, (p, d) => p.IsAbsentOn(d)),
                 balToAll = list.Count - allocated,

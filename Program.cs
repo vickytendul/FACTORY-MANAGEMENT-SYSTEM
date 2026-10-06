@@ -448,17 +448,16 @@ builder.Services.AddAuthorization();
 // write this factory's data over the public internet.
 var authRequired = builder.Configuration.GetValue("Auth:Required", true);
 
-if (!authRequired)
-    builder.Services.AddSingleton<IAuthorizationPolicyProvider, OpenAccessPolicyProvider>();
-
 // =====================================================
 // Services
 // =====================================================
 
 // Every endpoint requires a valid JWT by default; controllers/actions opt
 // out with [AllowAnonymous] (e.g. AuthController's login/bootstrap).
-// With Auth__Required=false the filter is not added at all, and the
-// policy provider above satisfies the per-controller [Authorize] besides.
+// With Auth__Required=false the filter is not added, and OpenAccessMiddleware
+// in the pipeline below hands every request an Admin identity - which is
+// what satisfies the per-controller [Authorize(Roles = "Admin")] that the
+// filter's absence does nothing about.
 builder.Services.AddControllers(options =>
 {
     if (authRequired) options.Filters.Add(new AuthorizeFilter());
@@ -506,6 +505,11 @@ app.UseHttpsRedirection();
 app.UseCors("AllowFlutter");
 
 app.UseAuthentication();
+
+// After authentication so a real token still names its own user, and
+// before authorization so the identity is there when [Authorize] looks.
+if (!authRequired) app.UseMiddleware<OpenAccessMiddleware>();
+
 app.UseAuthorization();
 
 // Test Endpoint

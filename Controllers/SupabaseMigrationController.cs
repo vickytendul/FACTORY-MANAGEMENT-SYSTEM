@@ -438,6 +438,65 @@ namespace FactoryManagementSystem.Controllers
                     : 1000);
         }
 
+        // ── kept attendance ──────────────────────────────────────────────
+
+        /// What has been kept of payroll's attendance, day by day.
+        ///
+        /// The thing worth seeing: a date with rows here reads the same
+        /// however long after the fact it is asked for. A date without
+        /// them falls back to whatever supervisors marked in this app,
+        /// because the vendor will not answer for a past date on its own.
+        [HttpGet("attendance/status")]
+        public async Task<IActionResult> AttendanceStatus(
+            [FromQuery] string key, [FromQuery] int days = 14)
+        {
+            if (!KeyOk(key)) return BadKey();
+            if (_dataSource == null) return SupabaseMissing();
+
+            var rows = new List<object>();
+            long total = 0;
+
+            await using (var cmd = _dataSource.CreateCommand("""
+                select attendance_date,
+                       count(*)                                   as people,
+                       count(*) filter (where upper(status) in ('P','PRESENT')) as present,
+                       max(captured_at)                           as last_kept
+                from public.payroll_attendance
+                where attendance_date >= current_date - @days
+                group by attendance_date
+                order by attendance_date desc
+                """))
+            {
+                cmd.Parameters.AddWithValue("days", days);
+                await using var r = await cmd.ExecuteReaderAsync();
+                while (await r.ReadAsync())
+                {
+                    var people = r.GetInt64(1);
+                    total += people;
+                    rows.Add(new
+                    {
+                        date = r.GetDateTime(0).ToString("yyyy-MM-dd"),
+                        people,
+                        present = r.GetInt64(2),
+                        lastKept = r.GetDateTime(3),
+                    });
+                }
+            }
+
+            return Ok(new
+            {
+                Success = true,
+                DaysKept = rows.Count,
+                RowsInWindow = total,
+                Days = rows,
+                Message = rows.Count == 0
+                    ? "Nothing kept yet. A view of a report whose range includes "
+                      + "today writes the day it is looking at, and the capture "
+                      + "timer writes today every hour."
+                    : "These dates read the same however long after the fact.",
+            });
+        }
+
         // ── shared ───────────────────────────────────────────────────────
 
         /// Migration__Key, which only somebody who already administers this

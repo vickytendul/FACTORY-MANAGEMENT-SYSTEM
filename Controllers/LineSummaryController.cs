@@ -113,6 +113,10 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
+                // Before the context is resolved: it splits the allocated
+                // headcount into tailors and others, and needs this.
+                _payrollTailors = await PayrollTailorCodesAsync(date.Date, date.Date);
+
                 var context = await ResolveLineContextAsync(lineId, ccId, layoutNo);
                 if (context == null)
                 {
@@ -248,6 +252,8 @@ namespace FactoryManagementSystem.Controllers
                     return BadRequest(new { Success = false, Message = $"Range too wide - maximum {MaxRangeDays} days." });
                 }
 
+                _payrollTailors = await PayrollTailorCodesAsync(from, to);
+
                 var context = await ResolveLineContextAsync(lineId, ccId, layoutNo);
                 if (context == null || context.LayoutItems.Count == 0)
                 {
@@ -363,6 +369,8 @@ namespace FactoryManagementSystem.Controllers
         public async Task<IActionResult> AttendanceDetail(
             [FromQuery] int lineId, [FromQuery] DateTime date)
         {
+            _payrollTailors = await PayrollTailorCodesAsync(date.Date, date.Date);
+
             var context = await ResolveLineContextAsync(lineId, null, null);
             if (context == null)
                 return Ok(new { lineId, date, people = Array.Empty<object>() });
@@ -396,8 +404,7 @@ namespace FactoryManagementSystem.Controllers
             var people = new List<AttendancePerson>();
             foreach (var (code, section) in context.EmployeeSectionMap)
             {
-                var sec = (section ?? "").Trim().ToUpper();
-                var isTailor = sec == "MAIN" || sec == "SUPER TEAM";
+                var isTailor = CountsAsTailor(code, section);
 
                 string state;
                 string? raw = null;
@@ -625,8 +632,7 @@ namespace FactoryManagementSystem.Controllers
                     employeeSectionMap[item.EmployeeCode] = item.Section;
                 }
 
-                var sec = (item.Section ?? "").Trim().ToUpper();
-                if (sec == "MAIN" || sec == "SUPER TEAM")
+                if (CountsAsTailor(item.EmployeeCode, item.Section))
                     tailorsOnRoll++;
                 else
                     othersOnRoll++;
@@ -669,7 +675,7 @@ namespace FactoryManagementSystem.Controllers
             HashSet<string> roster;
             try
             {
-                (_, roster) = await LoadRosterAsync(today, today);
+                (_, roster, _) = await LoadRosterAsync(today, today);
             }
             catch (InvalidOperationException)
             {
@@ -713,10 +719,12 @@ namespace FactoryManagementSystem.Controllers
         /// request and cannot leak between callers.
         private readonly Dictionary<(DateTime, DateTime),
             (Dictionary<DateTime, Dictionary<string, string>> Attendance,
-             HashSet<string> Codes)> _rosterByRange = new();
+             HashSet<string> Codes,
+             HashSet<string> PayrollTailors)> _rosterByRange = new();
 
         private async Task<(Dictionary<DateTime, Dictionary<string, string>> Attendance,
-                            HashSet<string> Codes)>
+                            HashSet<string> Codes,
+                            HashSet<string> PayrollTailors)>
             LoadRosterAsync(DateTime fromDate, DateTime toDate)
         {
             if (_rosterByRange.TryGetValue((fromDate, toDate), out var cached)) return cached;
@@ -727,6 +735,11 @@ namespace FactoryManagementSystem.Controllers
                 byDate[d] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             }
             var codes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            // Who payroll calls a tailor by trade, read off the same
+            // response rather than fetched again. It is half of the rule
+            // this report splits TAILOR from OTHERS by; the layout section
+            // is the other half.
+            var payrollTailors = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             var (success, statusCode, body) = await _companyApiClient.FetchRawAsync(
                 CompanyApiCompCode,
@@ -760,6 +773,13 @@ namespace FactoryManagementSystem.Controllers
                         if (string.IsNullOrWhiteSpace(tno)) continue;
 
                         codes.Add(tno.Trim());
+
+                        if (SummaryService.CategoryFor(
+                                Text(employee, "DeptName"),
+                                Text(employee, "DesignationName")) == "Tailor")
+                        {
+                            payrollTailors.Add(tno.Trim());
+                        }
 
                         foreach (var (day, key) in dayKeys)
                         {
@@ -812,10 +832,69 @@ namespace FactoryManagementSystem.Controllers
                 }
             }
 
-            var loaded = (byDate, codes);
+            var loaded = (byDate, codes, payrollTailors);
             _rosterByRange[(fromDate, toDate)] = loaded;
             return loaded;
         }
+
+        /// One string property of a roster row, however the vendor typed it.
+        private static string Text(JsonElement row, string name) =>
+            row.TryGetProperty(name, out var p)
+                ? (p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : p.ToString())
+                : string.Empty;
+
+        /// The codes payroll calls a tailor by trade, for this period.
+        ///
+        /// Taken from the period's own roster response where there is one.
+        /// A past day has none - the vendor only answers for a range that
+        /// includes today, and such a day is served from the snapshots we
+        /// keep, which hold a status and not a designation. Today's roster
+        /// answers it instead: a person's trade does not change from one
+        /// day to the next, and without this the same date would split
+        /// one way today and another way tomorrow off the same output.
+        ///
+        /// Today's roster is already loaded by the leaver check, so this
+        /// costs no extra call in the usual case. An empty set means the
+        /// lookup failed, and the split falls back to the layout section
+        /// alone - the behaviour this report had before.
+        private async Task<HashSet<string>> PayrollTailorCodesAsync(
+            DateTime fromDate, DateTime toDate)
+        {
+            var empty = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var (_, _, tailors) = await LoadRosterAsync(fromDate, toDate);
+                if (tailors.Count > 0) return tailors;
+
+                var today = DateTime.UtcNow.Date;
+                if (fromDate == today && toDate == today) return tailors;
+
+                var (_, _, todays) = await LoadRosterAsync(today, today);
+                return todays;
+            }
+            catch (InvalidOperationException)
+            {
+                return empty;
+            }
+        }
+
+        /// Who payroll calls a tailor, for the period this request is
+        /// reading. Set once per request; empty until it is, which leaves
+        /// the layout section as the only rule.
+        ///
+        /// A field rather than a parameter because the classification
+        /// happens in five places down two call chains, and threading it
+        /// through every one of them is how one of the five gets missed.
+        /// Controllers are built per request, so this cannot leak.
+        private HashSet<string> _payrollTailors =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        /// The report's own half of [SummaryService.IsTailor] - it holds a
+        /// set of codes rather than each person's department, so it cannot
+        /// call that one directly.
+        private bool CountsAsTailor(string employeeCode, string? section) =>
+            _payrollTailors.Contains(employeeCode) ||
+            SummaryService.IsTailorSection(section);
 
         /// When each day was last written, so a day is not written again on
         /// every view.
@@ -859,7 +938,7 @@ namespace FactoryManagementSystem.Controllers
             var mappedCodes = new HashSet<string>(mappedEmployeeCodes, StringComparer.OrdinalIgnoreCase);
             if (mappedCodes.Count == 0) return byDate;
 
-            var (all, _) = await LoadRosterAsync(fromDate, toDate);
+            var (all, _, _) = await LoadRosterAsync(fromDate, toDate);
 
             foreach (var (day, statuses) in all)
             {
@@ -1029,7 +1108,7 @@ namespace FactoryManagementSystem.Controllers
             => employeeSectionMap.Keys.Any(code =>
                 attendanceByCode.TryGetValue(code, out var s) && !string.IsNullOrWhiteSpace(s));
 
-        private static (int tailorsPresent, int othersPresent, int absent, int unknown, int lentOut, int borrowedIn) ClassifyAttendance(
+        private (int tailorsPresent, int othersPresent, int absent, int unknown, int lentOut, int borrowedIn) ClassifyAttendance(
             Dictionary<string, string> employeeSectionMap,
             Dictionary<string, string> attendanceByCode,
             DayLoans? loans = null,
@@ -1040,8 +1119,7 @@ namespace FactoryManagementSystem.Controllers
 
             foreach (var (employeeCode, section) in employeeSectionMap)
             {
-                var sec = (section ?? "").Trim().ToUpper();
-                bool isTailor = sec == "MAIN" || sec == "SUPER TEAM";
+                bool isTailor = CountsAsTailor(employeeCode, section);
 
                 // Spent the day on another line. Counted separately rather
                 // than as present here (their minutes were not worked on
@@ -1254,6 +1332,11 @@ namespace FactoryManagementSystem.Controllers
                 // while this is still the only thread.
                 await LoadRosterAsync(from, to);
                 await LoadRosterAsync(DateTime.UtcNow.Date, DateTime.UtcNow.Date);
+
+                // Who payroll calls a tailor, before the first line is
+                // built - the split is decided inside those tasks and this
+                // is the last moment there is one thread to set it from.
+                _payrollTailors = await PayrollTailorCodesAsync(from, to);
 
                 // Fifteen lines, each waiting on its own round trips to
                 // Supabase for attendance and loans. Done one after

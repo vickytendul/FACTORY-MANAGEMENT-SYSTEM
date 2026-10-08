@@ -495,21 +495,11 @@ namespace FactoryManagementSystem.Controllers
             /// call a tailor, standing on a MAIN or SUPER TEAM row, is
             /// doing tailor work and counts here.
             ///
-            /// Note this is the MANPOWER question, not the minutes one.
-            /// The OWE report asks what work was actually done and keeps
-            /// the section as its only rule, which is why a line leader's
-            /// minutes never land in the tailor pool there.
-            public bool IsTailor
-            {
-                get
-                {
-                    if (SummaryService.CategoryFor(Department, Designation) == "Tailor")
-                        return true;
-
-                    var section = Section.Trim().ToUpperInvariant();
-                    return section == "MAIN" || section == "SUPER TEAM";
-                }
-            }
+            /// The rule itself lives in SummaryService now, because the
+            /// OWE Report and the OWE Summary reach the same question from
+            /// the other side and used to answer it differently.
+            public bool IsTailor =>
+                SummaryService.IsTailor(Department, Designation, Section);
 
             public string StatusOn(DateTime day) =>
                 StatusByDay.TryGetValue(day.Date, out var s) ? s : string.Empty;

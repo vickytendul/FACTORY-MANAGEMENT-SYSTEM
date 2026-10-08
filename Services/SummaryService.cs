@@ -272,5 +272,38 @@ namespace FactoryManagementSystem.Services
             if (dept == "SEWING" && (desig.Contains("LEADER") || desig.Contains("LEADEAR"))) return "Sewing Leader";
             return null;
         }
+
+        /// The layout sections whose rows are sewing-line work.
+        ///
+        /// Separate from [IsTailor] because the Line Summary cannot call
+        /// that one: it holds a set of codes payroll calls tailors rather
+        /// than each person's department and designation, and it needs the
+        /// other half of the rule on its own.
+        public static bool IsTailorSection(string? section)
+        {
+            var s = (section ?? "").Trim().ToUpperInvariant();
+            return s == "MAIN" || s == "SUPER TEAM";
+        }
+
+        /// Whether somebody counts in the TAILOR pool, by trade or by the
+        /// row they are standing on.
+        ///
+        /// The one place this is decided, for every page that reports a
+        /// tailor count - the Strength Summary, the OWE Summary and the
+        /// OWE Report. They disagreed by 24 people on 7 October 2026
+        /// because the first asked payroll and the other two asked the
+        /// layout: 9 line leaders, 9 on backup rows, 3 checkers, 2 sewing
+        /// helpers and a packing helper, every one of them a tailor by
+        /// trade, standing somewhere other than a MAIN row that day. Both
+        /// answers were defensible and the two together were not, because
+        /// nobody can reconcile two reports that both say "tailors
+        /// present" and mean different people.
+        ///
+        /// Payroll first: a tailor working the day on another row is still
+        /// a tailor. Then the section, which catches the other direction -
+        /// somebody payroll does not call a tailor, standing on a MAIN or
+        /// SUPER TEAM row, is doing tailor work today and counts.
+        public static bool IsTailor(string? department, string? designation, string? layoutSection) =>
+            CategoryFor(department, designation) == "Tailor" || IsTailorSection(layoutSection);
     }
 }

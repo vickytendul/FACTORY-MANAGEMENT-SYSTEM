@@ -1,4 +1,5 @@
 using FactoryManagementSystem.Services.Attendance;
+using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
 using System.Text.RegularExpressions;
 using FactoryManagementSystem.Entities;
@@ -14,6 +15,16 @@ public class LineStrengthReportService
     private readonly ILayoutRepository _layouts;
     private readonly IAttendanceRepository _attendance;
 
+    /// The CC master, which owns the CC number.
+    ///
+    /// Every layout transaction also carries a copy of it, written when
+    /// the allocation was made. That copy does not follow a rename:
+    /// changing CC 4576 to 0 left seventy-two transactions still saying
+    /// 4576, and the Dashboard - which reads them - went on saying it
+    /// while the OWE report, which asks the master, said 0. One number,
+    /// two answers, depending on which screen was open.
+    private readonly ICcRepository _ccs;
+
     private readonly ILogger<LineStrengthReportService> _logger;
 
     public LineStrengthReportService(
@@ -22,14 +33,32 @@ public class LineStrengthReportService
         ProductionLineService productionLines,
         ILayoutRepository layouts,
         IAttendanceRepository attendance,
+        ICcRepository ccs,
         ILogger<LineStrengthReportService> logger)
     {
         _layouts = layouts;
         _attendance = attendance;
+        _ccs = ccs;
         _firestore = firestore;
         _companyAttendance = companyAttendance;
         _productionLines = productionLines;
         _logger = logger;
+    }
+
+    /// CCId to the number the master currently holds.
+    ///
+    /// Read fresh per call rather than cached: this service is a
+    /// singleton, and a cached map would keep serving the old number for
+    /// the life of the process - which is the same staleness it exists
+    /// to fix, moved one layer up.
+    private async Task<Dictionary<int, string>> CcNumbersByIdAsync()
+    {
+        var map = new Dictionary<int, string>();
+        foreach (var cc in await _ccs.GetAllAsync())
+        {
+            if (!string.IsNullOrWhiteSpace(cc.CCNo)) map[cc.CCId] = cc.CCNo;
+        }
+        return map;
     }
 
     public async Task<List<LineStrengthReportDto>> GetReportAsync(DateTime date)
@@ -52,6 +81,7 @@ public class LineStrengthReportService
         // exact same MAIN-section rule/shape via this same helper), instead
         // of a fresh raw LayoutMasters scan on every call.
         var plannedByLayout = await _layouts.GetActiveMainLayoutMasterCountsAsync();
+        var ccNumbers = await CcNumbersByIdAsync();
 
         // 4 — Group transactions by line and compute stats
         var lineGroups = layoutTransactions
@@ -67,7 +97,9 @@ public class LineStrengthReportService
 
             var firstTx = lineGroup.First();
             var ccId = firstTx.CCId;
-            var ccNo = firstTx.CCNo ?? "";
+            // The master's number, falling back to the transaction's copy
+            // only when the master has nothing to say.
+            var ccNo = ccNumbers.GetValueOrDefault(ccId) ?? firstTx.CCNo ?? "";
             var layoutNo = NormalizeLayoutNo(firstTx.LayoutNo);
             var plannedTailors = plannedByLayout.GetValueOrDefault((ccId, layoutNo), 0);
 
@@ -302,13 +334,18 @@ public class LineStrengthReportService
         var lines = await ResolveLinesAsync();
         var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
         var requiredByLayout = await _layouts.GetActiveMainLayoutMasterCountsAsync();
+        var ccNumbers = await CcNumbersByIdAsync();
 
         var transactionsByLine = layoutTransactions
             .GroupBy(t => t.LineId)
             .ToDictionary(g => g.Key, g => g.ToList());
 
         var results = lines
-            .Select(line => BuildSummary(line, transactionsByLine.GetValueOrDefault(line.LineId), requiredByLayout))
+            .Select(line => BuildSummary(
+                line,
+                transactionsByLine.GetValueOrDefault(line.LineId),
+                requiredByLayout,
+                ccNumbers))
             .OrderBy(r => ExtractLineNumber(r.LineName))
             .ToList();
 
@@ -318,7 +355,8 @@ public class LineStrengthReportService
     private static LineAllocationSummaryDto BuildSummary(
         Line line,
         List<LayoutTransaction>? transactions,
-        Dictionary<(int CCId, int LayoutNo), int> requiredByLayout)
+        Dictionary<(int CCId, int LayoutNo), int> requiredByLayout,
+        Dictionary<int, string> ccNumbers)
     {
         if (transactions == null || transactions.Count == 0)
         {
@@ -359,7 +397,7 @@ public class LineStrengthReportService
             LineId = line.LineId,
             LineName = line.LineName,
             CCId = ccId,
-            CCNo = firstTx.CCNo,
+            CCNo = ccNumbers.GetValueOrDefault(ccId) ?? firstTx.CCNo,
             LayoutNo = layoutNo,
             RequiredCount = requiredCount,
             AllocatedCount = allocatedCount,

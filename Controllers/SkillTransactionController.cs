@@ -419,17 +419,19 @@ namespace FactoryManagementSystem.Controllers
                     // would be if nobody had moved them.
                     var isCovering = coveringByCode.TryGetValue(s.EmployeeCode, out var covering);
                     var standingOnLine = isCovering ? covering!.LineId : allocation?.LineId;
-                    var isBusy = isCovering || isAllocated;
-                    var isSameLine = isBusy && standingOnLine == lineId;
 
-                    // Somebody covering is on an operation whatever section
-                    // their own row belongs to - that is what covering is.
-                    // Only when they are not does the MAIN test apply, which
-                    // is what keeps an idle super team member available.
-                    var isBusyInMain = isCovering
-                        ? isSameLine
-                        : isAllocated && isSameLine &&
-                          string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
+                    // Busy means doing something somebody would have to be
+                    // found to replace: covering an absence, or holding a
+                    // row outside the floating pool.
+                    //
+                    // Which line that is decides the WORDING and nothing
+                    // else. The rule used to ask about the line first, so
+                    // an idle super team member read "free" to their own
+                    // supervisor and "busy" to every other one - the same
+                    // person, the same empty hands, two answers.
+                    var isBusy = isCovering ||
+                        (isAllocated && !IsFloatingSection(allocation!.Section));
+                    var isSameLine = isBusy && standingOnLine == lineId;
 
                     string status;
                     string summaryBucket;
@@ -448,7 +450,7 @@ namespace FactoryManagementSystem.Controllers
                         availabilityRank = 1;
                         requireMovementCount++;
                     }
-                    else if (isBusyInMain)
+                    else if (isBusy)
                     {
                         status = "Move Required";
                         summaryBucket = "Require Movement";
@@ -529,6 +531,19 @@ namespace FactoryManagementSystem.Controllers
         // Mirrors the Dart GradeValidator ranking (lib/services/grade_validator.dart)
         // so the roster's grade-based sort matches how grade-sufficiency is judged
         // everywhere else in the app: A+ = 0 (best) down to F = 11, unknown = 12 (worst).
+        /// The layout sections whose people can be taken without leaving a
+        /// hole: the floating pool a supervisor draws cover from.
+        ///
+        /// Super team and backup only. A checker, a helper or a line
+        /// leader is doing a job even though their row is not a sewing
+        /// operation, and offering them as free is how one gap gets closed
+        /// by opening another.
+        private static bool IsFloatingSection(string? section)
+        {
+            var s = (section ?? string.Empty).Trim().ToUpperInvariant();
+            return s == "SUPER TEAM" || s == "OTHERS";
+        }
+
         private static int GradeRank(string? grade)
         {
             var normalized = (grade ?? string.Empty).Trim().ToUpperInvariant();

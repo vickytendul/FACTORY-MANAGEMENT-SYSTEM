@@ -1,3 +1,4 @@
+using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Layouts;
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services.Skills;
@@ -24,18 +25,27 @@ namespace FactoryManagementSystem.Controllers
         private readonly ISkillRepository _skills;
         private readonly ILayoutRepository _layouts;
 
+        /// Today's cover assignments, which the layout does not carry.
+        /// Somebody put in to cover an operation is still standing on
+        /// their own layout row as far as the allocation knows, and the
+        /// picker was reporting that row while they were across the floor
+        /// doing something else.
+        private readonly IAttendanceRepository _attendance;
+
         public SkillTransactionController(
             FirestoreService firestore,
             SummaryService summaryService,
             CompanyAttendanceService companyAttendance,
             ISkillRepository skills,
-            ILayoutRepository layouts)
+            ILayoutRepository layouts,
+            IAttendanceRepository attendance)
         {
             _layouts = layouts;
             _firestore = firestore;
             _summaryService = summaryService;
             _companyAttendance = companyAttendance;
             _skills = skills;
+            _attendance = attendance;
         }
 
         [HttpGet]
@@ -363,6 +373,30 @@ namespace FactoryManagementSystem.Controllers
                 // is actually at work today without anyone marking it.
                 var attendanceByCode = await _companyAttendance.GetCodesForDateAsync(date);
 
+                // Where each candidate is ACTUALLY standing today, which is
+                // not always the row the layout gives them. A super team
+                // member put in to cover an operation keeps their SUPER
+                // TEAM row in the allocation, so the picker offered them as
+                // idle and named the row they had left - on their own line
+                // as readily as on anybody else's.
+                //
+                // Same source the layout page reads from the other
+                // direction for "deployed elsewhere"; nothing new is
+                // recorded to make this work. Unlike that one this keeps
+                // same-line covers too, because a person covering an
+                // operation on this line is no more free than one covering
+                // on another.
+                var coveringByCode = new Dictionary<string, AttendanceTransaction>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var tx in await _attendance.GetByReplacementCodesAsync(
+                    DateTime.SpecifyKind(date.Date, DateTimeKind.Utc),
+                    skillByCode.Keys.ToList()))
+                {
+                    var code = (tx.ReplacementEmployeeCode ?? string.Empty).Trim();
+                    if (code.Length == 0) continue;
+                    coveringByCode[code] = tx;
+                }
+
                 var employeeLookup = await _summaryService.FindEmployeesByCodesAsync(skillByCode.Keys);
 
                 var scored = new List<(object Entry, int EligiblePercentage, int GradeRank, int AvailabilityRank)>();
@@ -379,9 +413,23 @@ namespace FactoryManagementSystem.Controllers
                     // this bucket answers is "can this person cover the
                     // operation today", and someone on LV/EL/CL cannot.
                     var isAbsentToday = CompanyAttendanceService.IsUnavailable(attendance);
-                    var isSameLine = isAllocated && allocation!.LineId == lineId;
-                    var isBusyInMain = isAllocated && isSameLine &&
-                        string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
+
+                    // A cover assignment outranks the layout row: it is
+                    // where the person is now, and the row is where they
+                    // would be if nobody had moved them.
+                    var isCovering = coveringByCode.TryGetValue(s.EmployeeCode, out var covering);
+                    var standingOnLine = isCovering ? covering!.LineId : allocation?.LineId;
+                    var isBusy = isCovering || isAllocated;
+                    var isSameLine = isBusy && standingOnLine == lineId;
+
+                    // Somebody covering is on an operation whatever section
+                    // their own row belongs to - that is what covering is.
+                    // Only when they are not does the MAIN test apply, which
+                    // is what keeps an idle super team member available.
+                    var isBusyInMain = isCovering
+                        ? isSameLine
+                        : isAllocated && isSameLine &&
+                          string.Equals(allocation!.Section, "MAIN", StringComparison.OrdinalIgnoreCase);
 
                     string status;
                     string summaryBucket;
@@ -393,7 +441,7 @@ namespace FactoryManagementSystem.Controllers
                         availabilityRank = 2;
                         absentCount++;
                     }
-                    else if (isAllocated && !isSameLine)
+                    else if (isBusy && !isSameLine)
                     {
                         status = "Shift Required";
                         summaryBucket = "Shift Required";
@@ -421,9 +469,30 @@ namespace FactoryManagementSystem.Controllers
                         employeeName = emp?.EmployeeName ?? allocation?.EmployeeName ?? s.EmployeeCode,
                         grade,
                         eligiblePercentage = s.EligiblePercentage,
-                        currentLine = allocation?.LineName,
+                        // Where they are, not where their row is. Covering
+                        // wins both: naming a super team member's own row
+                        // while they are two stations away covering an
+                        // operation is how the picker came to say "SUPER
+                        // TEAM" about somebody who was sewing a pocket.
+                        currentLine = isCovering
+                            ? covering!.LineName
+                            : allocation?.LineName,
+                        // The section stays their own. It says what they
+                        // are - super team, main, backup - which does not
+                        // change because they were lent to an operation
+                        // for the day.
                         currentSection = allocation?.Section,
-                        currentOperation = allocation?.OperationName,
+                        currentOperation = isCovering
+                            ? covering!.OperationName
+                            : allocation?.OperationName,
+
+                        // Set only while covering, so the picker can say
+                        // whose absence this is. A supervisor deciding
+                        // whether to take this person needs to know they
+                        // would be reopening a hole somebody already filled.
+                        isCovering,
+                        coveringForName = isCovering ? covering!.EmployeeName : null,
+
                         attendanceStatus = attendance,
                         status,
                         summaryBucket

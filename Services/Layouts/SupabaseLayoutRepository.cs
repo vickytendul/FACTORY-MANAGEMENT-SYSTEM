@@ -67,7 +67,7 @@ namespace FactoryManagementSystem.Services.Layouts
         private const string MasterCols = """
             select layout_master_id, cc_id, layout_no, s_no, operation_id,
                    operation_name, operation_grade, machine_type, display_order,
-                   section, is_active
+                   section, is_active, is_required
             from public.layout_masters
             """;
 
@@ -90,6 +90,9 @@ namespace FactoryManagementSystem.Services.Layouts
             DisplayOrder = r.GetInt32(8),
             Section = r.GetString(9),
             IsActive = r.GetBoolean(10),
+            // NULL -> required, matching the entity's own default and what
+            // a Firestore document without the field deserialises to.
+            IsRequired = r.IsDBNull(11) || r.GetBoolean(11),
         };
 
         private const string TxCols = """
@@ -183,6 +186,10 @@ namespace FactoryManagementSystem.Services.Layouts
                 select cc_id, coalesce(layout_no, 1) as ln, count(*)
                 from public.layout_masters
                 where is_active and upper(section) = 'MAIN'
+                  -- An operation the floor is not running. The row stays
+                  -- on the layout; it just does not have to be manned for
+                  -- the line to read fully allocated.
+                  and coalesce(is_required, true)
                 group by cc_id, coalesce(layout_no, 1)
                 """;
             await using var cmd = _dataSource.CreateCommand(sql);
@@ -262,7 +269,7 @@ namespace FactoryManagementSystem.Services.Layouts
         private const string MasterColsWithId = """
             select firebase_doc_id, layout_master_id, cc_id, layout_no, s_no, operation_id,
                    operation_name, operation_grade, machine_type, display_order,
-                   section, is_active
+                   section, is_active, is_required
             from public.layout_masters
             """;
 
@@ -281,6 +288,7 @@ namespace FactoryManagementSystem.Services.Layouts
                 DisplayOrder = r.GetInt32(9),
                 Section = r.GetString(10),
                 IsActive = r.GetBoolean(11),
+                IsRequired = r.IsDBNull(12) || r.GetBoolean(12),
             });
 
         public Task<List<IdentifiedMaster>> GetActiveMastersByCcFreshAsync(int ccId) =>
@@ -467,8 +475,9 @@ namespace FactoryManagementSystem.Services.Layouts
             await using var cmd = new NpgsqlCommand("""
                 insert into public.layout_masters
                     (firebase_doc_id, layout_master_id, cc_id, layout_no, s_no, operation_id,
-                     operation_name, operation_grade, machine_type, display_order, section, is_active)
-                values (@doc, @id, @cc, @ln, @sno, @op, @opname, @opgrade, @mt, @ord, @sec, @act)
+                     operation_name, operation_grade, machine_type, display_order, section, is_active,
+                     is_required)
+                values (@doc, @id, @cc, @ln, @sno, @op, @opname, @opgrade, @mt, @ord, @sec, @act, @req)
                 on conflict (firebase_doc_id) do update set
                     layout_master_id = excluded.layout_master_id,
                     cc_id = excluded.cc_id,
@@ -480,7 +489,8 @@ namespace FactoryManagementSystem.Services.Layouts
                     machine_type = excluded.machine_type,
                     display_order = excluded.display_order,
                     section = excluded.section,
-                    is_active = excluded.is_active
+                    is_active = excluded.is_active,
+                    is_required = excluded.is_required
                 """, conn, tx);
             cmd.Parameters.Add(new NpgsqlParameter("doc", row.DocumentId));
             cmd.Parameters.Add(new NpgsqlParameter("id", row.Id));
@@ -494,6 +504,7 @@ namespace FactoryManagementSystem.Services.Layouts
             cmd.Parameters.Add(new NpgsqlParameter("ord", row.DisplayOrder));
             cmd.Parameters.Add(new NpgsqlParameter("sec", string.IsNullOrWhiteSpace(row.Section) ? "MAIN" : row.Section));
             cmd.Parameters.Add(new NpgsqlParameter("act", row.IsActive));
+            cmd.Parameters.Add(new NpgsqlParameter("req", row.IsRequired));
             await cmd.ExecuteNonQueryAsync();
         }
 

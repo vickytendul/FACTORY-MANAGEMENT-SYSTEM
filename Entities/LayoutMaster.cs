@@ -38,5 +38,22 @@ namespace FactoryManagementSystem.Entities
         public bool IsActive { get; set; } = true;
         [FirestoreProperty]
         public string Section { get; set; } = "MAIN";
+
+        /// Whether this operation has to be manned for the line to count as
+        /// fully allocated.
+        ///
+        /// An operation the floor has decided not to run still belongs to
+        /// the style, so deleting its row is the wrong answer - and an
+        /// actively dangerous one, because a layout save pairs request row
+        /// i with existing row i and the allocation binds a person to the
+        /// row's id. Removing a row from the middle therefore slides every
+        /// operation below it onto somebody else's id. This leaves the row
+        /// exactly where it is and takes it out of the count instead.
+        ///
+        /// Defaults to true, which is also what an absent field
+        /// deserialises to on both stores - so every row that existed
+        /// before this was added goes on being required.
+        [FirestoreProperty]
+        public bool IsRequired { get; set; } = true;
     }
 }

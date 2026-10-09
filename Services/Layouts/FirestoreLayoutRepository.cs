@@ -86,6 +86,12 @@ namespace FactoryManagementSystem.Services.Layouts
             var result = snapshot.Documents
                 .Select(d => d.ConvertTo<LayoutMaster>())
                 .Where(x => string.Equals(x.Section, "MAIN", StringComparison.OrdinalIgnoreCase))
+                // An operation the floor is not running. The row stays on
+                // the layout; it just does not have to be manned for the
+                // line to read fully allocated. Filtered here rather than
+                // server-side so a document written before the field
+                // existed still counts - it deserialises to true.
+                .Where(x => x.IsRequired)
                 .GroupBy(x => (x.CCId, NormalizeLayoutNo(x.LayoutNo)))
                 .ToDictionary(g => g.Key, g => g.Count());
 

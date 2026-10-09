@@ -75,10 +75,12 @@ namespace FactoryManagementSystem.Services.Layouts
         string MachineType,
         int DisplayOrder,
         string Section,
-        bool IsActive)
+        bool IsActive,
+        bool IsRequired = true)
     {
         public LayoutMaster ToEntity() => new()
         {
+            IsRequired = IsRequired,
             Id = Id,
             CCId = CCId,
             LayoutNo = LayoutNo,

@@ -249,7 +249,8 @@ namespace FactoryManagementSystem.Controllers
                         item.MachineType ?? string.Empty,
                         i + 1,
                         string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section,
-                        true));
+                        true,
+                        item.IsRequired));
                     maxExistingId = Math.Max(maxExistingId, record.Id);
                 }
                 else
@@ -290,7 +291,8 @@ namespace FactoryManagementSystem.Controllers
                         item.MachineType ?? string.Empty,
                         i + 1,
                         string.IsNullOrWhiteSpace(item.Section) ? "MAIN" : item.Section,
-                        true));
+                        true,
+                        item.IsRequired));
                 }
             }
 

@@ -394,6 +394,9 @@ if (hasSupabase)
 {
     builder.Services.AddSingleton<EmployeePlacementRepository>();
     builder.Services.AddSingleton<DepartmentLayoutRepository>();
+    // Feeding requests, on the same terms: new data, never in Firestore,
+    // so no flag and nothing to roll back to.
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Feeding.FeedingRequestRepository>();
 }
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch

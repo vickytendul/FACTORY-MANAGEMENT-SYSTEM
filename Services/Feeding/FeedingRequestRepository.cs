@@ -1,0 +1,189 @@
+using FactoryManagementSystem.Entities;
+using Npgsql;
+
+namespace FactoryManagementSystem.Services.Feeding
+{
+    /// Feeding requests. Supabase only, with no Firestore counterpart and
+    /// therefore no firebase/dual/supabase flag - this data has never
+    /// lived anywhere else, so there is nothing to migrate from and
+    /// nothing to roll back to. Same arrangement as
+    /// EmployeePlacementRepository.
+    public sealed class FeedingRequestRepository
+    {
+        private readonly NpgsqlDataSource _dataSource;
+
+        public FeedingRequestRepository(NpgsqlDataSource dataSource)
+        {
+            _dataSource = dataSource;
+        }
+
+        private const string Cols = """
+            select id, request_no, created_at, line_id, line_name, cc_id, cc_no,
+                   requested_by_code, requested_by_name, size, quantity, stage,
+                   cutting_pin, store_pin, cutting_closed_at, cutting_closed_by,
+                   store_closed_at, store_closed_by, wrong_tries
+            from public.feeding_requests
+            """;
+
+        private static FeedingRequest Read(NpgsqlDataReader r) => new()
+        {
+            Id = (int)r.GetInt64(0),
+            RequestNo = r.GetString(1),
+            CreatedAt = r.GetDateTime(2),
+            LineId = r.GetInt32(3),
+            LineName = r.GetString(4),
+            CcId = r.GetInt32(5),
+            CcNo = r.GetString(6),
+            RequestedByCode = r.GetString(7),
+            RequestedByName = r.GetString(8),
+            Size = r.IsDBNull(9) ? null : r.GetString(9),
+            Quantity = r.IsDBNull(10) ? null : r.GetInt32(10),
+            Stage = r.GetString(11),
+            CuttingPin = r.GetString(12),
+            StorePin = r.GetString(13),
+            CuttingClosedAt = r.IsDBNull(14) ? null : r.GetDateTime(14),
+            CuttingClosedBy = r.IsDBNull(15) ? null : r.GetString(15),
+            StoreClosedAt = r.IsDBNull(16) ? null : r.GetDateTime(16),
+            StoreClosedBy = r.IsDBNull(17) ? null : r.GetString(17),
+            WrongTries = r.GetInt32(18),
+        };
+
+        /// One day's requests, newest first. The page is always about a
+        /// day: a feeding request that is not today's is history, and the
+        /// people who act on these are standing on the floor now.
+        public async Task<List<FeedingRequest>> GetForDayAsync(DateTime day)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                Cols + """
+                 where (created_at at time zone 'Asia/Kolkata')::date = @d
+                 order by created_at desc
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("d", day.Date));
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var list = new List<FeedingRequest>();
+            while (await r.ReadAsync()) list.Add(Read(r));
+            return list;
+        }
+
+        public async Task<FeedingRequest?> GetByIdAsync(int id)
+        {
+            await using var cmd = _dataSource.CreateCommand(Cols + " where id = @id");
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            await using var r = await cmd.ExecuteReaderAsync();
+            return await r.ReadAsync() ? Read(r) : null;
+        }
+
+        /// Creates the request and hands back the row the database made,
+        /// so the caller reports the id and the request number the store
+        /// actually holds rather than what it hoped for.
+        ///
+        /// The request number is allocated inside the same statement that
+        /// inserts the row - two lines pressing Save together would
+        /// otherwise read the same count and both call themselves 11.
+        public async Task<FeedingRequest> CreateAsync(FeedingRequest request)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                with next as (
+                    select coalesce(max(request_no::int), 0) + 1 as n
+                    from public.feeding_requests
+                    where (created_at at time zone 'Asia/Kolkata')::date
+                        = (now() at time zone 'Asia/Kolkata')::date
+                      and request_no ~ '^[0-9]+$'
+                )
+                insert into public.feeding_requests
+                    (request_no, line_id, line_name, cc_id, cc_no,
+                     requested_by_code, requested_by_name, size, quantity,
+                     stage, cutting_pin)
+                select next.n::text, @line, @lineName, @cc, @ccNo,
+                       @byCode, @byName, @size, @qty, 'cutting', @pin
+                from next
+                returning id, request_no, created_at, line_id, line_name, cc_id, cc_no,
+                          requested_by_code, requested_by_name, size, quantity, stage,
+                          cutting_pin, store_pin, cutting_closed_at, cutting_closed_by,
+                          store_closed_at, store_closed_by, wrong_tries
+                """);
+
+            cmd.Parameters.Add(new NpgsqlParameter("line", request.LineId));
+            cmd.Parameters.Add(new NpgsqlParameter("lineName", request.LineName ?? string.Empty));
+            cmd.Parameters.Add(new NpgsqlParameter("cc", request.CcId));
+            cmd.Parameters.Add(new NpgsqlParameter("ccNo", request.CcNo ?? string.Empty));
+            cmd.Parameters.Add(new NpgsqlParameter("byCode", request.RequestedByCode));
+            cmd.Parameters.Add(new NpgsqlParameter("byName", request.RequestedByName ?? string.Empty));
+            cmd.Parameters.Add(new NpgsqlParameter("size", (object?)request.Size ?? DBNull.Value));
+            cmd.Parameters.Add(new NpgsqlParameter("qty", (object?)request.Quantity ?? DBNull.Value));
+            cmd.Parameters.Add(new NpgsqlParameter("pin", request.CuttingPin));
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            if (!await r.ReadAsync())
+                throw new InvalidOperationException("The feeding request was not created.");
+            return Read(r);
+        }
+
+        /// Closes the cutting stage and opens the store's, in one
+        /// statement guarded by the stage it expects to find.
+        ///
+        /// The guard is what makes a second press harmless: the row is no
+        /// longer at 'cutting', so nothing matches, nothing is written,
+        /// and the caller is told it did not apply rather than being
+        /// handed a fresh store pin over the top of the one already
+        /// given out.
+        public async Task<bool> CloseCuttingAsync(int id, string closedBy, string storePin)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                update public.feeding_requests
+                   set stage = 'store',
+                       cutting_closed_at = now(),
+                       cutting_closed_by = @by,
+                       store_pin = @pin,
+                       wrong_tries = 0
+                 where id = @id and stage = 'cutting'
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            cmd.Parameters.Add(new NpgsqlParameter("by", closedBy));
+            cmd.Parameters.Add(new NpgsqlParameter("pin", storePin));
+            return await cmd.ExecuteNonQueryAsync() == 1;
+        }
+
+        public async Task<bool> CloseStoreAsync(int id, string closedBy)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                update public.feeding_requests
+                   set stage = 'closed',
+                       store_closed_at = now(),
+                       store_closed_by = @by,
+                       wrong_tries = 0
+                 where id = @id and stage = 'store'
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            cmd.Parameters.Add(new NpgsqlParameter("by", closedBy));
+            return await cmd.ExecuteNonQueryAsync() == 1;
+        }
+
+        /// Counted in the database rather than read, incremented and
+        /// written back: two wrong guesses arriving together would
+        /// otherwise both read the same number and the count would be one
+        /// short of the guesses actually made.
+        public async Task<int> RecordWrongTryAsync(int id)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                update public.feeding_requests
+                   set wrong_tries = wrong_tries + 1
+                 where id = @id
+                returning wrong_tries
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            return Convert.ToInt32(await cmd.ExecuteScalarAsync() ?? 0);
+        }
+
+        /// Clears the lock. Only the line that raised the request can ask
+        /// for this - the controller checks that before calling.
+        public async Task ClearWrongTriesAsync(int id)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                "update public.feeding_requests set wrong_tries = 0 where id = @id");
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            await cmd.ExecuteNonQueryAsync();
+        }
+    }
+}

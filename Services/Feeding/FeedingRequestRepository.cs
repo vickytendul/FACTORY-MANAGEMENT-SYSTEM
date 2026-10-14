@@ -55,10 +55,13 @@ namespace FactoryManagementSystem.Services.Feeding
         {
             await using var cmd = _dataSource.CreateCommand(
                 Cols + """
-                 where (created_at at time zone 'Asia/Kolkata')::date = @d
+                 where request_day = @d
                  order by created_at desc
                 """);
-            cmd.Parameters.Add(new NpgsqlParameter("d", day.Date));
+            cmd.Parameters.Add(new NpgsqlParameter("d", day.Date)
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date,
+            });
 
             await using var r = await cmd.ExecuteReaderAsync();
             var list = new List<FeedingRequest>();
@@ -87,8 +90,7 @@ namespace FactoryManagementSystem.Services.Feeding
                 with next as (
                     select coalesce(max(request_no::int), 0) + 1 as n
                     from public.feeding_requests
-                    where (created_at at time zone 'Asia/Kolkata')::date
-                        = (now() at time zone 'Asia/Kolkata')::date
+                    where request_day = (now() at time zone 'Asia/Kolkata')::date
                       and request_no ~ '^[0-9]+$'
                 )
                 insert into public.feeding_requests

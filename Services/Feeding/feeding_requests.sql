@@ -49,18 +49,34 @@ create table if not exists public.feeding_requests (
     -- without delivering could sit and work through them.
     wrong_tries         integer     not null default 0,
 
+    -- The factory day this belongs to, as a plain date.
+    --
+    -- Not derived in the index from created_at: a timestamptz converted
+    -- to a local day is not an expression Postgres will index, and the
+    -- day a request belongs to is a fact about it rather than something
+    -- to recompute. Filled by the default at insert, which is evaluated
+    -- then and so has no such restriction.
+    --
+    -- Asia/Kolkata and not the server's zone, which is UTC on Render: a
+    -- request raised at nine at night here would otherwise land on
+    -- tomorrow's list.
+    request_day         date        not null
+        default ((now() at time zone 'Asia/Kolkata')::date),
+
     constraint feeding_requests_stage_check
         check (stage in ('cutting', 'store', 'closed'))
 );
 
--- The list is always "today", newest first.
-create index if not exists feeding_requests_created_at
-    on public.feeding_requests (created_at desc);
+-- The list is always one day, newest first.
+create index if not exists feeding_requests_day
+    on public.feeding_requests (request_day, created_at desc);
 
 -- Request numbers restart each day, so they are unique within one rather
--- than across all time.
+-- than across all time. This is also what stops two lines pressing Save
+-- together from both calling themselves 11: the second insert collides
+-- and is retried.
 create unique index if not exists feeding_requests_no_per_day
-    on public.feeding_requests ((created_at at time zone 'Asia/Kolkata')::date, request_no);
+    on public.feeding_requests (request_day, request_no);
 
 -- The API connects as the Postgres user in Supabase__ConnectionString,
 -- which bypasses row level security. RLS is enabled anyway, with no

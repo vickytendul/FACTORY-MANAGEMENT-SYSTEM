@@ -416,6 +416,11 @@ builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch
 var jwtTokenService = new JwtTokenService(builder.Configuration, builder.Environment);
 builder.Services.AddSingleton(jwtTokenService);
 
+// Opening an account from the payroll roster, so eight hundred people do
+// not have to be entered by hand. Reads the Company API and whichever
+// user store Users__Source selected, and writes only to that store.
+builder.Services.AddSingleton<FactoryManagementSystem.Services.Users.EnrolmentService>();
+
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {

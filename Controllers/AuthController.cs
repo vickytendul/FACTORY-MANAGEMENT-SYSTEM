@@ -12,11 +12,16 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly IUserRepository _users;
         private readonly JwtTokenService _jwt;
+        private readonly EnrolmentService _enrolment;
 
-        public AuthController(IUserRepository users, JwtTokenService jwt)
+        public AuthController(
+            IUserRepository users,
+            JwtTokenService jwt,
+            EnrolmentService enrolment)
         {
             _users = users;
             _jwt = jwt;
+            _enrolment = enrolment;
         }
 
         [AllowAnonymous]
@@ -91,6 +96,49 @@ namespace FactoryManagementSystem.Controllers
             return result;
         }
 
+        // POST: api/Auth/enrol
+        //
+        // Opening your own account from the payroll roster, so eight
+        // hundred people do not have to be entered by hand.
+        //
+        // Payroll proves you work here and that you are you - by a date
+        // of birth or the last four of your mobile, both of which it
+        // already holds. The PIN is yours from then on and payroll never
+        // sees it. See EnrolmentService for what this is and is not
+        // worth.
+        //
+        // Returns a token on success: somebody who has just proved who
+        // they are and chosen a PIN should not be made to type it
+        // straight back.
+        [AllowAnonymous]
+        [HttpPost("enrol")]
+        public async Task<IActionResult> Enrol([FromBody] EnrolRequest request)
+        {
+            try
+            {
+                var result = await _enrolment.EnrolAsync(
+                    request.EmployeeCode, request.Proof, request.Pin);
+
+                if (!result.Ok || result.User == null)
+                    return BadRequest(new { Success = false, result.Message });
+
+                var user = result.User;
+                return Ok(new
+                {
+                    Success = true,
+                    Token = _jwt.GenerateToken(user),
+                    Username = user.Username,
+                    DisplayName = user.DisplayName,
+                    Role = user.Role,
+                    Message = result.Message,
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // One-time bootstrap: only works while the Users collection is empty,
         // so it self-disables permanently after the first Admin is created.
         [AllowAnonymous]
@@ -133,6 +181,18 @@ namespace FactoryManagementSystem.Controllers
     {
         public string Username { get; set; } = string.Empty;
         public string Password { get; set; } = string.Empty;
+    }
+
+    public class EnrolRequest
+    {
+        public string EmployeeCode { get; set; } = string.Empty;
+
+        /// A date of birth or the last four digits of a mobile number -
+        /// whichever the person knows. Only the digits are read, so
+        /// 01-01-1990 and 01011990 are the same answer.
+        public string Proof { get; set; } = string.Empty;
+
+        public string Pin { get; set; } = string.Empty;
     }
 
     public class BootstrapAdminRequest

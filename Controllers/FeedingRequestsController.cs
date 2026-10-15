@@ -143,13 +143,20 @@ namespace FactoryManagementSystem.Controllers
                 if (!string.Equals(request.RequestedByCode, (body.EmployeeCode ?? string.Empty).Trim(),
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    // Deliberately the same answer as a wrong code against a
-                    // request that does not exist: a different one would turn
-                    // this into a way of asking who raised which request.
-                    return Unauthorized(new
+                    // 403 and not 401. The caller is signed in perfectly
+                    // well; this request is simply not theirs. A 401 says
+                    // "your session is no good", which the app believes -
+                    // it logged a cutting supervisor out for tapping a pin
+                    // belonging to the line that raised the request.
+                    //
+                    // Who to ask, by name. The list already shows it, but
+                    // somebody who has just been refused should be told
+                    // what to do rather than only what they cannot.
+                    return StatusCode(403, new
                     {
                         Success = false,
-                        Message = "That is not the code this request was raised with.",
+                        Message = $"This pin belongs to {request.RequestedByCode}"
+                                + $" {request.RequestedByName}. Ask them for it.",
                     });
                 }
 
@@ -279,10 +286,13 @@ namespace FactoryManagementSystem.Controllers
                 if (!string.Equals(request.RequestedByCode, (body.EmployeeCode ?? string.Empty).Trim(),
                         StringComparison.OrdinalIgnoreCase))
                 {
-                    return Unauthorized(new
+                    // 403 for the same reason as reveal above: signed in,
+                    // just not theirs to unlock.
+                    return StatusCode(403, new
                     {
                         Success = false,
-                        Message = "Only the line that raised this request can unlock it.",
+                        Message = $"Only {request.RequestedByCode}"
+                                + $" {request.RequestedByName} can unlock this.",
                     });
                 }
 

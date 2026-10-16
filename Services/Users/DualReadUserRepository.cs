@@ -171,5 +171,19 @@ namespace FactoryManagementSystem.Services.Users
                     ex, "USER DUAL-WRITE supabase status update failed: {User}", username);
             }
         }
+
+        public async Task SetRoleAsync(string username, string role)
+        {
+            await _firebase.SetRoleAsync(username, role);
+            try
+            {
+                await _supabase.SetRoleAsync(username, role);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(
+                    ex, "USER DUAL-WRITE supabase role update failed: {User}", username);
+            }
+        }
     }
 }

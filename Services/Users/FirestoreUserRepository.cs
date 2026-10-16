@@ -66,5 +66,13 @@ namespace FactoryManagementSystem.Services.Users
             if (!snapshot.Exists) return;
             await doc.UpdateAsync(nameof(AppUser.IsActive), isActive);
         }
+
+        public async Task SetRoleAsync(string username, string role)
+        {
+            var doc = _firestore.Users.Document(username);
+            var snapshot = await doc.GetSnapshotAsync();
+            if (!snapshot.Exists) return;
+            await doc.UpdateAsync(nameof(AppUser.Role), role);
+        }
     }
 }

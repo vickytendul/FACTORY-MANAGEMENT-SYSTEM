@@ -416,6 +416,17 @@ builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch
 var jwtTokenService = new JwtTokenService(builder.Configuration, builder.Environment);
 builder.Services.AddSingleton(jwtTokenService);
 
+// What somebody may see, from where they actually work. The department
+// work details are the floor's own answer and only exist on Supabase, so
+// they are resolved optionally - without them the rule falls back to
+// payroll's department, which is the best a Firestore-only deployment
+// can do.
+builder.Services.AddSingleton(sp =>
+    new FactoryManagementSystem.Services.Users.AccessTierService(
+        sp.GetRequiredService<CompanyApiClient>(),
+        sp.GetRequiredService<ILogger<FactoryManagementSystem.Services.Users.AccessTierService>>(),
+        sp.GetService<DepartmentLayoutRepository>()));
+
 // Opening an account from the payroll roster, so eight hundred people do
 // not have to be entered by hand. Reads the Company API and whichever
 // user store Users__Source selected, and writes only to that store.

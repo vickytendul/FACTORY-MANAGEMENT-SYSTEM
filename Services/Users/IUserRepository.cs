@@ -35,5 +35,10 @@ namespace FactoryManagementSystem.Services.Users
         Task SetPasswordHashAsync(string username, string passwordHash);
 
         Task SetActiveAsync(string username, bool isActive);
+
+        /// Writes the role worked out from where somebody actually
+        /// works. Called at every login, and only when it has changed -
+        /// see AuthController.RefreshRoleAsync.
+        Task SetRoleAsync(string username, string role);
     }
 }

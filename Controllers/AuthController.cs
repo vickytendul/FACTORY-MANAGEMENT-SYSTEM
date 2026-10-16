@@ -13,15 +13,39 @@ namespace FactoryManagementSystem.Controllers
         private readonly IUserRepository _users;
         private readonly JwtTokenService _jwt;
         private readonly EnrolmentService _enrolment;
+        private readonly AccessTierService _access;
 
         public AuthController(
             IUserRepository users,
             JwtTokenService jwt,
-            EnrolmentService enrolment)
+            EnrolmentService enrolment,
+            AccessTierService access)
         {
             _users = users;
             _jwt = jwt;
             _enrolment = enrolment;
+            _access = access;
+        }
+
+        /// Brings the stored role back in line with where this person
+        /// actually works, at every login.
+        ///
+        /// Roles used to be typed in one at a time and went stale the
+        /// moment anybody moved. Reading the floor on the way in means a
+        /// move changes what somebody sees the next morning with nobody
+        /// editing anything.
+        ///
+        /// A null tier - payroll unreachable, or a code it does not know
+        /// - leaves the stored role exactly as it was. Being unable to
+        /// confirm somebody's job is not a reason to take their access
+        /// away mid-shift.
+        private async Task RefreshRoleAsync(AppUser user)
+        {
+            var tier = await _access.TierForAsync(user.Username);
+            if (tier == null || tier == user.Role) return;
+
+            await _users.SetRoleAsync(user.Username, tier);
+            user.Role = tier;
         }
 
         [AllowAnonymous]
@@ -80,6 +104,13 @@ namespace FactoryManagementSystem.Controllers
                 await _users.SetPasswordHashAsync(user.Username, newHash);
                 LogStage($"Password rehashed (work factor {storedWorkFactor} -> {targetWorkFactor})");
             }
+
+            // After the password is verified and before the token is
+            // made, so the token carries where this person works today
+            // rather than where they worked when somebody last typed it
+            // in.
+            await RefreshRoleAsync(user);
+            LogStage("Access tier refreshed");
 
             var token = _jwt.GenerateToken(user);
             LogStage("JWT generation completed");

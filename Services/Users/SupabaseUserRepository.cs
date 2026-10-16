@@ -114,5 +114,15 @@ namespace FactoryManagementSystem.Services.Users
             cmd.Parameters.AddWithValue("u", username);
             await cmd.ExecuteNonQueryAsync();
         }
+
+        public async Task SetRoleAsync(string username, string role)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                "update public.app_users set role = @r "
+                + "where lower(username) = lower(@u)");
+            cmd.Parameters.AddWithValue("r", role);
+            cmd.Parameters.AddWithValue("u", username);
+            await cmd.ExecuteNonQueryAsync();
+        }
     }
 }

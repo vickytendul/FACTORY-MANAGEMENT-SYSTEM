@@ -26,31 +26,35 @@ namespace FactoryManagementSystem.Services.Users
     {
         private readonly CompanyApiClient _companyApi;
         private readonly IUserRepository _users;
+        private readonly AccessTierService _access;
         private readonly IConfiguration _config;
         private readonly ILogger<EnrolmentService> _logger;
 
         public EnrolmentService(
             CompanyApiClient companyApi,
             IUserRepository users,
+            AccessTierService access,
             IConfiguration config,
             ILogger<EnrolmentService> logger)
         {
             _companyApi = companyApi;
             _users = users;
+            _access = access;
             _config = config;
             _logger = logger;
         }
 
         private const int CompCode = 17;
 
-        /// What a new account gets until an Admin says otherwise.
+        /// What a new account gets when the floor cannot be read.
         ///
-        /// Supervisor, because an account that can see nothing is an
-        /// account somebody has to go and ask about - which is the manual
-        /// step this exists to remove. Set Enrolment__DefaultRole to
-        /// change it without a deploy.
-        private string DefaultRole =>
-            (_config["Enrolment:DefaultRole"] ?? "Supervisor").Trim();
+        /// Normally the role comes from AccessTierService - where this
+        /// person actually works - and nobody chooses it. This is only
+        /// the answer when that cannot be worked out, and it is "None"
+        /// on purpose: an account that opened itself and could not be
+        /// placed should see nothing until somebody looks at it.
+        private string FallbackRole =>
+            (_config["Enrolment:DefaultRole"] ?? AccessTierService.None).Trim();
 
         /// Tries per employee code, so a date of birth cannot be worked
         /// through four digits at a time.
@@ -127,6 +131,10 @@ namespace FactoryManagementSystem.Services.Users
                     "That employee code and detail do not match our records.");
             }
 
+            // What they may see, from where they work - not from anything
+            // they chose on the way in.
+            var role = await _access.TierForAsync(code) ?? FallbackRole;
+
             var user = new AppUser
             {
                 Username = code,
@@ -135,7 +143,7 @@ namespace FactoryManagementSystem.Services.Users
                 // an enrolled account is not slower to sign in than an
                 // Admin-created one.
                 PasswordHash = BCrypt.Net.BCrypt.HashPassword(pin, 12),
-                Role = DefaultRole,
+                Role = role,
                 IsActive = true,
                 CreatedOn = DateTime.UtcNow,
             };
@@ -143,7 +151,7 @@ namespace FactoryManagementSystem.Services.Users
             await _users.CreateAsync(user);
             _attempts.TryRemove(code, out _);
             _logger.LogInformation(
-                "Enrolled {Code} as {Role} from the payroll roster", code, DefaultRole);
+                "Enrolled {Code} as {Role} from the payroll roster", code, role);
 
             return new Result(true, "Account created.", user);
         }

@@ -153,7 +153,16 @@ namespace FactoryManagementSystem.Entities
         }
 
         /// When this request actually finished, or null while it is open.
-        public DateTime? ClosedAt => Stage == StageClosed ? FinalClosedAt : null;
+        ///
+        /// Falls back to the store's close for anything that finished
+        /// before the final stage existed: under the old two-handover
+        /// scheme the store's close WAS the end, so that is when those
+        /// requests were done. Without the fallback they have no closing
+        /// time at all, IsLate measures them against "now", and every one
+        /// of them reads as late for ever - which is what the history
+        /// screen showed the first time it was opened.
+        public DateTime? ClosedAt =>
+            Stage == StageClosed ? (FinalClosedAt ?? StoreClosedAt) : null;
 
         /// Late as a settled fact once closed, and as a running one while
         /// open. Computed here rather than on each screen so the table,

@@ -8,6 +8,12 @@ namespace FactoryManagementSystem.Services.Feeding
     /// lived anywhere else, so there is nothing to migrate from and
     /// nothing to roll back to. Same arrangement as
     /// EmployeePlacementRepository.
+    ///
+    /// Every stage change is a single guarded UPDATE: the row must still
+    /// be at the stage the caller believed it was at, or nothing is
+    /// written and the caller is told so. That is what makes a second
+    /// press of a button harmless rather than a second pin handed out over
+    /// the top of the first.
     public sealed class FeedingRequestRepository
     {
         private readonly NpgsqlDataSource _dataSource;
@@ -20,9 +26,22 @@ namespace FactoryManagementSystem.Services.Feeding
         private const string Cols = """
             select id, request_no, created_at, line_id, line_name, cc_id, cc_no,
                    requested_by_code, requested_by_name, size, quantity, stage,
-                   cutting_pin, store_pin, cutting_closed_at, cutting_closed_by,
-                   store_closed_at, store_closed_by, wrong_tries
+                   requester_pin, trims_pin, sewing_order, sewing_order_at,
+                   sewing_order_by, store_ack_at, store_ack_by,
+                   store_closed_at, store_closed_by,
+                   final_closed_at, final_closed_by, wrong_tries
             from public.feeding_requests
+            """;
+
+        /// The same column list the SELECT above reads, for RETURNING - so
+        /// an insert can be read back by exactly the same mapper.
+        private const string Returning = """
+            returning id, request_no, created_at, line_id, line_name, cc_id, cc_no,
+                      requested_by_code, requested_by_name, size, quantity, stage,
+                      requester_pin, trims_pin, sewing_order, sewing_order_at,
+                      sewing_order_by, store_ack_at, store_ack_by,
+                      store_closed_at, store_closed_by,
+                      final_closed_at, final_closed_by, wrong_tries
             """;
 
         private static FeedingRequest Read(NpgsqlDataReader r) => new()
@@ -39,13 +58,18 @@ namespace FactoryManagementSystem.Services.Feeding
             Size = r.IsDBNull(9) ? null : r.GetString(9),
             Quantity = r.IsDBNull(10) ? null : r.GetInt32(10),
             Stage = r.GetString(11),
-            CuttingPin = r.GetString(12),
-            StorePin = r.GetString(13),
-            CuttingClosedAt = r.IsDBNull(14) ? null : r.GetDateTime(14),
-            CuttingClosedBy = r.IsDBNull(15) ? null : r.GetString(15),
-            StoreClosedAt = r.IsDBNull(16) ? null : r.GetDateTime(16),
-            StoreClosedBy = r.IsDBNull(17) ? null : r.GetString(17),
-            WrongTries = r.GetInt32(18),
+            RequesterPin = r.GetString(12),
+            TrimsPin = r.GetString(13),
+            SewingOrder = r.IsDBNull(14) ? null : r.GetString(14),
+            SewingOrderAt = r.IsDBNull(15) ? null : r.GetDateTime(15),
+            SewingOrderBy = r.IsDBNull(16) ? null : r.GetString(16),
+            StoreAckAt = r.IsDBNull(17) ? null : r.GetDateTime(17),
+            StoreAckBy = r.IsDBNull(18) ? null : r.GetString(18),
+            StoreClosedAt = r.IsDBNull(19) ? null : r.GetDateTime(19),
+            StoreClosedBy = r.IsDBNull(20) ? null : r.GetString(20),
+            FinalClosedAt = r.IsDBNull(21) ? null : r.GetDateTime(21),
+            FinalClosedBy = r.IsDBNull(22) ? null : r.GetString(22),
+            WrongTries = r.GetInt32(23),
         };
 
         /// One day's requests, newest first. The page is always about a
@@ -69,6 +93,29 @@ namespace FactoryManagementSystem.Services.Feeding
             return list;
         }
 
+        /// Everything still open, OLDEST first - the queue cutting and the
+        /// store work from.
+        ///
+        /// Oldest first and not newest, which is the one thing that makes
+        /// this a queue rather than a list: the oldest request is the one
+        /// closest to running out of its four hours, so it is the one that
+        /// has to be at the top. Deliberately not limited to today either
+        /// - a request raised at half past eight last night and still open
+        /// is exactly the one nobody should be able to scroll past.
+        public async Task<List<FeedingRequest>> GetOpenAsync()
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                Cols + """
+                 where stage <> 'closed'
+                 order by created_at asc
+                """);
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var list = new List<FeedingRequest>();
+            while (await r.ReadAsync()) list.Add(Read(r));
+            return list;
+        }
+
         public async Task<FeedingRequest?> GetByIdAsync(int id)
         {
             await using var cmd = _dataSource.CreateCommand(Cols + " where id = @id");
@@ -78,7 +125,7 @@ namespace FactoryManagementSystem.Services.Feeding
         }
 
         /// Creates the request and hands back the row the database made,
-        /// so the caller reports the id and the request number the store
+        /// so the caller reports the id and the request number the floor
         /// actually holds rather than what it hoped for.
         ///
         /// The request number is allocated inside the same statement that
@@ -86,7 +133,7 @@ namespace FactoryManagementSystem.Services.Feeding
         /// otherwise read the same count and both call themselves 11.
         public async Task<FeedingRequest> CreateAsync(FeedingRequest request)
         {
-            await using var cmd = _dataSource.CreateCommand("""
+            await using var cmd = _dataSource.CreateCommand($"""
                 with next as (
                     select coalesce(max(request_no::int), 0) + 1 as n
                     from public.feeding_requests
@@ -96,14 +143,11 @@ namespace FactoryManagementSystem.Services.Feeding
                 insert into public.feeding_requests
                     (request_no, line_id, line_name, cc_id, cc_no,
                      requested_by_code, requested_by_name, size, quantity,
-                     stage, cutting_pin)
+                     stage, requester_pin)
                 select next.n::text, @line, @lineName, @cc, @ccNo,
                        @byCode, @byName, @size, @qty, 'cutting', @pin
                 from next
-                returning id, request_no, created_at, line_id, line_name, cc_id, cc_no,
-                          requested_by_code, requested_by_name, size, quantity, stage,
-                          cutting_pin, store_pin, cutting_closed_at, cutting_closed_by,
-                          store_closed_at, store_closed_by, wrong_tries
+                {Returning}
                 """);
 
             cmd.Parameters.Add(new NpgsqlParameter("line", request.LineId));
@@ -114,7 +158,7 @@ namespace FactoryManagementSystem.Services.Feeding
             cmd.Parameters.Add(new NpgsqlParameter("byName", request.RequestedByName ?? string.Empty));
             cmd.Parameters.Add(new NpgsqlParameter("size", (object?)request.Size ?? DBNull.Value));
             cmd.Parameters.Add(new NpgsqlParameter("qty", (object?)request.Quantity ?? DBNull.Value));
-            cmd.Parameters.Add(new NpgsqlParameter("pin", request.CuttingPin));
+            cmd.Parameters.Add(new NpgsqlParameter("pin", request.RequesterPin));
 
             await using var r = await cmd.ExecuteReaderAsync();
             if (!await r.ReadAsync())
@@ -122,40 +166,79 @@ namespace FactoryManagementSystem.Services.Feeding
             return Read(r);
         }
 
-        /// Closes the cutting stage and opens the store's, in one
-        /// statement guarded by the stage it expects to find.
+        /// Writes the sewing order and hands the request to the store, in
+        /// one statement guarded by the stage it expects to find.
         ///
-        /// The guard is what makes a second press harmless: the row is no
-        /// longer at 'cutting', so nothing matches, nothing is written,
-        /// and the caller is told it did not apply rather than being
-        /// handed a fresh store pin over the top of the one already
-        /// given out.
-        public async Task<bool> CloseCuttingAsync(int id, string closedBy, string storePin)
+        /// This is also where the store's pin is made, and the guard is
+        /// why a second press is harmless: the row is no longer at
+        /// 'cutting', so nothing matches, nothing is written, and the
+        /// caller is told it did not apply rather than being handed a
+        /// fresh pin over the top of the one already given out.
+        public async Task<bool> SetSewingOrderAsync(
+            int id, string sewingOrder, string enteredBy, string trimsPin)
         {
             await using var cmd = _dataSource.CreateCommand("""
                 update public.feeding_requests
                    set stage = 'store',
-                       cutting_closed_at = now(),
-                       cutting_closed_by = @by,
-                       store_pin = @pin,
+                       sewing_order = @order,
+                       sewing_order_at = now(),
+                       sewing_order_by = @by,
+                       trims_pin = @pin,
                        wrong_tries = 0
                  where id = @id and stage = 'cutting'
                 """);
             cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
-            cmd.Parameters.Add(new NpgsqlParameter("by", closedBy));
-            cmd.Parameters.Add(new NpgsqlParameter("pin", storePin));
+            cmd.Parameters.Add(new NpgsqlParameter("order", sewingOrder));
+            cmd.Parameters.Add(new NpgsqlParameter("by", enteredBy));
+            cmd.Parameters.Add(new NpgsqlParameter("pin", trimsPin));
             return await cmd.ExecuteNonQueryAsync() == 1;
         }
 
+        /// The store saying it has seen the request. Written once and
+        /// never overwritten - the guard on store_ack_at is what keeps the
+        /// first acknowledgement as the one on record, so the waiting time
+        /// cannot be quietly reset by somebody opening it again later.
+        public async Task<bool> AcknowledgeStoreAsync(int id, string by)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                update public.feeding_requests
+                   set store_ack_at = now(),
+                       store_ack_by = @by
+                 where id = @id and stage = 'store' and store_ack_at is null
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            cmd.Parameters.Add(new NpgsqlParameter("by", by));
+            return await cmd.ExecuteNonQueryAsync() == 1;
+        }
+
+        /// The store closing its stage once the trims are ready. The
+        /// request is not finished - cutting still has to take the
+        /// requester's pin - so this moves it to 'final', not 'closed'.
         public async Task<bool> CloseStoreAsync(int id, string closedBy)
         {
             await using var cmd = _dataSource.CreateCommand("""
                 update public.feeding_requests
-                   set stage = 'closed',
+                   set stage = 'final',
                        store_closed_at = now(),
                        store_closed_by = @by,
                        wrong_tries = 0
                  where id = @id and stage = 'store'
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            cmd.Parameters.Add(new NpgsqlParameter("by", closedBy));
+            return await cmd.ExecuteNonQueryAsync() == 1;
+        }
+
+        /// Cutting closing the whole request against the requester's pin.
+        public async Task<bool> CloseFinalAsync(int id, string closedBy)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                update public.feeding_requests
+                   set stage = 'closed',
+                       final_closed_at = now(),
+                       final_closed_by = @by,
+                       wrong_tries = 0
+                 where id = @id and stage = 'final'
                 """);
             cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
             cmd.Parameters.Add(new NpgsqlParameter("by", closedBy));

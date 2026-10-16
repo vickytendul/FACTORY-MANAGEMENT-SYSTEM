@@ -93,8 +93,8 @@ namespace FactoryManagementSystem.Services.Feeding
             return list;
         }
 
-        /// Everything still open, OLDEST first - the queue cutting and the
-        /// store work from.
+        /// The queue cutting and the store work from: everything still
+        /// open, plus whatever was closed today.
         ///
         /// Oldest first and not newest, which is the one thing that makes
         /// this a queue rather than a list: the oldest request is the one
@@ -102,11 +102,26 @@ namespace FactoryManagementSystem.Services.Feeding
         /// has to be at the top. Deliberately not limited to today either
         /// - a request raised at half past eight last night and still open
         /// is exactly the one nobody should be able to scroll past.
+        ///
+        /// Today's closed ones come too, because a request that vanishes
+        /// the moment it is closed reads as lost work rather than
+        /// finished - the person who just closed it has no way to see
+        /// that it took. "Today" is by when it was CLOSED and not when it
+        /// was raised: a request raised last night and closed this morning
+        /// belongs on this morning's screen, and keying it to the day it
+        /// was raised is exactly how it disappeared.
+        ///
+        /// Asia/Kolkata rather than the server's zone, which is UTC on
+        /// Render: a request closed at nine at night here would otherwise
+        /// be counted against tomorrow.
         public async Task<List<FeedingRequest>> GetOpenAsync()
         {
             await using var cmd = _dataSource.CreateCommand(
                 Cols + """
                  where stage <> 'closed'
+                    or final_closed_at >= (
+                        ((now() at time zone 'Asia/Kolkata')::date)::timestamp
+                        at time zone 'Asia/Kolkata')
                  order by created_at asc
                 """);
 

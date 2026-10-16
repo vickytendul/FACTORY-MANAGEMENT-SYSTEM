@@ -155,9 +155,11 @@ namespace FactoryManagementSystem.Controllers
         // GET: api/FeedingRequests/open
         //
         // The queue cutting and the store work from: everything still
-        // open, oldest first, across days rather than only today. A
+        // open, oldest first, across days rather than only today - a
         // request raised late last night and still open is the one nobody
-        // should be able to scroll past.
+        // should be able to scroll past - plus whatever was closed today,
+        // so a final close shows its result instead of making the request
+        // disappear.
         [HttpGet("open")]
         public async Task<IActionResult> GetOpen()
         {

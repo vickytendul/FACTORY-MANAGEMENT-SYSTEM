@@ -113,6 +113,15 @@ namespace FactoryManagementSystem.Entities
         public DateTime? FinalClosedAt { get; set; }
         public string? FinalClosedBy { get; set; }
 
+        /// Why this one went past its four hours, written at the moment
+        /// of closing.
+        ///
+        /// Asked then and not afterwards because that is the only moment
+        /// anybody still knows the reason - by the next morning it is a
+        /// number in a report nobody can account for. Null on a request
+        /// closed on time, which needs no explanation.
+        public string? CloseRemarks { get; set; }
+
         /// Wrong pins entered against this request since the last correct
         /// one. Four digits is ten thousand guesses, which is an afternoon
         /// for somebody who wants a request closed without delivering - so
@@ -167,5 +176,19 @@ namespace FactoryManagementSystem.Entities
         /// late.
         public bool IsLate =>
             (ClosedAt ?? DateTime.UtcNow).ToUniversalTime() > DueAt.ToUniversalTime();
+
+        /// Whether closing this right now has to come with a reason.
+        ///
+        /// The four hours and nothing else - the store's own hour is
+        /// theirs to answer for and is measured separately. Computed on
+        /// the entity so the screen that shows the field and the server
+        /// that refuses without it cannot disagree about when it is
+        /// needed.
+        public bool RemarksRequired => Stage == StageFinal && IsLate;
+
+        /// The shortest answer worth keeping. Enough to stop a full stop
+        /// typed to get past the field, short enough that somebody
+        /// standing at a machine is not being asked to write a report.
+        public const int MinRemarksLength = 3;
     }
 }

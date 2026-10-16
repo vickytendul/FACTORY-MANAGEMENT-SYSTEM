@@ -29,7 +29,7 @@ namespace FactoryManagementSystem.Services.Feeding
                    requester_pin, trims_pin, sewing_order, sewing_order_at,
                    sewing_order_by, store_ack_at, store_ack_by,
                    store_closed_at, store_closed_by,
-                   final_closed_at, final_closed_by, wrong_tries
+                   final_closed_at, final_closed_by, close_remarks, wrong_tries
             from public.feeding_requests
             """;
 
@@ -41,7 +41,7 @@ namespace FactoryManagementSystem.Services.Feeding
                       requester_pin, trims_pin, sewing_order, sewing_order_at,
                       sewing_order_by, store_ack_at, store_ack_by,
                       store_closed_at, store_closed_by,
-                      final_closed_at, final_closed_by, wrong_tries
+                      final_closed_at, final_closed_by, close_remarks, wrong_tries
             """;
 
         private static FeedingRequest Read(NpgsqlDataReader r) => new()
@@ -69,7 +69,8 @@ namespace FactoryManagementSystem.Services.Feeding
             StoreClosedBy = r.IsDBNull(20) ? null : r.GetString(20),
             FinalClosedAt = r.IsDBNull(21) ? null : r.GetDateTime(21),
             FinalClosedBy = r.IsDBNull(22) ? null : r.GetString(22),
-            WrongTries = r.GetInt32(23),
+            CloseRemarks = r.IsDBNull(23) ? null : r.GetString(23),
+            WrongTries = r.GetInt32(24),
         };
 
         /// One day's requests, newest first. The page is always about a
@@ -244,19 +245,24 @@ namespace FactoryManagementSystem.Services.Feeding
             return await cmd.ExecuteNonQueryAsync() == 1;
         }
 
-        /// Cutting closing the whole request against the requester's pin.
-        public async Task<bool> CloseFinalAsync(int id, string closedBy)
+        /// Cutting closing the whole request against the requester's pin,
+        /// with the reason when it went past its four hours.
+        public async Task<bool> CloseFinalAsync(
+            int id, string closedBy, string? remarks)
         {
             await using var cmd = _dataSource.CreateCommand("""
                 update public.feeding_requests
                    set stage = 'closed',
                        final_closed_at = now(),
                        final_closed_by = @by,
+                       close_remarks = @remarks,
                        wrong_tries = 0
                  where id = @id and stage = 'final'
                 """);
             cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
             cmd.Parameters.Add(new NpgsqlParameter("by", closedBy));
+            cmd.Parameters.Add(
+                new NpgsqlParameter("remarks", (object?)remarks ?? DBNull.Value));
             return await cmd.ExecuteNonQueryAsync() == 1;
         }
 

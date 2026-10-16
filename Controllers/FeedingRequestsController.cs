@@ -85,9 +85,14 @@ namespace FactoryManagementSystem.Controllers
             r.StoreClosedBy,
             r.FinalClosedAt,
             r.FinalClosedBy,
+            r.CloseRemarks,
             r.DueAt,
             r.TrimsDueAt,
             r.IsLate,
+            // So the screen puts the remarks field in front of cutting
+            // at exactly the moment this endpoint would refuse a close
+            // without one.
+            r.RemarksRequired,
             r.IsLocked,
         };
 
@@ -438,6 +443,31 @@ namespace FactoryManagementSystem.Controllers
                 if (string.IsNullOrWhiteSpace(closedBy))
                     return BadRequest(new { Success = false, Message = "Who is closing this?" });
 
+                // Past four hours, so the close comes with a reason.
+                //
+                // Checked after the pin rather than before it, so a
+                // supplier who was not told the pin never learns from
+                // this endpoint whether a request is late - and so
+                // somebody typing a genuine pin is asked for the one
+                // thing still missing rather than two things at once.
+                //
+                // The reason is wanted at the moment of closing because
+                // that is the only moment anybody still knows it. By the
+                // next morning it is a number in a report nobody can
+                // account for.
+                var remarks = (body.Remarks ?? string.Empty).Trim();
+                if (request.RemarksRequired
+                    && remarks.Length < FeedingRequest.MinRemarksLength)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        RemarksRequired = true,
+                        Message = "This request is past its four hours. "
+                                + "Say why before closing it.",
+                    });
+                }
+
                 if (isStoreStage)
                 {
                     var applied = await _requests.CloseStoreAsync(id, closedBy);
@@ -452,7 +482,11 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                var done = await _requests.CloseFinalAsync(id, closedBy);
+                // Kept whenever it was given, not only when it was
+                // demanded: somebody who explains an on-time close has
+                // said something worth keeping.
+                var done = await _requests.CloseFinalAsync(
+                    id, closedBy, remarks.Length == 0 ? null : remarks);
                 if (!done)
                     return BadRequest(new { Success = false, Message = "Somebody else closed this first." });
 
@@ -643,5 +677,9 @@ namespace FactoryManagementSystem.Controllers
         /// person's name or code. Recorded because "the store closed it"
         /// is not an answer when somebody asks who.
         public string ClosedBy { get; set; } = string.Empty;
+
+        /// Why the request went past its four hours. Required on a late
+        /// final close and refused without it; kept whenever it is sent.
+        public string? Remarks { get; set; }
     }
 }

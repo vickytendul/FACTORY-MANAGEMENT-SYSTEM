@@ -135,22 +135,19 @@ namespace FactoryManagementSystem.Entities
 
         public DateTime DueAt => CreatedAt + OverallWindow;
 
-        /// The store's hour, which can never run past the overall four.
+        /// The store's hour, counted plainly from the sewing order. Null
+        /// before it, when the store has not been asked for anything.
         ///
-        /// If cutting took three and a half hours to write the sewing
-        /// order then the store really does have thirty minutes, not
-        /// sixty, and saying sixty would promise time that does not
-        /// exist. Null before the sewing order, when the store has not
-        /// been asked for anything yet.
-        public DateTime? TrimsDueAt
-        {
-            get
-            {
-                if (SewingOrderAt == null) return null;
-                var hour = SewingOrderAt.Value + TrimsWindow;
-                return hour > DueAt ? DueAt : hour;
-            }
-        }
+        /// Deliberately NOT capped at the overall four hours, which is
+        /// how it was first written. Capping it judges the store for a
+        /// wait that is not theirs: a request raised at six in the
+        /// evening and only given a sewing order at two the next
+        /// afternoon has no four hours left at all, so the store was
+        /// marked late for a delivery it made in four minutes. The
+        /// overall clock is cutting's to answer for, and it is shown
+        /// beside this one rather than folded into it.
+        public DateTime? TrimsDueAt =>
+            SewingOrderAt == null ? null : SewingOrderAt.Value + TrimsWindow;
 
         /// When this request actually finished, or null while it is open.
         ///

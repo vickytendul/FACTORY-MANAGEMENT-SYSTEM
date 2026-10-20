@@ -132,6 +132,35 @@ namespace FactoryManagementSystem.Services.Feeding
             return list;
         }
 
+        /// Every request raised between two days, inclusive.
+        ///
+        /// By the day it was RAISED rather than by when it closed: a
+        /// line that could not be fed on Tuesday lost Tuesday, whatever
+        /// day somebody finally signed the request off. That is also the
+        /// day the OWE sheet this feeds is reporting on.
+        public async Task<List<FeedingRequest>> GetForRangeAsync(
+            DateTime from, DateTime to)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                Cols + """
+                 where request_day between @from and @to
+                 order by created_at asc
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("from", from.Date)
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date,
+            });
+            cmd.Parameters.Add(new NpgsqlParameter("to", to.Date)
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Date,
+            });
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var list = new List<FeedingRequest>();
+            while (await r.ReadAsync()) list.Add(Read(r));
+            return list;
+        }
+
         public async Task<FeedingRequest?> GetByIdAsync(int id)
         {
             await using var cmd = _dataSource.CreateCommand(Cols + " where id = @id");

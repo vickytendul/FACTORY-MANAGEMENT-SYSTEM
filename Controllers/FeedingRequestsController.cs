@@ -179,6 +179,64 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // GET: api/FeedingRequests/downtime?from=2026-10-01&to=2026-10-31
+        //
+        // What feeding cost each line over a period, in minutes.
+        //
+        // Deliberately its own endpoint rather than a field added to the
+        // OWE summary. That summary is shared with the plain OWE Report,
+        // and a report two screens read is a report whose shape is not
+        // this feature's to change. The OWE sheet with down time asks
+        // for both and joins them on the line.
+        [HttpGet("downtime")]
+        public async Task<IActionResult> Downtime(
+            [FromQuery] DateTime? from = null, [FromQuery] DateTime? to = null)
+        {
+            try
+            {
+                var start = (from ?? DateTime.Now).Date;
+                var end = (to ?? start).Date;
+                if (end < start) (start, end) = (end, start);
+
+                var rows = await _requests.GetForRangeAsync(start, end);
+
+                var byLine = rows
+                    .Where(r => r.LineId > 0)
+                    .GroupBy(r => r.LineId)
+                    .Select(g => new
+                    {
+                        LineId = g.Key,
+                        // The name as the latest request for that line
+                        // had it, so a renamed line reads as it is now.
+                        LineName = g.OrderBy(r => r.CreatedAt).Last().LineName,
+                        Requests = g.Count(),
+                        // Rounded once, here, so the screen and the
+                        // exported file cannot round it differently.
+                        DowntimeMinutes = (int)Math.Round(
+                            g.Sum(r => r.Downtime.TotalMinutes)),
+                        LateRequests = g.Count(r => r.Downtime > TimeSpan.Zero),
+                        // Still running, as opposed to settled - a line
+                        // whose downtime is still growing is a different
+                        // conversation from one that already happened.
+                        OpenRequests = g.Count(r => r.Stage != FeedingRequest.StageClosed),
+                    })
+                    .OrderBy(x => x.LineId)
+                    .ToList();
+
+                return Ok(new
+                {
+                    From = start,
+                    To = end,
+                    Lines = byLine,
+                    TotalDowntimeMinutes = byLine.Sum(x => x.DowntimeMinutes),
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // POST: api/FeedingRequests
         //
         // One of the two responses that carries a pin, because it is a

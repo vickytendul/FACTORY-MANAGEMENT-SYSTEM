@@ -177,6 +177,27 @@ namespace FactoryManagementSystem.Entities
         public bool IsLate =>
             (ClosedAt ?? DateTime.UtcNow).ToUniversalTime() > DueAt.ToUniversalTime();
 
+        /// What this request cost the line it was raised for.
+        ///
+        /// The time past the four hours, and nothing before it. The
+        /// first four are the allowance the floor agreed to - a line
+        /// that asked for feed and got it inside them was not standing
+        /// idle, it was working through what it had. Only the overrun is
+        /// time the line lost.
+        ///
+        /// A request still open accrues against the clock, so a line
+        /// that has been waiting since last night shows what it is
+        /// costing now rather than nothing until somebody closes it.
+        public TimeSpan Downtime
+        {
+            get
+            {
+                var end = (ClosedAt ?? DateTime.UtcNow).ToUniversalTime();
+                var over = end - DueAt.ToUniversalTime();
+                return over > TimeSpan.Zero ? over : TimeSpan.Zero;
+            }
+        }
+
         /// Whether closing this right now has to come with a reason.
         ///
         /// The four hours and nothing else - the store's own hour is

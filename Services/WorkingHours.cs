@@ -31,9 +31,10 @@ namespace FactoryManagementSystem.Services
         /// working days away.
         public static TimeSpan DayLength => DayEnd - DayStart;
 
-        /// Sunday off. If the floor works a different week, this is the
-        /// line to change - and it is the one assumption in here that
-        /// was not stated by the floor itself.
+        /// Sunday off, Monday to Saturday worked - confirmed by the
+        /// floor. If that ever changes this is the line, and the Dart
+        /// mirror in lib/services/working_hours.dart is the other one;
+        /// they have to move together.
         public static bool IsWorkingDay(DayOfWeek day) =>
             day != DayOfWeek.Sunday;
 

@@ -1,3 +1,5 @@
+using FactoryManagementSystem.Services;
+
 namespace FactoryManagementSystem.Entities
 {
     /// A sewing line asking to be fed, and the three handovers that answer
@@ -137,12 +139,21 @@ namespace FactoryManagementSystem.Entities
         /// Not from when cutting noticed it: the line has been waiting
         /// since it pressed Save, and a clock that starts when the
         /// supplier looks up measures the wrong thing.
+        ///
+        /// Four WORKING hours - cutting and the store are there from
+        /// nine to half four, and a clock that runs through the night
+        /// marks a request late before anybody can answer it. See
+        /// WorkingHours.
         public static readonly TimeSpan OverallWindow = TimeSpan.FromHours(4);
 
-        /// One hour of those four for the store, from the sewing order.
+        /// One hour of those four for the store, from the sewing order,
+        /// and a working hour for the same reason.
         public static readonly TimeSpan TrimsWindow = TimeSpan.FromHours(1);
 
-        public DateTime DueAt => CreatedAt + OverallWindow;
+        /// Raised at half past three, a request has one hour that
+        /// afternoon and three more from nine the next morning, so it
+        /// falls due at noon.
+        public DateTime DueAt => WorkingHours.Add(CreatedAt, OverallWindow);
 
         /// The store's hour, counted plainly from the sewing order. Null
         /// before it, when the store has not been asked for anything.
@@ -155,8 +166,9 @@ namespace FactoryManagementSystem.Entities
         /// marked late for a delivery it made in four minutes. The
         /// overall clock is cutting's to answer for, and it is shown
         /// beside this one rather than folded into it.
-        public DateTime? TrimsDueAt =>
-            SewingOrderAt == null ? null : SewingOrderAt.Value + TrimsWindow;
+        public DateTime? TrimsDueAt => SewingOrderAt == null
+            ? null
+            : WorkingHours.Add(SewingOrderAt.Value, TrimsWindow);
 
         /// When this request actually finished, or null while it is open.
         ///
@@ -188,15 +200,12 @@ namespace FactoryManagementSystem.Entities
         /// A request still open accrues against the clock, so a line
         /// that has been waiting since last night shows what it is
         /// costing now rather than nothing until somebody closes it.
-        public TimeSpan Downtime
-        {
-            get
-            {
-                var end = (ClosedAt ?? DateTime.UtcNow).ToUniversalTime();
-                var over = end - DueAt.ToUniversalTime();
-                return over > TimeSpan.Zero ? over : TimeSpan.Zero;
-            }
-        }
+        /// Counted in working time as well. A request that fell due at
+        /// four on Friday and was answered at nine on Monday cost the
+        /// line half an hour of Friday, not the whole weekend - the
+        /// floor was not standing idle, it was shut.
+        public TimeSpan Downtime =>
+            WorkingHours.Between(DueAt, ClosedAt ?? DateTime.UtcNow);
 
         /// Whether closing this right now has to come with a reason.
         ///

@@ -397,6 +397,9 @@ if (hasSupabase)
     // Feeding requests, on the same terms: new data, never in Firestore,
     // so no flag and nothing to roll back to.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Feeding.FeedingRequestRepository>();
+    // Down time entries, on the same terms again: new data, never in
+    // Firestore, so no flag and nothing to roll back to.
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.DowntimeEntryRepository>();
 }
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch

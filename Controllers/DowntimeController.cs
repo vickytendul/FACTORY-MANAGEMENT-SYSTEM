@@ -30,6 +30,12 @@ namespace FactoryManagementSystem.Controllers
             e.Domain,
             e.Department,
             e.Reason,
+            e.FromAt,
+            e.ToAt,
+            // Worked out here rather than on each screen, so the form,
+            // the list and any report that adds them up cannot round
+            // the same stoppage three ways.
+            e.Minutes,
             e.EnteredByCode,
             e.EnteredByName,
         };
@@ -138,8 +144,46 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
+                // How long it stood. Required, because a down time
+                // report with no duration is a list of complaints: the
+                // minutes are the only part of this anybody adds up.
+                if (body.FromAt == null || body.ToAt == null)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "Say when the line stopped and when it ran again.",
+                    });
+                }
+
+                var from = body.FromAt.Value.ToUniversalTime();
+                var to = body.ToAt.Value.ToUniversalTime();
+
+                if (to <= from)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "The line cannot have started again before it stopped.",
+                    });
+                }
+
+                // A day and a half of down time on one line is a typo
+                // far more often than it is a day and a half, and the
+                // figure goes straight into a report nobody re-reads.
+                if (to - from > TimeSpan.FromHours(12))
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "That is longer than a shift - check the times.",
+                    });
+                }
+
                 var saved = await _entries.CreateAsync(new DowntimeEntry
                 {
+                    FromAt = from,
+                    ToAt = to,
                     LineId = body.LineId,
                     LineName = (body.LineName ?? string.Empty).Trim(),
                     Domain = domain,
@@ -212,6 +256,13 @@ namespace FactoryManagementSystem.Controllers
         public string Domain { get; set; } = string.Empty;
         public string Department { get; set; } = string.Empty;
         public string Reason { get; set; } = string.Empty;
+
+        /// When the line stopped and when it ran again. Both required -
+        /// the minutes between them are the figure the report is added
+        /// up on.
+        public DateTime? FromAt { get; set; }
+        public DateTime? ToAt { get; set; }
+
         public string? EnteredByCode { get; set; }
         public string? EnteredByName { get; set; }
     }

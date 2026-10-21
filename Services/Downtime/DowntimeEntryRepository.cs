@@ -19,7 +19,7 @@ namespace FactoryManagementSystem.Services.Downtime
 
         private const string Cols = """
             select id, created_at, line_id, line_name, domain, department,
-                   reason, entered_by_code, entered_by_name
+                   reason, entered_by_code, entered_by_name, from_at, to_at
             from public.downtime_entries
             """;
 
@@ -34,6 +34,8 @@ namespace FactoryManagementSystem.Services.Downtime
             Reason = r.GetString(6),
             EnteredByCode = r.GetString(7),
             EnteredByName = r.GetString(8),
+            FromAt = r.IsDBNull(9) ? null : r.GetDateTime(9),
+            ToAt = r.IsDBNull(10) ? null : r.GetDateTime(10),
         };
 
         /// One day's entries, newest first - the way the page that
@@ -99,10 +101,11 @@ namespace FactoryManagementSystem.Services.Downtime
             await using var cmd = _dataSource.CreateCommand("""
                 insert into public.downtime_entries
                     (line_id, line_name, domain, department, reason,
-                     entered_by_code, entered_by_name)
-                values (@line, @lineName, @domain, @dept, @reason, @byCode, @byName)
+                     entered_by_code, entered_by_name, from_at, to_at)
+                values (@line, @lineName, @domain, @dept, @reason, @byCode,
+                        @byName, @from, @to)
                 returning id, created_at, line_id, line_name, domain, department,
-                          reason, entered_by_code, entered_by_name
+                          reason, entered_by_code, entered_by_name, from_at, to_at
                 """);
 
             cmd.Parameters.Add(new NpgsqlParameter("line", entry.LineId));
@@ -112,6 +115,16 @@ namespace FactoryManagementSystem.Services.Downtime
             cmd.Parameters.Add(new NpgsqlParameter("reason", entry.Reason));
             cmd.Parameters.Add(new NpgsqlParameter("byCode", entry.EnteredByCode ?? string.Empty));
             cmd.Parameters.Add(new NpgsqlParameter("byName", entry.EnteredByName ?? string.Empty));
+            // Written as timestamptz, so the instant is stored and not
+            // a wall-clock reading somebody has to guess the zone of.
+            cmd.Parameters.Add(new NpgsqlParameter("from", (object?)entry.FromAt ?? DBNull.Value)
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            });
+            cmd.Parameters.Add(new NpgsqlParameter("to", (object?)entry.ToAt ?? DBNull.Value)
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            });
 
             await using var r = await cmd.ExecuteReaderAsync();
             if (!await r.ReadAsync())

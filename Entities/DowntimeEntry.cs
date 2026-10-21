@@ -33,6 +33,31 @@ namespace FactoryManagementSystem.Entities
         /// Why, in whoever's own words.
         public string Reason { get; set; } = string.Empty;
 
+        /// When the line stopped and when it ran again.
+        ///
+        /// From and to rather than a number of minutes: somebody
+        /// standing at a line knows the two clock times and does not
+        /// know the difference between them, and asking them to
+        /// subtract is asking for the subtraction to be wrong.
+        ///
+        /// Nullable only so the column could exist before the code that
+        /// fills it shipped. Every new entry is refused without both.
+        public DateTime? FromAt { get; set; }
+        public DateTime? ToAt { get; set; }
+
+        /// How long the line stood, worked out rather than typed.
+        public TimeSpan? Duration => FromAt == null || ToAt == null
+            ? null
+            : ToAt.Value - FromAt.Value;
+
+        /// The figure a report adds up. Null stays null rather than
+        /// becoming zero: an entry with no times is a gap in the
+        /// record, and a gap counted as zero is a lie that totals
+        /// cleanly.
+        public int? Minutes => Duration == null
+            ? null
+            : (int)Math.Round(Duration.Value.TotalMinutes);
+
         public string EnteredByCode { get; set; } = string.Empty;
         public string EnteredByName { get; set; } = string.Empty;
 

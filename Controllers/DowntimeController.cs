@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services.Downtime;
+using FactoryManagementSystem.Services.Feeding;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -15,10 +16,13 @@ namespace FactoryManagementSystem.Controllers
     public class DowntimeController : ControllerBase
     {
         private readonly DowntimeEntryRepository _entries;
+        private readonly FeedingRequestRepository _feeding;
 
-        public DowntimeController(DowntimeEntryRepository entries)
+        public DowntimeController(
+            DowntimeEntryRepository entries, FeedingRequestRepository feeding)
         {
             _entries = entries;
+            _feeding = feeding;
         }
 
         private static object Public(DowntimeEntry e) => new
@@ -65,6 +69,98 @@ namespace FactoryManagementSystem.Controllers
             Domains = DowntimeEntry.Domains,
             Departments = DowntimeEntry.Departments,
         });
+
+        // GET: api/Downtime/by-line?from=2026-10-01&to=2026-10-31
+        //
+        // What a line lost over a period, from both places it can be
+        // lost, added up.
+        //
+        // Two different kinds of thing, deliberately summed into one
+        // figure because that is what the OWE sheet's column is: time
+        // the line was not sewing. One is measured by a clock nobody
+        // can argue with - a feeding request that ran past the four
+        // working hours it was allowed - and the other is somebody
+        // writing down when a machine stopped and when it ran again.
+        //
+        // The two parts come down beside the total as well as inside
+        // it. A line showing four hours lost is a different conversation
+        // depending on whether it was waiting for cloth or waiting for
+        // a mechanic, and a sheet that can only say "four hours" sends
+        // somebody to ask the question again.
+        //
+        // The arithmetic is here and not on the screen so the sheet,
+        // its exported file and anything built on this later cannot add
+        // the same two numbers up differently.
+        [HttpGet("by-line")]
+        public async Task<IActionResult> ByLine(
+            [FromQuery] DateTime? from = null, [FromQuery] DateTime? to = null)
+        {
+            try
+            {
+                var start = (from ?? DateTime.Now).Date;
+                var end = (to ?? start).Date;
+                if (end < start) (start, end) = (end, start);
+
+                var requests = await _feeding.GetForRangeAsync(start, end);
+                var stoppages = await _entries.GetForRangeAsync(start, end);
+
+                var feedingByLine = requests
+                    .Where(r => r.LineId > 0)
+                    .GroupBy(r => r.LineId)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => (int)Math.Round(g.Sum(r => r.Downtime.TotalMinutes)));
+
+                var recordedByLine = stoppages
+                    .Where(e => e.LineId > 0 && e.Minutes != null)
+                    .GroupBy(e => e.LineId)
+                    .ToDictionary(g => g.Key, g => g.Sum(e => e.Minutes!.Value));
+
+                // Every line that appears in either, so a line with only
+                // recorded stoppages and no late feeding is not missed.
+                var lineIds = feedingByLine.Keys
+                    .Concat(recordedByLine.Keys)
+                    .Distinct()
+                    .OrderBy(id => id)
+                    .ToList();
+
+                var names = new Dictionary<int, string>();
+                foreach (var r in requests.Where(r => r.LineId > 0))
+                    names[r.LineId] = r.LineName;
+                // Entries written later win, so a renamed line reads as
+                // it is called now.
+                foreach (var e in stoppages.Where(e => e.LineId > 0 && e.LineName.Length > 0))
+                    names[e.LineId] = e.LineName;
+
+                var lines = lineIds.Select(id =>
+                {
+                    var fed = feedingByLine.GetValueOrDefault(id);
+                    var rec = recordedByLine.GetValueOrDefault(id);
+                    return new
+                    {
+                        LineId = id,
+                        LineName = names.GetValueOrDefault(id, string.Empty),
+                        FeedingMinutes = fed,
+                        RecordedMinutes = rec,
+                        DowntimeMinutes = fed + rec,
+                    };
+                }).ToList();
+
+                return Ok(new
+                {
+                    From = start,
+                    To = end,
+                    Lines = lines,
+                    TotalFeedingMinutes = lines.Sum(x => x.FeedingMinutes),
+                    TotalRecordedMinutes = lines.Sum(x => x.RecordedMinutes),
+                    TotalDowntimeMinutes = lines.Sum(x => x.DowntimeMinutes),
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
 
         // GET: api/Downtime?date=2026-10-21
         // GET: api/Downtime?from=2026-10-01&to=2026-10-31

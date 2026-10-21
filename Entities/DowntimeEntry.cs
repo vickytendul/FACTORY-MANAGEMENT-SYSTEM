@@ -43,16 +43,18 @@ namespace FactoryManagementSystem.Entities
             "Man", "Machine", "Material", "Environment", "Others",
         ];
 
-        /// The departments a stoppage can belong to.
+        /// The departments a stoppage can belong to, in the floor's own
+        /// order - which is the order they are read out in, not
+        /// alphabetical.
         ///
-        /// The floor's list had a gap at five when it was written down,
-        /// so this is six of a seven that is not settled yet. Adding the
-        /// seventh is this line and nothing else - the column is plain
-        /// text on purpose, so a new word does not need a migration run
-        /// before the deploy that uses it.
+        /// IE sits at five, where the handwritten list had a gap the day
+        /// it was given to me. Adding another is this line and nothing
+        /// else: the column is plain text on purpose and the app reads
+        /// this list from the API, so a new word needs neither a
+        /// migration nor a rebuild of the phone app.
         public static readonly string[] Departments =
         [
-            "Quality", "Cutting", "Production", "HR",
+            "Quality", "Cutting", "Production", "HR", "IE",
             "Maintenance", "Trims Store",
         ];
 

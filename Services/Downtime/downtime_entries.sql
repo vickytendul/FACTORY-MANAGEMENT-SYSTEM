@@ -16,7 +16,7 @@ create table if not exists public.downtime_entries (
     -- reads correctly after a line is renamed.
     line_name       text        not null default '',
 
-    -- Man, Machine, Material, Environment, Others. Text rather than an
+    -- Man, Machine, Material, Method, Environment, Others. Text rather than an
     -- enum or a check constraint: the floor is still settling this list
     -- (the department one has a gap in it today), and a constraint
     -- turns adding a word into a migration somebody has to remember to

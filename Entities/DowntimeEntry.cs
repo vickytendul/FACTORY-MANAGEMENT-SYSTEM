@@ -61,11 +61,11 @@ namespace FactoryManagementSystem.Entities
         public string EnteredByCode { get; set; } = string.Empty;
         public string EnteredByName { get; set; } = string.Empty;
 
-        /// The five the floor uses. In the floor's own order, which is
+        /// The six the floor uses. In the floor's own order, which is
         /// the order they are read out in, not alphabetical.
         public static readonly string[] Domains =
         [
-            "Man", "Machine", "Material", "Environment", "Others",
+            "Man", "Machine", "Material", "Method", "Environment", "Others",
         ];
 
         /// The departments a stoppage can belong to, in the floor's own

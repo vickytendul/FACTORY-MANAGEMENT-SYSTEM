@@ -400,6 +400,8 @@ if (hasSupabase)
     // Down time entries, on the same terms again: new data, never in
     // Firestore, so no flag and nothing to roll back to.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.DowntimeEntryRepository>();
+    // The day's plan, line by line. Same terms again.
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.LineTargetRepository>();
 }
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch

@@ -19,7 +19,8 @@ namespace FactoryManagementSystem.Services.Downtime
 
         private const string Cols = """
             select id, created_at, line_id, line_name, domain, department,
-                   reason, entered_by_code, entered_by_name, from_at, to_at
+                   reason, entered_by_code, entered_by_name, from_at, to_at,
+                   approved_at, approved_by_code, approved_by_name
             from public.downtime_entries
             """;
 
@@ -36,6 +37,9 @@ namespace FactoryManagementSystem.Services.Downtime
             EnteredByName = r.GetString(8),
             FromAt = r.IsDBNull(9) ? null : r.GetDateTime(9),
             ToAt = r.IsDBNull(10) ? null : r.GetDateTime(10),
+            ApprovedAt = r.IsDBNull(11) ? null : r.GetDateTime(11),
+            ApprovedByCode = r.IsDBNull(12) ? null : r.GetString(12),
+            ApprovedByName = r.IsDBNull(13) ? null : r.GetString(13),
         };
 
         /// One day's entries, newest first - the way the page that
@@ -105,7 +109,8 @@ namespace FactoryManagementSystem.Services.Downtime
                 values (@line, @lineName, @domain, @dept, @reason, @byCode,
                         @byName, @from, @to)
                 returning id, created_at, line_id, line_name, domain, department,
-                          reason, entered_by_code, entered_by_name, from_at, to_at
+                          reason, entered_by_code, entered_by_name, from_at, to_at,
+                          approved_at, approved_by_code, approved_by_name
                 """);
 
             cmd.Parameters.Add(new NpgsqlParameter("line", entry.LineId));
@@ -130,6 +135,41 @@ namespace FactoryManagementSystem.Services.Downtime
             if (!await r.ReadAsync())
                 throw new InvalidOperationException("The down time entry was not saved.");
             return Read(r);
+        }
+
+        /// Signs one stoppage off, or takes the signature back when
+        /// [by] is null.
+        ///
+        /// One statement either way, so two people pressing at once end
+        /// at the state the second one asked for rather than at
+        /// whichever read happened to be stale.
+        public async Task<bool> SetApprovalAsync(
+            int id, string? by, string? name)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                by == null
+                    ? """
+                      update public.downtime_entries
+                         set approved_at = null,
+                             approved_by_code = null,
+                             approved_by_name = null
+                       where id = @id
+                      """
+                    : """
+                      update public.downtime_entries
+                         set approved_at = now(),
+                             approved_by_code = @by,
+                             approved_by_name = @name
+                       where id = @id
+                      """);
+
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            if (by != null)
+            {
+                cmd.Parameters.Add(new NpgsqlParameter("by", by));
+                cmd.Parameters.Add(new NpgsqlParameter("name", name ?? string.Empty));
+            }
+            return await cmd.ExecuteNonQueryAsync() == 1;
         }
 
         /// Deletes an entry. The caller decides who may - a typed

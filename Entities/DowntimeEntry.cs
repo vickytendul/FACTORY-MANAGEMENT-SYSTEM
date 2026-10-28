@@ -61,6 +61,22 @@ namespace FactoryManagementSystem.Entities
         public string EnteredByCode { get; set; } = string.Empty;
         public string EnteredByName { get; set; } = string.Empty;
 
+        /// When the GM signed this one off, and who.
+        ///
+        /// Per stoppage, not per day. A line can stand three times in a
+        /// day - Material against Cutting, Method against Trims Store,
+        /// something else again - and each is read on its own terms.
+        /// One signature for the day would accept all three at once,
+        /// which is not what reading them is.
+        ///
+        /// Null is unapproved. No flag set to false, so withdrawing
+        /// leaves nothing behind claiming it was ever signed.
+        public DateTime? ApprovedAt { get; set; }
+        public string? ApprovedByCode { get; set; }
+        public string? ApprovedByName { get; set; }
+
+        public bool IsApproved => ApprovedAt != null;
+
         /// The six the floor uses. In the floor's own order, which is
         /// the order they are read out in, not alphabetical.
         public static readonly string[] Domains =

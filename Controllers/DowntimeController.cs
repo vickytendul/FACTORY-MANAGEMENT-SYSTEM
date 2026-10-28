@@ -36,6 +36,10 @@ namespace FactoryManagementSystem.Controllers
             e.Reason,
             e.FromAt,
             e.ToAt,
+            e.ApprovedAt,
+            e.ApprovedByCode,
+            e.ApprovedByName,
+            e.IsApproved,
             // Worked out here rather than on each screen, so the form,
             // the list and any report that adds them up cannot round
             // the same stoppage three ways.
@@ -294,6 +298,73 @@ namespace FactoryManagementSystem.Controllers
                 });
 
                 return Ok(new { Success = true, Entry = Public(saved) });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        // POST:   api/Downtime/{id}/approve
+        // DELETE: api/Downtime/{id}/approve
+        //
+        // The GM signing one stoppage off, or taking it back.
+        //
+        // One at a time, deliberately. A line can stand three times in a
+        // day - Material against Cutting, Method against Trims Store,
+        // something else again - and each is a different account to
+        // accept. A button that signed the day would accept all three
+        // at once, which is not what reading them is.
+        [HttpPost("{id:int}/approve")]
+        public Task<IActionResult> Approve(int id) => _SetApproval(id, true);
+
+        [HttpDelete("{id:int}/approve")]
+        public Task<IActionResult> Unapprove(int id) => _SetApproval(id, false);
+
+        private async Task<IActionResult> _SetApproval(int id, bool approve)
+        {
+            try
+            {
+                // Admin and Manager, which is the GM and the office.
+                // Not the people who write the entries: an account
+                // signed by whoever wrote it has not been reviewed,
+                // only finished.
+                //
+                // With Auth__Required=false there is nobody to check,
+                // and that flag exists so the app can run with no login
+                // at all - so it reads as "no check in force" rather
+                // than as somebody who fails every check.
+                var caller = CallerCode();
+                if (caller != null
+                    && !User.IsInRole("Admin") && !User.IsInRole("Manager"))
+                {
+                    // 403 and not 401: signed in perfectly well, just
+                    // not theirs to sign.
+                    return StatusCode(403, new
+                    {
+                        Success = false,
+                        Message = approve
+                            ? "Only the GM or a manager approves a stoppage."
+                            : "Only the GM or a manager can withdraw an approval.",
+                    });
+                }
+
+                var entry = await _entries.GetByIdAsync(id);
+                if (entry == null)
+                    return NotFound(new { Success = false, Message = "No such entry." });
+
+                await _entries.SetApprovalAsync(
+                    id,
+                    approve ? (caller ?? "open-access") : null,
+                    approve ? (User.Identity?.Name ?? string.Empty) : null);
+
+                var after = await _entries.GetByIdAsync(id);
+                return Ok(new
+                {
+                    Success = true,
+                    Entry = after == null ? null : Public(after),
+                    Message = approve ? "Approved." : "Approval withdrawn.",
+                });
             }
             catch (Exception ex)
             {

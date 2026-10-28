@@ -92,6 +92,11 @@ namespace FactoryManagementSystem.Controllers
         // a mechanic, and a sheet that can only say "four hours" sends
         // somebody to ask the question again.
         //
+        // Only approved stoppages are counted. A written stoppage the GM
+        // has not signed comes down as PendingMinutes instead, so the
+        // sheet can say minutes are outstanding rather than quietly
+        // reading as though the line never stood.
+        //
         // The arithmetic is here and not on the screen so the sheet,
         // its exported file and anything built on this later cannot add
         // the same two numbers up differently.
@@ -115,15 +120,41 @@ namespace FactoryManagementSystem.Controllers
                         g => g.Key,
                         g => (int)Math.Round(g.Sum(r => r.Downtime.TotalMinutes)));
 
+                // Approved stoppages only.
+                //
+                // A stoppage is somebody's account of why a line stood,
+                // and until the GM has read it that account has not
+                // been accepted. Counting it into the OWE sheet first
+                // would put minutes on a report off the back of a
+                // sentence nobody had looked at - and the sheet is read
+                // as settled.
+                //
+                // The feeding half is not filtered: it comes off a
+                // clock, and a clock is not somebody's account of
+                // anything.
                 var recordedByLine = stoppages
-                    .Where(e => e.LineId > 0 && e.Minutes != null)
+                    .Where(e => e.LineId > 0 && e.Minutes != null && e.IsApproved)
                     .GroupBy(e => e.LineId)
                     .ToDictionary(g => g.Key, g => g.Sum(e => e.Minutes!.Value));
 
-                // Every line that appears in either, so a line with only
-                // recorded stoppages and no late feeding is not missed.
+                // What is written down and still waiting. Sent so the
+                // sheet can say minutes are outstanding rather than
+                // silently reading as though there were none - a
+                // stoppage nobody approves would otherwise never appear
+                // anywhere on the OWE report at all.
+                var pendingByLine = stoppages
+                    .Where(e => e.LineId > 0 && e.Minutes != null && !e.IsApproved)
+                    .GroupBy(e => e.LineId)
+                    .ToDictionary(g => g.Key, g => g.Sum(e => e.Minutes!.Value));
+
+                // Every line that appears anywhere, so a line with only
+                // recorded stoppages and no late feeding is not missed -
+                // and nor is one whose whole day is still waiting to be
+                // signed, which would otherwise have nothing to carry
+                // its pending figure.
                 var lineIds = feedingByLine.Keys
                     .Concat(recordedByLine.Keys)
+                    .Concat(pendingByLine.Keys)
                     .Distinct()
                     .OrderBy(id => id)
                     .ToList();
@@ -146,6 +177,7 @@ namespace FactoryManagementSystem.Controllers
                         LineName = names.GetValueOrDefault(id, string.Empty),
                         FeedingMinutes = fed,
                         RecordedMinutes = rec,
+                        PendingMinutes = pendingByLine.GetValueOrDefault(id),
                         DowntimeMinutes = fed + rec,
                     };
                 }).ToList();
@@ -157,6 +189,7 @@ namespace FactoryManagementSystem.Controllers
                     Lines = lines,
                     TotalFeedingMinutes = lines.Sum(x => x.FeedingMinutes),
                     TotalRecordedMinutes = lines.Sum(x => x.RecordedMinutes),
+                    TotalPendingMinutes = lines.Sum(x => x.PendingMinutes),
                     TotalDowntimeMinutes = lines.Sum(x => x.DowntimeMinutes),
                 });
             }

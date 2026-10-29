@@ -44,6 +44,9 @@ namespace FactoryManagementSystem.Controllers
             // the list and any report that adds them up cannot round
             // the same stoppage three ways.
             e.Minutes,
+            // What it cost in garments, as somebody standing there put
+            // it. Null when nobody has said, which is not zero.
+            e.PiecesLost,
             e.EnteredByCode,
             e.EnteredByName,
         };
@@ -313,10 +316,42 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
+                // What it cost in garments. Optional: a stoppage written
+                // down while it is still going on is a real entry, and
+                // the alternative to leaving this empty is somebody
+                // typing a nought to get past the field.
+                var pieces = body.PiecesLost;
+                if (pieces != null)
+                {
+                    if (pieces < 0)
+                    {
+                        return BadRequest(new
+                        {
+                            Success = false,
+                            Message = "Pieces lost cannot be negative.",
+                        });
+                    }
+
+                    // A line makes something like eight hundred in a
+                    // day. Five figures against one stoppage is a slip
+                    // of the hand far more often than it is a count,
+                    // and it goes straight into a column that is summed.
+                    if (pieces > 20000)
+                    {
+                        return BadRequest(new
+                        {
+                            Success = false,
+                            Message = "That is more pieces than a line makes in a "
+                                    + "month - check the figure.",
+                        });
+                    }
+                }
+
                 var saved = await _entries.CreateAsync(new DowntimeEntry
                 {
                     FromAt = from,
                     ToAt = to,
+                    PiecesLost = pieces,
                     LineId = body.LineId,
                     LineName = (body.LineName ?? string.Empty).Trim(),
                     Domain = domain,
@@ -462,6 +497,10 @@ namespace FactoryManagementSystem.Controllers
         /// up on.
         public DateTime? FromAt { get; set; }
         public DateTime? ToAt { get; set; }
+
+        /// What the stoppage cost in garments. Optional, and null means
+        /// nobody has said rather than nothing lost.
+        public int? PiecesLost { get; set; }
 
         public string? EnteredByCode { get; set; }
         public string? EnteredByName { get; set; }

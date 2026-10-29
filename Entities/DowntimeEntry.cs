@@ -58,6 +58,24 @@ namespace FactoryManagementSystem.Entities
             ? null
             : (int)Math.Round(Duration.Value.TotalMinutes);
 
+        /// What the stoppage cost in pieces, as the person who saw it
+        /// puts it.
+        ///
+        /// Asked for rather than worked out from the minutes at the
+        /// line's SAM, because that arithmetic is wrong in the cases
+        /// worth recording: half the line kept running, the operators
+        /// were moved onto another style, the stoppage landed in the
+        /// middle of a changeover. Minutes divided by SAM answers "how
+        /// much sewing time stood"; this answers "how many garments did
+        /// not get made", and on a bad morning those are different
+        /// numbers.
+        ///
+        /// Null means nobody has said - not nothing lost. A stoppage
+        /// written down at ten past ten, before anybody counted, is a
+        /// real entry, and a zero put there to fill the box would be a
+        /// figure that totals cleanly and says something untrue.
+        public int? PiecesLost { get; set; }
+
         public string EnteredByCode { get; set; } = string.Empty;
         public string EnteredByName { get; set; } = string.Empty;
 

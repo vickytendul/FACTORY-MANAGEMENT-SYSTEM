@@ -20,7 +20,8 @@ namespace FactoryManagementSystem.Services.Downtime
         private const string Cols = """
             select id, created_at, line_id, line_name, domain, department,
                    reason, entered_by_code, entered_by_name, from_at, to_at,
-                   approved_at, approved_by_code, approved_by_name
+                   approved_at, approved_by_code, approved_by_name,
+                   pieces_lost
             from public.downtime_entries
             """;
 
@@ -40,6 +41,9 @@ namespace FactoryManagementSystem.Services.Downtime
             ApprovedAt = r.IsDBNull(11) ? null : r.GetDateTime(11),
             ApprovedByCode = r.IsDBNull(12) ? null : r.GetString(12),
             ApprovedByName = r.IsDBNull(13) ? null : r.GetString(13),
+            // Null stays null. Nobody having stated the figure is not
+            // the same as nothing having been lost.
+            PiecesLost = r.IsDBNull(14) ? null : r.GetInt32(14),
         };
 
         /// One day's entries, newest first - the way the page that
@@ -105,12 +109,14 @@ namespace FactoryManagementSystem.Services.Downtime
             await using var cmd = _dataSource.CreateCommand("""
                 insert into public.downtime_entries
                     (line_id, line_name, domain, department, reason,
-                     entered_by_code, entered_by_name, from_at, to_at)
+                     entered_by_code, entered_by_name, from_at, to_at,
+                     pieces_lost)
                 values (@line, @lineName, @domain, @dept, @reason, @byCode,
-                        @byName, @from, @to)
+                        @byName, @from, @to, @pcs)
                 returning id, created_at, line_id, line_name, domain, department,
                           reason, entered_by_code, entered_by_name, from_at, to_at,
-                          approved_at, approved_by_code, approved_by_name
+                          approved_at, approved_by_code, approved_by_name,
+                          pieces_lost
                 """);
 
             cmd.Parameters.Add(new NpgsqlParameter("line", entry.LineId));
@@ -130,6 +136,11 @@ namespace FactoryManagementSystem.Services.Downtime
             {
                 NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
             });
+            cmd.Parameters.Add(
+                new NpgsqlParameter("pcs", (object?)entry.PiecesLost ?? DBNull.Value)
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer,
+                });
 
             await using var r = await cmd.ExecuteReaderAsync();
             if (!await r.ReadAsync())

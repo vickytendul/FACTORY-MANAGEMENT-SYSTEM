@@ -40,6 +40,15 @@ namespace FactoryManagementSystem.Controllers
             e.ApprovedByCode,
             e.ApprovedByName,
             e.IsApproved,
+            // The GM having read it and refused it, with the reason.
+            // A third state, because a missing approval used to mean
+            // both "nobody has looked" and "looked at and refused".
+            e.RejectedAt,
+            e.RejectedByCode,
+            e.RejectedByName,
+            e.RejectedNote,
+            e.IsRejected,
+            e.IsDecided,
             // Worked out here rather than on each screen, so the form,
             // the list and any report that adds them up cannot round
             // the same stoppage three ways.
@@ -95,10 +104,12 @@ namespace FactoryManagementSystem.Controllers
         // a mechanic, and a sheet that can only say "four hours" sends
         // somebody to ask the question again.
         //
-        // Only approved stoppages are counted. A written stoppage the GM
-        // has not signed comes down as PendingMinutes instead, so the
-        // sheet can say minutes are outstanding rather than quietly
-        // reading as though the line never stood.
+        // Only approved stoppages are counted. The rest come down
+        // beside the total, split by what is actually true of them:
+        // PendingMinutes is nobody has decided yet, RejectedMinutes is
+        // the GM read it and would not have it. Neither is in the
+        // column, but the sheet can say which is which rather than
+        // quietly reading as though the line never stood.
         //
         // The arithmetic is here and not on the screen so the sheet,
         // its exported file and anything built on this later cannot add
@@ -140,13 +151,26 @@ namespace FactoryManagementSystem.Controllers
                     .GroupBy(e => e.LineId)
                     .ToDictionary(g => g.Key, g => g.Sum(e => e.Minutes!.Value));
 
-                // What is written down and still waiting. Sent so the
-                // sheet can say minutes are outstanding rather than
-                // silently reading as though there were none - a
-                // stoppage nobody approves would otherwise never appear
-                // anywhere on the OWE report at all.
+                // What is written down and still waiting on somebody.
+                // Sent so the sheet can say minutes are outstanding
+                // rather than silently reading as though there were
+                // none - a stoppage nobody has reached would otherwise
+                // never appear anywhere on the OWE report at all.
+                //
+                // Waiting means undecided. A refused stoppage is not
+                // waiting for anything: counting it here would keep a
+                // settled figure in a queue and the star beside the OWE
+                // column would never go out.
                 var pendingByLine = stoppages
-                    .Where(e => e.LineId > 0 && e.Minutes != null && !e.IsApproved)
+                    .Where(e => e.LineId > 0 && e.Minutes != null && !e.IsDecided)
+                    .GroupBy(e => e.LineId)
+                    .ToDictionary(g => g.Key, g => g.Sum(e => e.Minutes!.Value));
+
+                // Read and refused. Neither counted nor outstanding,
+                // but sent rather than dropped: a figure that vanishes
+                // between two reports is one somebody goes looking for.
+                var rejectedByLine = stoppages
+                    .Where(e => e.LineId > 0 && e.Minutes != null && e.IsRejected)
                     .GroupBy(e => e.LineId)
                     .ToDictionary(g => g.Key, g => g.Sum(e => e.Minutes!.Value));
 
@@ -158,6 +182,7 @@ namespace FactoryManagementSystem.Controllers
                 var lineIds = feedingByLine.Keys
                     .Concat(recordedByLine.Keys)
                     .Concat(pendingByLine.Keys)
+                    .Concat(rejectedByLine.Keys)
                     .Distinct()
                     .OrderBy(id => id)
                     .ToList();
@@ -181,6 +206,7 @@ namespace FactoryManagementSystem.Controllers
                         FeedingMinutes = fed,
                         RecordedMinutes = rec,
                         PendingMinutes = pendingByLine.GetValueOrDefault(id),
+                        RejectedMinutes = rejectedByLine.GetValueOrDefault(id),
                         DowntimeMinutes = fed + rec,
                     };
                 }).ToList();
@@ -193,6 +219,7 @@ namespace FactoryManagementSystem.Controllers
                     TotalFeedingMinutes = lines.Sum(x => x.FeedingMinutes),
                     TotalRecordedMinutes = lines.Sum(x => x.RecordedMinutes),
                     TotalPendingMinutes = lines.Sum(x => x.PendingMinutes),
+                    TotalRejectedMinutes = lines.Sum(x => x.RejectedMinutes),
                     TotalDowntimeMinutes = lines.Sum(x => x.DowntimeMinutes),
                 });
             }
@@ -440,6 +467,86 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // POST:   api/Downtime/{id}/reject   { note }
+        // DELETE: api/Downtime/{id}/reject
+        //
+        // The GM reading a stoppage and not accepting it, or putting it
+        // back in the queue.
+        //
+        // The third state. Without it a refusal and an unread entry are
+        // the same row - the report says WAITING to both, so a decision
+        // that has been made reads as a queue, and the person who wrote
+        // it never finds out what was wrong with it.
+        //
+        // The note is required. A refusal with no reason is the same
+        // failure as a stoppage with no reason, one level up: nothing
+        // is learned and the same entry comes back tomorrow.
+        [HttpPost("{id:int}/reject")]
+        public Task<IActionResult> Reject(int id, [FromBody] DowntimeReject? body)
+            => _SetRejection(id, true, body?.Note);
+
+        [HttpDelete("{id:int}/reject")]
+        public Task<IActionResult> Unreject(int id)
+            => _SetRejection(id, false, null);
+
+        private async Task<IActionResult> _SetRejection(
+            int id, bool reject, string? note)
+        {
+            try
+            {
+                // The same people who may sign. Refusing an account is
+                // a reading of it, not a correction of it, and the
+                // person who wrote it refusing their own is not a
+                // review.
+                var caller = CallerCode();
+                if (caller != null
+                    && !User.IsInRole("Admin") && !User.IsInRole("Manager"))
+                {
+                    return StatusCode(403, new
+                    {
+                        Success = false,
+                        Message = reject
+                            ? "Only the GM or a manager can refuse a stoppage."
+                            : "Only the GM or a manager can reopen a stoppage.",
+                    });
+                }
+
+                var reason = (note ?? string.Empty).Trim();
+                if (reject && reason.Length < 3)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "Say why it is not accepted.",
+                    });
+                }
+
+                var entry = await _entries.GetByIdAsync(id);
+                if (entry == null)
+                    return NotFound(new { Success = false, Message = "No such entry." });
+
+                await _entries.SetRejectionAsync(
+                    id,
+                    reject ? (caller ?? "open-access") : null,
+                    reject ? (User.Identity?.Name ?? string.Empty) : null,
+                    reject ? reason : null);
+
+                var after = await _entries.GetByIdAsync(id);
+                return Ok(new
+                {
+                    Success = true,
+                    Entry = after == null ? null : Public(after),
+                    Message = reject
+                        ? "Marked as not accepted."
+                        : "Back in the queue.",
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // DELETE: api/Downtime/{id}
         //
         // Only the person who wrote it, or an Admin or Manager. A typed
@@ -504,5 +611,12 @@ namespace FactoryManagementSystem.Controllers
 
         public string? EnteredByCode { get; set; }
         public string? EnteredByName { get; set; }
+    }
+
+    /// Why the GM would not accept a stoppage. Required - see
+    /// DowntimeController.Reject.
+    public class DowntimeReject
+    {
+        public string? Note { get; set; }
     }
 }

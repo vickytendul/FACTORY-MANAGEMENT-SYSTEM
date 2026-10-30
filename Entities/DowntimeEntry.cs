@@ -93,7 +93,29 @@ namespace FactoryManagementSystem.Entities
         public string? ApprovedByCode { get; set; }
         public string? ApprovedByName { get; set; }
 
+        /// The GM reading it and not accepting it.
+        ///
+        /// A third state, because a null approval was doing two jobs:
+        /// nobody has read this yet, and the GM read it and would not
+        /// sign it. The report could only say WAITING to both, so a
+        /// decision that had been made looked like a queue.
+        ///
+        /// [RejectedNote] is the point of it. A refusal with no reason
+        /// is the same failure as a stoppage with no reason, one level
+        /// up - the person who wrote the entry learns nothing and
+        /// writes the same one again tomorrow.
+        public DateTime? RejectedAt { get; set; }
+        public string? RejectedByCode { get; set; }
+        public string? RejectedByName { get; set; }
+        public string? RejectedNote { get; set; }
+
         public bool IsApproved => ApprovedAt != null;
+
+        public bool IsRejected => RejectedAt != null;
+
+        /// Decided one way or the other. What is NOT this is the queue,
+        /// and the queue is what the report opens asking about.
+        public bool IsDecided => IsApproved || IsRejected;
 
         /// The six the floor uses. In the floor's own order, which is
         /// the order they are read out in, not alphabetical.

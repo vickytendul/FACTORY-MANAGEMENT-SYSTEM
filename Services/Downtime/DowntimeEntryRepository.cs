@@ -21,7 +21,9 @@ namespace FactoryManagementSystem.Services.Downtime
             select id, created_at, line_id, line_name, domain, department,
                    reason, entered_by_code, entered_by_name, from_at, to_at,
                    approved_at, approved_by_code, approved_by_name,
-                   pieces_lost
+                   pieces_lost,
+                   rejected_at, rejected_by_code, rejected_by_name,
+                   rejected_note
             from public.downtime_entries
             """;
 
@@ -44,6 +46,10 @@ namespace FactoryManagementSystem.Services.Downtime
             // Null stays null. Nobody having stated the figure is not
             // the same as nothing having been lost.
             PiecesLost = r.IsDBNull(14) ? null : r.GetInt32(14),
+            RejectedAt = r.IsDBNull(15) ? null : r.GetDateTime(15),
+            RejectedByCode = r.IsDBNull(16) ? null : r.GetString(16),
+            RejectedByName = r.IsDBNull(17) ? null : r.GetString(17),
+            RejectedNote = r.IsDBNull(18) ? null : r.GetString(18),
         };
 
         /// One day's entries, newest first - the way the page that
@@ -116,7 +122,9 @@ namespace FactoryManagementSystem.Services.Downtime
                 returning id, created_at, line_id, line_name, domain, department,
                           reason, entered_by_code, entered_by_name, from_at, to_at,
                           approved_at, approved_by_code, approved_by_name,
-                          pieces_lost
+                          pieces_lost,
+                          rejected_at, rejected_by_code, rejected_by_name,
+                          rejected_note
                 """);
 
             cmd.Parameters.Add(new NpgsqlParameter("line", entry.LineId));
@@ -154,6 +162,12 @@ namespace FactoryManagementSystem.Services.Downtime
         /// One statement either way, so two people pressing at once end
         /// at the state the second one asked for rather than at
         /// whichever read happened to be stale.
+        ///
+        /// Signing also clears any refusal. The two are states of the
+        /// same decision, not two flags - a row claiming to be both is
+        /// a row every report would count differently, and the GM
+        /// changing their mind is the ordinary case rather than the odd
+        /// one.
         public async Task<bool> SetApprovalAsync(
             int id, string? by, string? name)
         {
@@ -170,7 +184,11 @@ namespace FactoryManagementSystem.Services.Downtime
                       update public.downtime_entries
                          set approved_at = now(),
                              approved_by_code = @by,
-                             approved_by_name = @name
+                             approved_by_name = @name,
+                             rejected_at = null,
+                             rejected_by_code = null,
+                             rejected_by_name = null,
+                             rejected_note = null
                        where id = @id
                       """);
 
@@ -179,6 +197,51 @@ namespace FactoryManagementSystem.Services.Downtime
             {
                 cmd.Parameters.Add(new NpgsqlParameter("by", by));
                 cmd.Parameters.Add(new NpgsqlParameter("name", name ?? string.Empty));
+            }
+            return await cmd.ExecuteNonQueryAsync() == 1;
+        }
+
+        /// Refuses one stoppage with a reason, or puts it back in the
+        /// queue when [by] is null.
+        ///
+        /// The note is not optional. A refusal with no reason tells the
+        /// person who wrote the entry nothing, and they write the same
+        /// one again tomorrow - which is the failure this whole state
+        /// exists to stop.
+        ///
+        /// Refusing clears any signature, for the same reason signing
+        /// clears any refusal.
+        public async Task<bool> SetRejectionAsync(
+            int id, string? by, string? name, string? note)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                by == null
+                    ? """
+                      update public.downtime_entries
+                         set rejected_at = null,
+                             rejected_by_code = null,
+                             rejected_by_name = null,
+                             rejected_note = null
+                       where id = @id
+                      """
+                    : """
+                      update public.downtime_entries
+                         set rejected_at = now(),
+                             rejected_by_code = @by,
+                             rejected_by_name = @name,
+                             rejected_note = @note,
+                             approved_at = null,
+                             approved_by_code = null,
+                             approved_by_name = null
+                       where id = @id
+                      """);
+
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+            if (by != null)
+            {
+                cmd.Parameters.Add(new NpgsqlParameter("by", by));
+                cmd.Parameters.Add(new NpgsqlParameter("name", name ?? string.Empty));
+                cmd.Parameters.Add(new NpgsqlParameter("note", note ?? string.Empty));
             }
             return await cmd.ExecuteNonQueryAsync() == 1;
         }

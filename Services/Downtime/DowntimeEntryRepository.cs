@@ -156,6 +156,66 @@ namespace FactoryManagementSystem.Services.Downtime
             return Read(r);
         }
 
+        /// Rewrites one stoppage and puts it back in the queue.
+        ///
+        /// The second half is not a separate step on purpose. An entry
+        /// is edited because somebody is answering a refusal, and an
+        /// edit that left the refusal standing would leave the
+        /// corrected version wearing the old verdict - read as settled
+        /// by the OWE sheet, and never shown to the GM again.
+        ///
+        /// entry_day is left alone. The stoppage belongs to the day it
+        /// happened on, and the times are rewritten within it; moving a
+        /// correction onto today would take it off the report it was
+        /// raised against.
+        public async Task<bool> UpdateAsync(DowntimeEntry entry)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                update public.downtime_entries
+                   set line_id = @line,
+                       line_name = @lineName,
+                       domain = @domain,
+                       department = @dept,
+                       reason = @reason,
+                       from_at = @from,
+                       to_at = @to,
+                       pieces_lost = @pcs,
+                       rejected_at = null,
+                       rejected_by_code = null,
+                       rejected_by_name = null,
+                       rejected_note = null
+                 where id = @id
+                   and approved_at is null
+                """);
+
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)entry.Id));
+            cmd.Parameters.Add(new NpgsqlParameter("line", entry.LineId));
+            cmd.Parameters.Add(new NpgsqlParameter("lineName", entry.LineName ?? string.Empty));
+            cmd.Parameters.Add(new NpgsqlParameter("domain", entry.Domain));
+            cmd.Parameters.Add(new NpgsqlParameter("dept", entry.Department));
+            cmd.Parameters.Add(new NpgsqlParameter("reason", entry.Reason));
+            cmd.Parameters.Add(new NpgsqlParameter("from", (object?)entry.FromAt ?? DBNull.Value)
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            });
+            cmd.Parameters.Add(new NpgsqlParameter("to", (object?)entry.ToAt ?? DBNull.Value)
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.TimestampTz,
+            });
+            cmd.Parameters.Add(
+                new NpgsqlParameter("pcs", (object?)entry.PiecesLost ?? DBNull.Value)
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer,
+                });
+
+            // The approved_at check is in the statement rather than in
+            // a read beforehand, so a signature landing between the two
+            // cannot be quietly written over. No rows changed means it
+            // was signed while this was being typed, and the caller
+            // says so.
+            return await cmd.ExecuteNonQueryAsync() == 1;
+        }
+
         /// Signs one stoppage off, or takes the signature back when
         /// [by] is null.
         ///

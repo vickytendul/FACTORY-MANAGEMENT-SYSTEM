@@ -258,140 +258,242 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// Everything a stoppage has to satisfy, in one place.
+        ///
+        /// Written once because it is checked twice - a new entry and a
+        /// correction of a refused one are the same thing with the same
+        /// rules, and two copies of "a reason is at least three
+        /// characters" are two rules by the end of the month.
+        ///
+        /// Returns the refusal to send, or null and a filled [clean]
+        /// when the body is good.
+        private static IActionResult? Validate(
+            DowntimeCreate body, out DowntimeEntry clean)
+        {
+            clean = new DowntimeEntry();
+
+            if (body.LineId <= 0)
+                return new BadRequestObjectResult(
+                    new { Success = false, Message = "Pick a line." });
+
+            // Checked against the lists rather than taken as sent, so
+            // the report can group on these two columns later. A
+            // free-typed department is a department that will be
+            // spelled three ways by Friday.
+            var domain = DowntimeEntry.Canonical(DowntimeEntry.Domains, body.Domain);
+            if (domain == null)
+            {
+                return new BadRequestObjectResult(new
+                {
+                    Success = false,
+                    Message = "Pick a domain: "
+                            + string.Join(", ", DowntimeEntry.Domains) + ".",
+                });
+            }
+
+            var department = DowntimeEntry.Canonical(
+                DowntimeEntry.Departments, body.Department);
+            if (department == null)
+            {
+                return new BadRequestObjectResult(new
+                {
+                    Success = false,
+                    Message = "Pick a department: "
+                            + string.Join(", ", DowntimeEntry.Departments) + ".",
+                });
+            }
+
+            var reason = (body.Reason ?? string.Empty).Trim();
+            if (reason.Length < 3)
+            {
+                // The whole point of the record. A domain and a
+                // department without one say a line stopped and leave
+                // nobody able to say why a month later.
+                return new BadRequestObjectResult(
+                    new { Success = false, Message = "Say what happened." });
+            }
+
+            // How long it stood. Required, because a down time report
+            // with no duration is a list of complaints: the minutes are
+            // the only part of this anybody adds up.
+            if (body.FromAt == null || body.ToAt == null)
+            {
+                return new BadRequestObjectResult(new
+                {
+                    Success = false,
+                    Message = "Say when the line stopped and when it ran again.",
+                });
+            }
+
+            var from = body.FromAt.Value.ToUniversalTime();
+            var to = body.ToAt.Value.ToUniversalTime();
+
+            if (to <= from)
+            {
+                return new BadRequestObjectResult(new
+                {
+                    Success = false,
+                    Message = "The line cannot have started again before it stopped.",
+                });
+            }
+
+            // A day and a half of down time on one line is a typo far
+            // more often than it is a day and a half, and the figure
+            // goes straight into a report nobody re-reads.
+            if (to - from > TimeSpan.FromHours(12))
+            {
+                return new BadRequestObjectResult(new
+                {
+                    Success = false,
+                    Message = "That is longer than a shift - check the times.",
+                });
+            }
+
+            // What it cost in garments. Optional: a stoppage written
+            // down while it is still going on is a real entry, and the
+            // alternative to leaving this empty is somebody typing a
+            // nought to get past the field.
+            var pieces = body.PiecesLost;
+            if (pieces != null)
+            {
+                if (pieces < 0)
+                {
+                    return new BadRequestObjectResult(new
+                    {
+                        Success = false,
+                        Message = "Pieces lost cannot be negative.",
+                    });
+                }
+
+                // A line makes something like eight hundred in a day.
+                // Five figures against one stoppage is a slip of the
+                // hand far more often than it is a count, and it goes
+                // straight into a column that is summed.
+                if (pieces > 20000)
+                {
+                    return new BadRequestObjectResult(new
+                    {
+                        Success = false,
+                        Message = "That is more pieces than a line makes in a "
+                                + "month - check the figure.",
+                    });
+                }
+            }
+
+            clean = new DowntimeEntry
+            {
+                LineId = body.LineId,
+                LineName = (body.LineName ?? string.Empty).Trim(),
+                Domain = domain,
+                Department = department,
+                Reason = reason,
+                FromAt = from,
+                ToAt = to,
+                PiecesLost = pieces,
+            };
+            return null;
+        }
+
+        // PUT: api/Downtime/{id}
+        //
+        // Rewriting a stoppage, which is how a refusal gets answered.
+        //
+        // The GM says the capacity figure is wrong, or the department
+        // is, or the reason says nothing. Deleting and retyping loses
+        // who wrote it and when, and leaves two rows in the day for
+        // anybody reading the table directly. So the entry is corrected
+        // in place and goes back in the queue - the refusal is cleared
+        // by the same statement, because a corrected entry still
+        // wearing the old verdict would never be looked at again.
+        //
+        // An approved entry is not editable. The signature is on these
+        // exact figures; changing them underneath it would leave the
+        // GM's name on something he never read. Withdraw first.
+        [HttpPut("{id:int}")]
+        public async Task<IActionResult> Update(
+            int id, [FromBody] DowntimeCreate body)
+        {
+            try
+            {
+                var entry = await _entries.GetByIdAsync(id);
+                if (entry == null)
+                    return NotFound(new { Success = false, Message = "No such entry." });
+
+                // The person who wrote it, or the office. One line
+                // rewriting another line's account of a stoppage is how
+                // a report quietly loses the bad days - the same reason
+                // delete is restricted.
+                var caller = CallerCode();
+                var mine = caller == null
+                        || string.Equals(entry.EnteredByCode, caller,
+                                         StringComparison.OrdinalIgnoreCase);
+                if (!mine && !User.IsInRole("Admin") && !User.IsInRole("Manager"))
+                {
+                    return StatusCode(403, new
+                    {
+                        Success = false,
+                        Message = "Only the person who wrote this entry can change it.",
+                    });
+                }
+
+                if (entry.IsApproved)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "This one is already approved. Ask for the "
+                                + "approval to be withdrawn before changing it.",
+                    });
+                }
+
+                var bad = Validate(body, out var clean);
+                if (bad != null) return bad;
+
+                clean.Id = id;
+                if (!await _entries.UpdateAsync(clean))
+                {
+                    // The statement refuses an approved row, so nothing
+                    // changed means it was signed while this was being
+                    // typed.
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "It was approved while you were editing. "
+                                + "Nothing was changed.",
+                    });
+                }
+
+                var after = await _entries.GetByIdAsync(id);
+                return Ok(new
+                {
+                    Success = true,
+                    Entry = after == null ? null : Public(after),
+                    Message = "Changed, and back with the GM.",
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // POST: api/Downtime
         [HttpPost]
         public async Task<IActionResult> Create([FromBody] DowntimeCreate body)
         {
             try
             {
-                if (body.LineId <= 0)
-                    return BadRequest(new { Success = false, Message = "Pick a line." });
+                var bad = Validate(body, out var clean);
+                if (bad != null) return bad;
 
-                // Checked against the lists rather than taken as sent,
-                // so the report can group on these two columns later. A
-                // free-typed department is a department that will be
-                // spelled three ways by Friday.
-                var domain = DowntimeEntry.Canonical(DowntimeEntry.Domains, body.Domain);
-                if (domain == null)
-                {
-                    return BadRequest(new
-                    {
-                        Success = false,
-                        Message = "Pick a domain: "
-                                + string.Join(", ", DowntimeEntry.Domains) + ".",
-                    });
-                }
+                // The token where there is one, and only otherwise what
+                // the screen said. A name typed into a form is a claim;
+                // a token is not.
+                clean.EnteredByCode = CallerCode()
+                                    ?? (body.EnteredByCode ?? string.Empty).Trim();
+                clean.EnteredByName = (body.EnteredByName ?? string.Empty).Trim();
 
-                var department = DowntimeEntry.Canonical(
-                    DowntimeEntry.Departments, body.Department);
-                if (department == null)
-                {
-                    return BadRequest(new
-                    {
-                        Success = false,
-                        Message = "Pick a department: "
-                                + string.Join(", ", DowntimeEntry.Departments) + ".",
-                    });
-                }
-
-                var reason = (body.Reason ?? string.Empty).Trim();
-                if (reason.Length < 3)
-                {
-                    // The whole point of the record. A domain and a
-                    // department without one say a line stopped and
-                    // leave nobody able to say why a month later.
-                    return BadRequest(new
-                    {
-                        Success = false,
-                        Message = "Say what happened.",
-                    });
-                }
-
-                // How long it stood. Required, because a down time
-                // report with no duration is a list of complaints: the
-                // minutes are the only part of this anybody adds up.
-                if (body.FromAt == null || body.ToAt == null)
-                {
-                    return BadRequest(new
-                    {
-                        Success = false,
-                        Message = "Say when the line stopped and when it ran again.",
-                    });
-                }
-
-                var from = body.FromAt.Value.ToUniversalTime();
-                var to = body.ToAt.Value.ToUniversalTime();
-
-                if (to <= from)
-                {
-                    return BadRequest(new
-                    {
-                        Success = false,
-                        Message = "The line cannot have started again before it stopped.",
-                    });
-                }
-
-                // A day and a half of down time on one line is a typo
-                // far more often than it is a day and a half, and the
-                // figure goes straight into a report nobody re-reads.
-                if (to - from > TimeSpan.FromHours(12))
-                {
-                    return BadRequest(new
-                    {
-                        Success = false,
-                        Message = "That is longer than a shift - check the times.",
-                    });
-                }
-
-                // What it cost in garments. Optional: a stoppage written
-                // down while it is still going on is a real entry, and
-                // the alternative to leaving this empty is somebody
-                // typing a nought to get past the field.
-                var pieces = body.PiecesLost;
-                if (pieces != null)
-                {
-                    if (pieces < 0)
-                    {
-                        return BadRequest(new
-                        {
-                            Success = false,
-                            Message = "Pieces lost cannot be negative.",
-                        });
-                    }
-
-                    // A line makes something like eight hundred in a
-                    // day. Five figures against one stoppage is a slip
-                    // of the hand far more often than it is a count,
-                    // and it goes straight into a column that is summed.
-                    if (pieces > 20000)
-                    {
-                        return BadRequest(new
-                        {
-                            Success = false,
-                            Message = "That is more pieces than a line makes in a "
-                                    + "month - check the figure.",
-                        });
-                    }
-                }
-
-                var saved = await _entries.CreateAsync(new DowntimeEntry
-                {
-                    FromAt = from,
-                    ToAt = to,
-                    PiecesLost = pieces,
-                    LineId = body.LineId,
-                    LineName = (body.LineName ?? string.Empty).Trim(),
-                    Domain = domain,
-                    Department = department,
-                    Reason = reason,
-                    // The token where there is one, and only otherwise
-                    // what the screen said. A name typed into a form is
-                    // a claim; a token is not.
-                    EnteredByCode = CallerCode()
-                                    ?? (body.EnteredByCode ?? string.Empty).Trim(),
-                    EnteredByName = (body.EnteredByName ?? string.Empty).Trim(),
-                });
-
+                var saved = await _entries.CreateAsync(clean);
                 return Ok(new { Success = true, Entry = Public(saved) });
             }
             catch (Exception ex)

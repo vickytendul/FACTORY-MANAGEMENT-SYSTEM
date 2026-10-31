@@ -23,7 +23,8 @@ namespace FactoryManagementSystem.Services.Downtime
                    approved_at, approved_by_code, approved_by_name,
                    pieces_lost,
                    rejected_at, rejected_by_code, rejected_by_name,
-                   rejected_note
+                   rejected_note,
+                   entry_day
             from public.downtime_entries
             """;
 
@@ -50,6 +51,7 @@ namespace FactoryManagementSystem.Services.Downtime
             RejectedByCode = r.IsDBNull(16) ? null : r.GetString(16),
             RejectedByName = r.IsDBNull(17) ? null : r.GetString(17),
             RejectedNote = r.IsDBNull(18) ? null : r.GetString(18),
+            EntryDay = r.GetDateTime(19),
         };
 
         /// One day's entries, newest first - the way the page that
@@ -124,7 +126,8 @@ namespace FactoryManagementSystem.Services.Downtime
                           approved_at, approved_by_code, approved_by_name,
                           pieces_lost,
                           rejected_at, rejected_by_code, rejected_by_name,
-                          rejected_note
+                          rejected_note,
+                          entry_day
                 """);
 
             cmd.Parameters.Add(new NpgsqlParameter("line", entry.LineId));

@@ -18,6 +18,16 @@ namespace FactoryManagementSystem.Entities
 
         public DateTime CreatedAt { get; set; }
 
+        /// The factory day this belongs to, as a plain date.
+        ///
+        /// Set from Asia/Kolkata at insert and never moved afterwards,
+        /// not even when the entry is corrected weeks later. Sent to
+        /// the app because a report that groups by day has to group by
+        /// the same day the server filtered on - working it out again
+        /// from a timestamp in whatever zone the browser happens to be
+        /// in is how a stoppage lands in the wrong column.
+        public DateTime EntryDay { get; set; }
+
         public int LineId { get; set; }
 
         /// The name as it was when the entry was made, so an old entry

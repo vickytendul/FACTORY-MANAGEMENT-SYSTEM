@@ -29,6 +29,10 @@ namespace FactoryManagementSystem.Controllers
         {
             e.Id,
             e.CreatedAt,
+            // The factory day, as the server filtered on it. A report
+            // that groups by day must group on this and not on a
+            // timestamp re-read in the browser's own zone.
+            EntryDay = e.EntryDay.ToString("yyyy-MM-dd"),
             e.LineId,
             e.LineName,
             e.Domain,

@@ -1,6 +1,7 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services.Downtime;
 using FactoryManagementSystem.Services.Feeding;
+using FactoryManagementSystem.Services.Machine;
 using Microsoft.AspNetCore.Mvc;
 
 namespace FactoryManagementSystem.Controllers
@@ -17,12 +18,16 @@ namespace FactoryManagementSystem.Controllers
     {
         private readonly DowntimeEntryRepository _entries;
         private readonly FeedingRequestRepository _feeding;
+        private readonly MachineRequestRepository _machines;
 
         public DowntimeController(
-            DowntimeEntryRepository entries, FeedingRequestRepository feeding)
+            DowntimeEntryRepository entries,
+            FeedingRequestRepository feeding,
+            MachineRequestRepository machines)
         {
             _entries = entries;
             _feeding = feeding;
+            _machines = machines;
         }
 
         private static object Public(DowntimeEntry e) => new
@@ -92,21 +97,30 @@ namespace FactoryManagementSystem.Controllers
 
         // GET: api/Downtime/by-line?from=2026-10-01&to=2026-10-31
         //
-        // What a line lost over a period, from both places it can be
-        // lost, added up.
+        // What a line lost over a period, from all three places it can
+        // be lost, added up.
         //
-        // Two different kinds of thing, deliberately summed into one
+        // Three different kinds of thing, deliberately summed into one
         // figure because that is what the OWE sheet's column is: time
-        // the line was not sewing. One is measured by a clock nobody
-        // can argue with - a feeding request that ran past the four
-        // working hours it was allowed - and the other is somebody
-        // writing down when a machine stopped and when it ran again.
+        // the line was not sewing.
         //
-        // The two parts come down beside the total as well as inside
-        // it. A line showing four hours lost is a different conversation
-        // depending on whether it was waiting for cloth or waiting for
-        // a mechanic, and a sheet that can only say "four hours" sends
-        // somebody to ask the question again.
+        //   feeding   a request that ran past the four working hours it
+        //             was allowed. A clock, which nobody can argue with.
+        //   machine   a request for a mechanic, from the minute the line
+        //             called to the minute the machine ran again. Also a
+        //             clock, and with two people's agreement on it - one
+        //             called, one came - which is why it needs no
+        //             approval.
+        //   recorded  somebody writing down when a line stopped and when
+        //             it started. An account, not a measurement, which
+        //             is why only the signed ones are in the total.
+        //
+        // The parts come down beside the total as well as inside it. A
+        // line showing four hours lost is a different conversation
+        // depending on whether it was waiting for cloth, waiting for a
+        // mechanic, or standing for a reason somebody typed - and a
+        // sheet that can only say "four hours" sends somebody to ask
+        // the question again.
         //
         // Only approved stoppages are counted. The rest come down
         // beside the total, split by what is actually true of them:
@@ -130,6 +144,7 @@ namespace FactoryManagementSystem.Controllers
 
                 var requests = await _feeding.GetForRangeAsync(start, end);
                 var stoppages = await _entries.GetForRangeAsync(start, end);
+                var machines = await _machines.GetForRangeAsync(start, end);
 
                 var feedingByLine = requests
                     .Where(r => r.LineId > 0)
@@ -137,6 +152,26 @@ namespace FactoryManagementSystem.Controllers
                     .ToDictionary(
                         g => g.Key,
                         g => (int)Math.Round(g.Sum(r => r.Downtime.TotalMinutes)));
+
+                // A mechanic called for, from the minute the line rang
+                // to the minute the machine ran again.
+                //
+                // In the total without anybody approving it, unlike a
+                // typed stoppage. It is a clock rather than an account,
+                // and two people have already agreed on it - the line
+                // raised it and the mechanic came - which is a stronger
+                // record than one person's sentence that the GM then
+                // has to accept.
+                //
+                // Cancelled requests are left out: raised and then not
+                // needed is not a machine that stopped.
+                var machineByLine = machines
+                    .Where(m => m.LineId > 0
+                             && m.Stage != MachineRequest.StageCancelled)
+                    .GroupBy(m => m.LineId)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => (int)Math.Round(g.Sum(m => m.Downtime.TotalMinutes)));
 
                 // Approved stoppages only.
                 //
@@ -184,6 +219,7 @@ namespace FactoryManagementSystem.Controllers
                 // signed, which would otherwise have nothing to carry
                 // its pending figure.
                 var lineIds = feedingByLine.Keys
+                    .Concat(machineByLine.Keys)
                     .Concat(recordedByLine.Keys)
                     .Concat(pendingByLine.Keys)
                     .Concat(rejectedByLine.Keys)
@@ -198,20 +234,24 @@ namespace FactoryManagementSystem.Controllers
                 // it is called now.
                 foreach (var e in stoppages.Where(e => e.LineId > 0 && e.LineName.Length > 0))
                     names[e.LineId] = e.LineName;
+                foreach (var m in machines.Where(m => m.LineId > 0 && m.LineName.Length > 0))
+                    names[m.LineId] = m.LineName;
 
                 var lines = lineIds.Select(id =>
                 {
                     var fed = feedingByLine.GetValueOrDefault(id);
+                    var mac = machineByLine.GetValueOrDefault(id);
                     var rec = recordedByLine.GetValueOrDefault(id);
                     return new
                     {
                         LineId = id,
                         LineName = names.GetValueOrDefault(id, string.Empty),
                         FeedingMinutes = fed,
+                        MachineMinutes = mac,
                         RecordedMinutes = rec,
                         PendingMinutes = pendingByLine.GetValueOrDefault(id),
                         RejectedMinutes = rejectedByLine.GetValueOrDefault(id),
-                        DowntimeMinutes = fed + rec,
+                        DowntimeMinutes = fed + mac + rec,
                     };
                 }).ToList();
 
@@ -221,6 +261,7 @@ namespace FactoryManagementSystem.Controllers
                     To = end,
                     Lines = lines,
                     TotalFeedingMinutes = lines.Sum(x => x.FeedingMinutes),
+                    TotalMachineMinutes = lines.Sum(x => x.MachineMinutes),
                     TotalRecordedMinutes = lines.Sum(x => x.RecordedMinutes),
                     TotalPendingMinutes = lines.Sum(x => x.PendingMinutes),
                     TotalRejectedMinutes = lines.Sum(x => x.RejectedMinutes),

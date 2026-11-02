@@ -52,6 +52,7 @@ namespace FactoryManagementSystem.Services.Users
         public const string IE = "IE";
         public const string Hr = "HR";
         public const string Quality = "Quality";
+        public const string Maintenance = "Maintenance";
         public const string None = "None";
 
         /// The tier for one employee code, or null when the floor and
@@ -144,6 +145,23 @@ namespace FactoryManagementSystem.Services.Users
             if (desig.Contains("HR")) return Hr;
 
             if (desig.Contains("MANAGER")) return Manager;
+
+            // The mechanics, and the incharge over them. Six people:
+            // four MECHANIC, one INCHARGE - MAINTENANCE and the one who
+            // issues needles.
+            //
+            // Before the sewing test below, and that placement is the
+            // whole reason this line is here rather than further down.
+            // That test takes anything whose designation contains
+            // INCHARGE, so INCHARGE - MAINTENANCE was landing in
+            // Production - the one person in the department who most
+            // needs to see the machine requests, filed with the line
+            // leaders instead.
+            //
+            // ELECTRICAL is deliberately not in here. Electricians
+            // answer for power and the building; a sewing machine that
+            // has stopped is a mechanic's.
+            if (section == "MAINTENANCE" || dept == "MAINTENANCE") return Maintenance;
 
             if (section == "IED" || dept == "IED") return IE;
             if (section == "CUTTING") return Cutting;

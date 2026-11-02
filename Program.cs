@@ -402,6 +402,9 @@ if (hasSupabase)
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.DowntimeEntryRepository>();
     // The day's plan, line by line. Same terms again.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.LineTargetRepository>();
+    // Machine requests - a line calling for a mechanic. Same terms
+    // again, and the same shape as the feeding requests beside them.
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Machine.MachineRequestRepository>();
 }
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch

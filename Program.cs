@@ -405,6 +405,8 @@ if (hasSupabase)
     // Machine requests - a line calling for a mechanic. Same terms
     // again, and the same shape as the feeding requests beside them.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Machine.MachineRequestRepository>();
+    // The trims store's online-control audit. Same terms again.
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Trims.TrimsAuditRepository>();
 }
 
 builder.Services.AddSingleton<ILayoutRepository>(sp => layoutsSource switch

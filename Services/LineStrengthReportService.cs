@@ -305,11 +305,18 @@ public class LineStrengthReportService
             if (code.Length == 0) continue;
 
             var current = result.GetValueOrDefault(tx.LineId);
+            var isCovered = coveredOnLine.Contains((tx.LineId, code.ToUpperInvariant()));
 
             // Covering on their OWN line is a same-line replacement, not a
             // loan - they are still standing here.
             if (lentOutToLine.TryGetValue(code, out var standingOn) && standingOn != tx.LineId)
             {
+                // Lending somebody out only empties the position they
+                // left. Put a replacement on it and the line is whole
+                // again - exactly as a covered absence is - so this
+                // costs nothing and is not reported as short.
+                if (isCovered) continue;
+
                 result[tx.LineId] = (current.AbsentUncovered, current.Covered, current.LentOut + 1);
                 continue;
             }
@@ -317,7 +324,7 @@ public class LineStrengthReportService
             if (!payroll.TryGetValue(code, out var status)) continue;
             if (!CompanyAttendanceService.IsUnavailable(status)) continue;
 
-            result[tx.LineId] = coveredOnLine.Contains((tx.LineId, code.ToUpperInvariant()))
+            result[tx.LineId] = isCovered
                 ? (current.AbsentUncovered, current.Covered + 1, current.LentOut)
                 : (current.AbsentUncovered + 1, current.Covered, current.LentOut);
         }

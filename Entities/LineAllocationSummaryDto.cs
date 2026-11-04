@@ -34,9 +34,12 @@ public class LineAllocationSummaryDto
     public int CoveredCount { get; set; }
 
     /// Allocated operators who were recorded today as covering somebody on
-    /// ANOTHER line - lent out. They came to work, so payroll has nothing
-    /// to say about them, but they are not standing on this line and the
-    /// position they left is empty. Each one costs a position here.
+    /// ANOTHER line - lent out - AND whose own position here was left
+    /// empty. They came to work, so payroll has nothing to say about them,
+    /// but they are not standing on this line. Each one costs a position.
+    ///
+    /// Lent out with a replacement put on the position is not counted: the
+    /// line is whole, and nothing on this card should say otherwise.
     public int LentOutCount { get; set; }
 
     /// What this line has produced today, per the Company production API.

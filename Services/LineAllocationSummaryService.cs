@@ -202,7 +202,12 @@ public class LineAllocationSummaryService
                 var made = production.TryGetValue(doc.LineId, out var p)
                     ? p
                     : default;
-                var manned = doc.AllocatedCount - adjustment.AbsentUncovered;
+                // Both come off the allocation on paper, and the two can
+                // never name the same person - see GetAbsenceAdjustmentAsync,
+                // which counts each allocated operator once.
+                var manned = doc.AllocatedCount
+                    - adjustment.AbsentUncovered
+                    - adjustment.LentOut;
                 if (manned < 0) manned = 0;
 
                 var (percentage, status) =
@@ -220,6 +225,7 @@ public class LineAllocationSummaryService
                     AllocatedOnPaperCount = doc.AllocatedCount,
                     AbsentUncoveredCount = adjustment.AbsentUncovered,
                     CoveredCount = adjustment.Covered,
+                    LentOutCount = adjustment.LentOut,
                     Output = made.Output,
                     Rejects = made.Rejects,
                     Percentage = percentage,

@@ -14,9 +14,10 @@ public class LineAllocationSummaryDto
     public int RequiredCount { get; set; }
 
     /// Positions actually manned today: the allocation on paper, less the
-    /// operators payroll reports away whom nobody is covering. Percentage
-    /// and Status follow this, so a line whose people did not turn up does
-    /// not keep reading as fully allocated.
+    /// operators payroll reports away whom nobody is covering, less the
+    /// operators who are standing on another line. Percentage and Status
+    /// follow this, so a line whose people did not turn up - or whose
+    /// people were lent out - does not keep reading as fully allocated.
     public int AllocatedCount { get; set; }
 
     /// The allocation on paper - MAIN positions with somebody assigned,
@@ -31,6 +32,12 @@ public class LineAllocationSummaryDto
     /// Allocated operators away today whose position somebody is covering
     /// - these still count as manned.
     public int CoveredCount { get; set; }
+
+    /// Allocated operators who were recorded today as covering somebody on
+    /// ANOTHER line - lent out. They came to work, so payroll has nothing
+    /// to say about them, but they are not standing on this line and the
+    /// position they left is empty. Each one costs a position here.
+    public int LentOutCount { get; set; }
 
     /// What this line has produced today, per the Company production API.
     /// Live, never persisted - it climbs all day.

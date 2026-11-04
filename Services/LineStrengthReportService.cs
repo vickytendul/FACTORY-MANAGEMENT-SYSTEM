@@ -241,24 +241,60 @@ public class LineStrengthReportService
     /// "Covered" means a replacement was recorded against that operator on
     /// that line for today - which is what Layout Allocation's Save Cover
     /// and the Attendance page both write.
-    public async Task<Dictionary<int, (int AbsentUncovered, int Covered)>> GetAbsenceAdjustmentAsync()
+    ///
+    /// "Lent out" is the same record read from the other end: an operator
+    /// allocated here who was recorded as covering somebody on ANOTHER
+    /// line today. Payroll has nothing to say about them - they came to
+    /// work - but they are not standing on this line, and the dashboard
+    /// was counting them as if they were. A line whose whole layout has
+    /// been lent away was reading as 15 of 25 manned with nobody on it.
+    ///
+    /// Each allocated operator is counted at most once across the three
+    /// figures. Lent out is tested first: somebody put them on another
+    /// line today, which is a deliberate act and more recent than
+    /// anything payroll has to say.
+    public async Task<Dictionary<int, (int AbsentUncovered, int Covered, int LentOut)>> GetAbsenceAdjustmentAsync()
     {
-        var result = new Dictionary<int, (int AbsentUncovered, int Covered)>();
+        var result = new Dictionary<int, (int AbsentUncovered, int Covered, int LentOut)>();
 
         var today = DateTime.Today;
+        // No early return on an empty payroll any more. Absence needs it,
+        // but lent out does not - that is this application's own record,
+        // and losing it because the Company API was unreachable would put
+        // the wrong number back on the dashboard.
         var payroll = await _companyAttendance.GetCodesForDateAsync(today);
-        if (payroll.Count == 0) return result;
 
         var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
         var attendance = await _attendance.GetForDateAsync(
             DateTime.SpecifyKind(today, DateTimeKind.Utc));
 
-        // EmployeeCode -> whether somebody is standing in for them today.
-        var coveredCodes = attendance
-            .Where(a => !string.IsNullOrWhiteSpace(a.EmployeeCode) &&
+        // (LineId, EmployeeCode) -> somebody is standing in for them on
+        // THAT line today.
+        //
+        // Scoped to the line, not to the code alone. A cover is recorded
+        // against a position on a line, and only mans that position. The
+        // set used to hold bare codes, so an operator allocated here who
+        // was away and covered on some other line came back as "covered"
+        // here too - and this line counted an empty position as manned.
+        var coveredOnLine = attendance
+            .Where(a => a.LineId > 0 &&
+                        !string.IsNullOrWhiteSpace(a.EmployeeCode) &&
                         !string.IsNullOrWhiteSpace(a.ReplacementEmployeeCode))
-            .Select(a => a.EmployeeCode.Trim())
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            .Select(a => (a.LineId, Code: a.EmployeeCode.Trim().ToUpperInvariant()))
+            .ToHashSet();
+
+        // The replacement's own code -> the line they were put on today.
+        // The same rows as above, read from the covering end. One person
+        // can only stand in one place, so a second row for the same code
+        // simply replaces the first rather than being counted twice.
+        var lentOutToLine = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var a in attendance)
+        {
+            if (a.LineId <= 0) continue;
+            var cover = (a.ReplacementEmployeeCode ?? string.Empty).Trim();
+            if (cover.Length == 0) continue;
+            lentOutToLine[cover] = a.LineId;
+        }
 
         foreach (var tx in layoutTransactions)
         {
@@ -268,13 +304,22 @@ public class LineStrengthReportService
             var code = (tx.EmployeeCode ?? string.Empty).Trim();
             if (code.Length == 0) continue;
 
+            var current = result.GetValueOrDefault(tx.LineId);
+
+            // Covering on their OWN line is a same-line replacement, not a
+            // loan - they are still standing here.
+            if (lentOutToLine.TryGetValue(code, out var standingOn) && standingOn != tx.LineId)
+            {
+                result[tx.LineId] = (current.AbsentUncovered, current.Covered, current.LentOut + 1);
+                continue;
+            }
+
             if (!payroll.TryGetValue(code, out var status)) continue;
             if (!CompanyAttendanceService.IsUnavailable(status)) continue;
 
-            var current = result.GetValueOrDefault(tx.LineId);
-            result[tx.LineId] = coveredCodes.Contains(code)
-                ? (current.AbsentUncovered, current.Covered + 1)
-                : (current.AbsentUncovered + 1, current.Covered);
+            result[tx.LineId] = coveredOnLine.Contains((tx.LineId, code.ToUpperInvariant()))
+                ? (current.AbsentUncovered, current.Covered + 1, current.LentOut)
+                : (current.AbsentUncovered + 1, current.Covered, current.LentOut);
         }
 
         return result;

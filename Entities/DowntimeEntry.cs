@@ -143,10 +143,13 @@ namespace FactoryManagementSystem.Entities
         /// else: the column is plain text on purpose and the app reads
         /// this list from the API, so a new word needs neither a
         /// migration nor a rebuild of the phone app.
+        /// Merchandise sits with the rest; Others is last, because a
+        /// catch-all read out in the middle of a list is a catch-all
+        /// people pick before they have finished reading.
         public static readonly string[] Departments =
         [
             "Quality", "Cutting", "Production", "HR", "IE",
-            "Maintenance", "Trims Store",
+            "Maintenance", "Trims Store", "Merchandise", "Others",
         ];
 
         /// Compared case-insensitively, because a value typed into an

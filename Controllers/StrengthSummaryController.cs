@@ -223,6 +223,20 @@ namespace FactoryManagementSystem.Controllers
                     tailor = Block(people.Where(p => p.IsTailor), allocatedLineByCode, postedDays, load.PlacedCodes),
                     others = Block(people.Where(p => !p.IsTailor), allocatedLineByCode, postedDays, load.PlacedCodes),
 
+                    // The same block over everybody, for the OVERALL tab,
+                    // which asks about the factory rather than about one
+                    // half of it.
+                    //
+                    // Counted here and not added up on the screen. The two
+                    // headcounts beside it would add up correctly, but
+                    // present and absent are averages rounded to a decimal
+                    // and adding two rounded numbers is not the same as
+                    // rounding their sum - the card would then be a tenth
+                    // of a person out from the TOTAL MANPOWER row under it,
+                    // which is exactly the kind of disagreement this whole
+                    // endpoint exists to prevent.
+                    overall = Block(people, allocatedLineByCode, postedDays, load.PlacedCodes),
+
                     // Two tables, not one list the screen has to sort out.
                     //
                     // INDIRECT is the departments: nobody on a line, and
@@ -283,6 +297,11 @@ namespace FactoryManagementSystem.Controllers
             {
                 var load = await LoadAsync(date, fromDate, toDate);
 
+                // "all" is the OVERALL card, which is one card over both
+                // halves - so its drill-down is both halves too. Anything
+                // else keeps the old reading, where only "others" means
+                // others and every other word means tailors.
+                var wantEverybody = string.Equals(category, "all", StringComparison.OrdinalIgnoreCase);
                 var wantTailors = !string.Equals(category, "others", StringComparison.OrdinalIgnoreCase);
 
                 // Which day "present" and "absent" are about. The last day
@@ -294,7 +313,7 @@ namespace FactoryManagementSystem.Controllers
                     : load.PostedDays[^1];
 
                 var people = load.People
-                    .Where(p => p.IsTailor == wantTailors)
+                    .Where(p => wantEverybody || p.IsTailor == wantTailors)
                     // Both ways of being placed, because the tile this
                     // opens from counts both. Excluding only the sewing
                     // lines listed everybody on a department work detail
@@ -332,7 +351,12 @@ namespace FactoryManagementSystem.Controllers
 
                 return Ok(new
                 {
-                    category = wantTailors ? "TAILOR" : "OTHERS",
+                    // What the dialog puts in its own title, so a list of
+                    // both halves is not headed with the name of one of
+                    // them.
+                    category = wantEverybody
+                        ? "FACTORY"
+                        : wantTailors ? "TAILOR" : "OTHERS",
                     fromDate = load.From,
                     toDate = load.To,
                     postedDayCount = load.PostedDays.Count,

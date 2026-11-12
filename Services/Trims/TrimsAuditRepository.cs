@@ -75,6 +75,7 @@ namespace FactoryManagementSystem.Services.Trims
             if (audit == null) return null;
 
             audit.Items = await GetItemsAsync(audit.Id);
+            audit.Photos = await GetPhotosAsync(audit.Id);
             return audit;
         }
 
@@ -92,6 +93,7 @@ namespace FactoryManagementSystem.Services.Trims
             if (audit == null) return null;
 
             audit.Items = await GetItemsAsync(audit.Id);
+            audit.Photos = await GetPhotosAsync(audit.Id);
             return audit;
         }
 
@@ -313,6 +315,133 @@ namespace FactoryManagementSystem.Services.Trims
             cmd.Parameters.Add(new NpgsqlParameter("code", byCode ?? string.Empty));
             cmd.Parameters.Add(new NpgsqlParameter("name", byName ?? string.Empty));
             cmd.Parameters.Add(new NpgsqlParameter("required", required));
+            return await cmd.ExecuteNonQueryAsync() == 1;
+        }
+
+        // ── photographs ───────────────────────────────────────────────
+
+        private const string PhotoCols = """
+            select id, audit_id, item_key, content_type, size_bytes,
+                   width, height, uploaded_at, uploaded_by
+            from public.trims_audit_photos
+            """;
+
+        /// Everything but the bytes. A list that carried them would be
+        /// megabytes before anybody had asked to look at one.
+        private static TrimsAuditPhoto ReadPhoto(NpgsqlDataReader r) => new()
+        {
+            Id = (int)r.GetInt64(0),
+            AuditId = (int)r.GetInt64(1),
+            ItemKey = r.GetString(2),
+            ContentType = r.GetString(3),
+            SizeBytes = r.GetInt32(4),
+            Width = r.IsDBNull(5) ? null : r.GetInt32(5),
+            Height = r.IsDBNull(6) ? null : r.GetInt32(6),
+            UploadedAt = r.GetDateTime(7),
+            UploadedBy = r.GetString(8),
+        };
+
+        public async Task<List<TrimsAuditPhoto>> GetPhotosAsync(int auditId)
+        {
+            await using var cmd = _dataSource.CreateCommand(
+                PhotoCols + " where audit_id = @id order by uploaded_at");
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)auditId));
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var list = new List<TrimsAuditPhoto>();
+            while (await r.ReadAsync()) list.Add(ReadPhoto(r));
+            return list;
+        }
+
+        /// One photograph, bytes and all. The only call that reads them.
+        public async Task<TrimsAuditPhoto?> GetPhotoAsync(int id)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                select id, audit_id, item_key, content_type, size_bytes,
+                       width, height, uploaded_at, uploaded_by, bytes
+                from public.trims_audit_photos
+                where id = @id
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            if (!await r.ReadAsync()) return null;
+            var photo = ReadPhoto(r);
+            photo.Bytes = (byte[])r[9];
+            return photo;
+        }
+
+        public async Task<int> CountPhotosAsync(int auditId, string itemKey)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                select count(*) from public.trims_audit_photos
+                 where audit_id = @id and item_key = @key
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)auditId));
+            cmd.Parameters.Add(new NpgsqlParameter("key", itemKey));
+            var n = await cmd.ExecuteScalarAsync();
+            return n is long v ? (int)v : 0;
+        }
+
+        /// Writes a photograph, but only onto an audit still open.
+        ///
+        /// The check is in the statement rather than in a read before
+        /// it, so a sign-off landing while somebody is uploading cannot
+        /// put a picture onto a result that has been signed.
+        public async Task<TrimsAuditPhoto?> AddPhotoAsync(TrimsAuditPhoto photo)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                insert into public.trims_audit_photos
+                    (audit_id, item_key, content_type, bytes, size_bytes,
+                     width, height, uploaded_by)
+                select @audit, @key, @type, @bytes, @size, @w, @h, @by
+                where exists (
+                    select 1 from public.trims_audits
+                     where id = @audit and submitted_at is null
+                )
+                returning id, audit_id, item_key, content_type, size_bytes,
+                          width, height, uploaded_at, uploaded_by
+                """);
+
+            cmd.Parameters.Add(new NpgsqlParameter("audit", (long)photo.AuditId));
+            cmd.Parameters.Add(new NpgsqlParameter("key", photo.ItemKey));
+            cmd.Parameters.Add(new NpgsqlParameter("type", photo.ContentType));
+            cmd.Parameters.Add(new NpgsqlParameter("bytes", photo.Bytes ?? [])
+            {
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Bytea,
+            });
+            cmd.Parameters.Add(new NpgsqlParameter("size", photo.SizeBytes));
+            cmd.Parameters.Add(
+                new NpgsqlParameter("w", (object?)photo.Width ?? DBNull.Value)
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer,
+                });
+            cmd.Parameters.Add(
+                new NpgsqlParameter("h", (object?)photo.Height ?? DBNull.Value)
+                {
+                    NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer,
+                });
+            cmd.Parameters.Add(new NpgsqlParameter("by", photo.UploadedBy ?? string.Empty));
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            return await r.ReadAsync() ? ReadPhoto(r) : null;
+        }
+
+        /// Removes a photograph, while the audit is still open.
+        ///
+        /// A signed audit keeps its pictures. They are part of what was
+        /// signed, and taking one off afterwards would change the
+        /// record somebody put their name to.
+        public async Task<bool> DeletePhotoAsync(int id)
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                delete from public.trims_audit_photos p
+                 using public.trims_audits a
+                 where p.id = @id
+                   and a.id = p.audit_id
+                   and a.submitted_at is null
+                """);
+            cmd.Parameters.Add(new NpgsqlParameter("id", (long)id));
             return await cmd.ExecuteNonQueryAsync() == 1;
         }
 

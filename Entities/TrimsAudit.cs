@@ -32,6 +32,15 @@ namespace FactoryManagementSystem.Entities
 
         public List<TrimsAuditItem> Items { get; set; } = [];
 
+        /// Every photograph on this audit, flat and keyed by checkpoint
+        /// rather than hung off the answers.
+        ///
+        /// A picture can be taken before OK or NOT OK is pressed, so
+        /// there is often no answer row to hang it on yet - and losing
+        /// it because the answer had not been given would be the worst
+        /// moment to lose it. The screen groups them by item_key.
+        public List<TrimsAuditPhoto> Photos { get; set; } = [];
+
         public bool IsSubmitted => SubmittedAt != null;
 
         public int OkCount => Items.Count(i => i.IsOk);
@@ -97,6 +106,45 @@ namespace FactoryManagementSystem.Entities
         /// typed to get past the field, short enough that somebody
         /// standing in a store is not being asked to write a report.
         public const int MinReasonLength = 3;
+    }
+
+    /// A photograph taken against a checkpoint.
+    ///
+    /// Optional on every row, whichever way it was answered. A picture
+    /// of a rack that is right is worth as much as one of a rack that
+    /// is wrong when somebody argues about it a month later.
+    public class TrimsAuditPhoto
+    {
+        public int Id { get; set; }
+        public int AuditId { get; set; }
+
+        /// Which checkpoint. Not tied to the answer row: a photograph
+        /// can be taken before OK or NOT OK is pressed, and losing it
+        /// because the answer had not been given yet would be the worst
+        /// moment to lose it.
+        public string ItemKey { get; set; } = string.Empty;
+
+        public string ContentType { get; set; } = "image/jpeg";
+        public int SizeBytes { get; set; }
+        public int? Width { get; set; }
+        public int? Height { get; set; }
+
+        public DateTime UploadedAt { get; set; }
+        public string UploadedBy { get; set; } = string.Empty;
+
+        /// Only ever filled when one photograph is being served. A list
+        /// carrying bytes would be megabytes before anybody had asked
+        /// to look at one.
+        public byte[]? Bytes { get; set; }
+
+        /// A megabyte and a half, after the app has already resized.
+        /// Not the expected size - the catch for a client that did not
+        /// compress.
+        public const int MaxBytes = 1_572_864;
+
+        /// Four to a checkpoint. A photograph here is evidence, not an
+        /// album, and a row with fifteen on it is one nobody opens.
+        public const int MaxPerItem = 4;
     }
 
     /// The printed form, in code.

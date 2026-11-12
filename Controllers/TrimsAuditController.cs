@@ -40,6 +40,21 @@ namespace FactoryManagementSystem.Controllers
             i.AnsweredBy,
         };
 
+        /// A photograph, without its bytes. Those come one at a time
+        /// from Photo below: a list carrying them would be megabytes
+        /// before anybody had asked to look at one.
+        private static object PublicPhoto(TrimsAuditPhoto p) => new
+        {
+            p.Id,
+            p.ItemKey,
+            p.ContentType,
+            p.SizeBytes,
+            p.Width,
+            p.Height,
+            p.UploadedAt,
+            p.UploadedBy,
+        };
+
         /// The audit, with the three counts worked out here rather than
         /// on each screen - so the page, its history and anything built
         /// on this later cannot score the same walk differently.
@@ -61,6 +76,8 @@ namespace FactoryManagementSystem.Controllers
             a.IsComplete,
             TotalItems = TrimsChecklist.TotalItems,
             Items = a.Items.Select(PublicItem),
+            Photos = a.Photos.Select(PublicPhoto),
+            MaxPhotosPerItem = TrimsAuditPhoto.MaxPerItem,
         };
 
         /// The signed-in employee code, or null when no login is in
@@ -369,6 +386,178 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        // POST: api/TrimsAudit/{id}/photo
+        //
+        // A photograph against a checkpoint.
+        //
+        // Allowed whichever way the row was answered, and before it is
+        // answered at all - a picture of a rack that is right is worth
+        // as much as one of a rack that is wrong when somebody argues
+        // about it a month later, and the camera comes out before the
+        // judgement does.
+        [HttpPost("{id:int}/photo")]
+        public async Task<IActionResult> AddPhoto(
+            int id, [FromBody] TrimsAuditPhotoUpload body)
+        {
+            try
+            {
+                var audit = await _audits.GetByIdAsync(id);
+                if (audit == null)
+                    return NotFound(new { Success = false, Message = "No such audit." });
+
+                if (audit.IsSubmitted)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "This audit is already signed off.",
+                    });
+                }
+
+                if (TrimsChecklist.Find(body.ItemKey) == null)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "That is not a checkpoint on this form.",
+                    });
+                }
+
+                byte[] bytes;
+                try
+                {
+                    bytes = Convert.FromBase64String(body.Data ?? string.Empty);
+                }
+                catch (FormatException)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "That photograph did not arrive in one piece.",
+                    });
+                }
+
+                if (bytes.Length == 0)
+                    return BadRequest(new { Success = false, Message = "The photograph is empty." });
+
+                if (bytes.Length > TrimsAuditPhoto.MaxBytes)
+                {
+                    // The app resizes before it sends, so this is the
+                    // catch for one that did not rather than the
+                    // expected size.
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "That photograph is too big even after resizing. "
+                                + "Take it again.",
+                    });
+                }
+
+                var already = await _audits.CountPhotosAsync(id, body.ItemKey!);
+                if (already >= TrimsAuditPhoto.MaxPerItem)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = $"{TrimsAuditPhoto.MaxPerItem} photographs is "
+                                + "enough on one checkpoint.",
+                    });
+                }
+
+                var type = (body.ContentType ?? string.Empty).Trim().ToLowerInvariant();
+                if (type != "image/jpeg" && type != "image/png" && type != "image/webp")
+                {
+                    // Named rather than sniffed, and a short list: this
+                    // is served straight back to a browser, and the
+                    // types it will render are the types worth storing.
+                    type = "image/jpeg";
+                }
+
+                var saved = await _audits.AddPhotoAsync(new TrimsAuditPhoto
+                {
+                    AuditId = id,
+                    ItemKey = body.ItemKey!,
+                    ContentType = type,
+                    Bytes = bytes,
+                    SizeBytes = bytes.Length,
+                    Width = body.Width,
+                    Height = body.Height,
+                    UploadedBy = ActorFor(body.EmployeeCode),
+                });
+
+                if (saved == null)
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "It was signed off while the photograph was uploading.",
+                    });
+                }
+
+                var after = await _audits.GetByIdAsync(id);
+                return Ok(new
+                {
+                    Success = true,
+                    Photo = PublicPhoto(saved),
+                    Audit = after == null ? null : Public(after),
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        // GET: api/TrimsAudit/photo/{photoId}
+        //
+        // One photograph's bytes. The only call that reads them.
+        [HttpGet("photo/{photoId:int}")]
+        public async Task<IActionResult> Photo(int photoId)
+        {
+            try
+            {
+                var photo = await _audits.GetPhotoAsync(photoId);
+                if (photo?.Bytes == null)
+                    return NotFound();
+
+                // Immutable once written - a photograph is never
+                // replaced, only removed - so it is worth caching hard
+                // on whatever is holding it.
+                Response.Headers.CacheControl = "private, max-age=86400, immutable";
+                return File(photo.Bytes, photo.ContentType);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        // DELETE: api/TrimsAudit/photo/{photoId}
+        //
+        // Only while the audit is open. A signed audit keeps its
+        // pictures: they are part of what was signed.
+        [HttpDelete("photo/{photoId:int}")]
+        public async Task<IActionResult> DeletePhoto(int photoId)
+        {
+            try
+            {
+                if (!await _audits.DeletePhotoAsync(photoId))
+                {
+                    return BadRequest(new
+                    {
+                        Success = false,
+                        Message = "That photograph is on an audit that has been "
+                                + "signed off, or it is already gone.",
+                    });
+                }
+                return Ok(new { Success = true, Message = "Photograph removed." });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         // POST: api/TrimsAudit/{id}/submit
         //
         // Signing the walk off. Refused while any checkpoint is still
@@ -428,6 +617,22 @@ namespace FactoryManagementSystem.Controllers
                 return BadRequest(new { Success = false, Message = ex.Message });
             }
         }
+    }
+
+    public class TrimsAuditPhotoUpload
+    {
+        public string? ItemKey { get; set; }
+
+        /// The image, base64. Sent in the body rather than as multipart
+        /// because every other call this app makes is JSON, and one
+        /// endpoint shaped differently from the rest is one more thing
+        /// to get wrong.
+        public string? Data { get; set; }
+
+        public string? ContentType { get; set; }
+        public int? Width { get; set; }
+        public int? Height { get; set; }
+        public string? EmployeeCode { get; set; }
     }
 
     public class TrimsAuditActor

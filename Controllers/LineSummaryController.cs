@@ -1289,6 +1289,89 @@ namespace FactoryManagementSystem.Controllers
                 LeftOnLayout: context.LeftOnLayout.Count);
         }
 
+        /// What each line's minutes are worth: line, the CC it is mostly
+        /// running, and that CC's SAM. Nothing else.
+        ///
+        /// The Consolidated Down Time grid prices a stoppage at the line's
+        /// SAM, and it was getting that rate out of the whole factory
+        /// report - which took fifteen seconds of a nineteen-second page
+        /// load to compute per-day output, attendance and leavers that
+        /// were then thrown away. Worse, it was asking for a date range:
+        /// SAM here comes off the CURRENT allocation and is the same for
+        /// every day of any range (see this controller's own notes at the
+        /// top), so the fifteen seconds bought an answer the dates could
+        /// not change.
+        ///
+        /// Two cached reads and a group-by - no Company API call at all,
+        /// which is where that time went.
+        ///
+        /// The dominant-CC rule is the one ResolveLineContextAsync uses,
+        /// deliberately: a line can run two CCs at once, the CC with the
+        /// most allocated rows decides the rate, and ties break on the
+        /// lower id so the answer is the same twice running. Written
+        /// twice in this file rather than shared, because sharing would
+        /// mean calling the heavy resolver this exists to avoid - if one
+        /// changes, change both.
+        [HttpGet("line-sam")]
+        public async Task<IActionResult> LineSam()
+        {
+            try
+            {
+                var layouts = await _layouts.GetActiveLayoutTransactionsAsync();
+                var ccs = await _ccs.GetActiveAsync();
+                var samByCc = ccs
+                    .Where(c => c.CCId > 0)
+                    .GroupBy(c => c.CCId)
+                    .ToDictionary(g => g.Key, g => g.First());
+
+                var rows = layouts
+                    .Where(x => x.LineId > 0)
+                    .GroupBy(x => x.LineId)
+                    .Select(line =>
+                    {
+                        var dominant = line
+                            .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                            .GroupBy(x => x.CCId)
+                            .OrderByDescending(g => g.Count())
+                            .ThenBy(g => g.Key)
+                            .FirstOrDefault()
+                            ?? line
+                                .GroupBy(x => x.CCId)
+                                .OrderByDescending(g => g.Count())
+                                .ThenBy(g => g.Key)
+                                .FirstOrDefault();
+
+                        if (dominant == null) return null;
+
+                        var first = dominant.First();
+                        var cc = samByCc.TryGetValue(first.CCId, out var found)
+                            ? found
+                            : null;
+
+                        return new
+                        {
+                            lineId = line.Key,
+                            ccId = first.CCId,
+                            ccNo = cc?.CCNo ?? first.CCNo ?? string.Empty,
+                            // Null rather than nought where the CC master
+                            // carries no rate. A zero would price every
+                            // stoppage on that line at nothing, which is a
+                            // figure; "we do not know" is the truth.
+                            sam = cc?.SAM,
+                        };
+                    })
+                    .Where(r => r != null)
+                    .OrderBy(r => r!.lineId)
+                    .ToList();
+
+                return Ok(rows);
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         /// Every allocated line side by side for one period, plus the
         /// factory as a whole - the Line Summary turned on its side. There,
         /// one line is fixed and the columns are days; here one period is

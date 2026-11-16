@@ -1470,6 +1470,230 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// The same report as [Factory], but one row per DAY rather than
+        /// one total over the range.
+        ///
+        /// This is what a trend is: the factory's OWE on the second, and
+        /// on the third, and on the fourth - not its OWE across all three,
+        /// which is a single number and says nothing about the shape. It
+        /// was being kept by hand in a spreadsheet, a column typed in
+        /// every evening off the screen this now reads from.
+        ///
+        /// ── why this is not twenty-six calls to Factory ──────────────
+        ///
+        /// It costs almost exactly what ONE Factory call over the same
+        /// range costs. Every round trip in here already fetches a RANGE
+        /// and comes back keyed by date - attendance, loans, own
+        /// attendance, the production report - and AggregateLineOverDays
+        /// then walks those days and adds them up. The only change is to
+        /// stop adding: keep each day's figures apart instead of summing
+        /// them, and the series falls out of the data already in hand.
+        ///
+        /// A month through the Factory endpoint instead would be
+        /// twenty-six times those round trips to answer twenty-six
+        /// questions out of one body of data.
+        ///
+        /// ── why it returns lines and not percentages ─────────────────
+        ///
+        /// A day comes back as its lines, in the shape the OWE report
+        /// already parses, and the teams and the factory row are totalled
+        /// on the client by the same code that totals them on that sheet.
+        /// The arithmetic has exclusions in it - a line whose CC has no
+        /// SAM, a line with nobody recorded present - and a second
+        /// implementation of those is how a team comes to read 68% on one
+        /// page and 71% on another.
+        [HttpGet("daily-series")]
+        public async Task<IActionResult> DailySeries(
+            DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            try
+            {
+                var from = (fromDate ?? DateTime.Now).Date;
+                var to = (toDate ?? DateTime.Now).Date;
+                if (to < from) (from, to) = (to, from);
+
+                var days = new List<DateTime>();
+                for (var d = from; d <= to; d = d.AddDays(1)) days.Add(d);
+
+                var active = await _layouts.GetActiveLayoutTransactionsAsync();
+                var lineIds = active
+                    .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                    .Select(x => x.LineId)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList();
+
+                var outputByLine = await FetchOutputAndRejForLinesAsync(lineIds, from, to);
+
+                // Both roster ranges loaded before anything runs in
+                // parallel, and the payroll split set, for the reasons
+                // spelled out in Factory above - the per-request cache is
+                // a plain dictionary and this is the last moment there is
+                // one thread to write it from.
+                await LoadRosterAsync(from, to);
+                await LoadRosterAsync(DateTime.UtcNow.Date, DateTime.UtcNow.Date);
+                _payrollTailors = await PayrollTailorCodesAsync(from, to);
+
+                // ── a day in a range is not always a day on its own ──
+                //
+                // Asked for the 12th to the 14th, the 14th comes back 376
+                // present. Asked for the 14th alone it comes back 470.
+                // The 12th and the 13th agree either way, so this is not
+                // the last day of a range being clipped - it is that day.
+                //
+                // The 14th was a Saturday, and the vendor had posted
+                // nothing for it when it was asked for alone: with no
+                // payroll for a day, this controller falls back to the
+                // floor's own attendance records and counts what it finds
+                // there. Asked as part of a range, the vendor's response
+                // does carry that day, so payroll counts as posted and
+                // the real figures are used instead.
+                //
+                // 376 is the vendor's record. 470 is this application's
+                // estimate of a day the vendor had not yet filed. Which
+                // one a trend should print is a question about the
+                // factory, not about this code, and it is NOT settled
+                // here: these are the same figures the OWE report shows
+                // for the same range, arrived at the same way, and that
+                // is the one promise this endpoint makes.
+                //
+                // Reading each day on its own would pick the estimate,
+                // and costs a vendor call per day - three days went from
+                // 8s to 21s. If the decision ever comes down on the side
+                // of the estimate, that is the lever.
+
+                // Four at a time. Supabase's session pooler allows fifteen
+                // clients for the whole project and refuses the sixteenth.
+                using var gate = new SemaphoreSlim(4);
+                var built = await Task.WhenAll(lineIds.Select(async lineId =>
+                {
+                    await gate.WaitAsync();
+                    try
+                    {
+                        var context = await ResolveLineContextAsync(lineId, null, null);
+                        if (context == null) return null;
+
+                        var outputByDate = outputByLine.TryGetValue(lineId, out var o)
+                            ? o
+                            : new Dictionary<DateTime, (double output, double rej)>();
+
+                        var perDay = await AggregateLinePerDayAsync(
+                            lineId, context, days, outputByDate);
+
+                        return new LineDaily(lineId, context, perDay);
+                    }
+                    finally
+                    {
+                        gate.Release();
+                    }
+                }));
+
+                var withLines = built.Where(b => b != null).Select(b => b!).ToList();
+
+                var series = new List<object>(days.Count);
+                foreach (var day in days)
+                {
+                    var lines = withLines
+                        .Where(b => b.PerDay.ContainsKey(day))
+                        .Select(b => new FactoryLine(
+                            LineId: b.LineId,
+                            LineName: $"LINE NO {b.LineId}",
+                            CcNo: b.Context.CcNo,
+                            Sam: b.Context.Sam,
+                            TotalPositions: b.Context.LayoutItems.Count,
+                            TailorsOnRoll: b.Context.TailorsOnRoll,
+                            OthersOnRoll: b.Context.OthersOnRoll,
+                            Totals: b.PerDay[day],
+                            LeftOnLayout: b.Context.LeftOnLayout.Count))
+                        .OrderBy(l => l.LineId)
+                        .ToList();
+
+                    series.Add(new
+                    {
+                        date = day,
+                        lines = lines.Select(Project),
+                        overall = BuildOverall(lines),
+                    });
+                }
+
+                return Ok(new
+                {
+                    fromDate = from,
+                    toDate = to,
+                    dayCount = days.Count,
+                    lineCount = withLines.Count,
+                    days = series,
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        private sealed record LineDaily(
+            int LineId,
+            LineContext Context,
+            Dictionary<DateTime, LineTotals> PerDay);
+
+        /// [AggregateLineOverDaysAsync] without the adding up.
+        ///
+        /// Same reads, same classification, same order - the one
+        /// difference is that each day's figures are kept as that day's
+        /// instead of being folded into a running total. Written beside
+        /// the original rather than sharing a body with it, because the
+        /// original is on the path of every OWE report the factory opens
+        /// and is not worth disturbing for this; if the classification
+        /// rules change, change both.
+        private async Task<Dictionary<DateTime, LineTotals>> AggregateLinePerDayAsync(
+            int lineId,
+            LineContext context,
+            List<DateTime> days,
+            Dictionary<DateTime, (double output, double rej)> outputByDate)
+        {
+            var from = days[0];
+            var to = days[^1];
+
+            var loansByDate = await FetchLoansForRangeAsync(lineId, from, to, context);
+            var borrowedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dayLoans in loansByDate.Values)
+                foreach (var code in dayLoans.BorrowedIn.Keys) borrowedCodes.Add(code);
+
+            var attendanceByDate = await FetchAttendanceRangeAsync(
+                from, to, context.EmployeeSectionMap.Keys.Concat(borrowedCodes));
+            var ownByDate = await FetchOwnAttendanceRangeAsync(lineId, days);
+
+            var perDay = new Dictionary<DateTime, LineTotals>(days.Count);
+
+            foreach (var d in days)
+            {
+                var attendanceForDay = attendanceByDate.TryGetValue(d, out var m)
+                    ? m
+                    : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceForDay);
+                var canEstimate = !payrollPosted
+                    && ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own)
+                    && own.Count > 0;
+                if (canEstimate)
+                {
+                    attendanceForDay = ownByDate[DateTime.SpecifyKind(d, DateTimeKind.Utc)];
+                }
+
+                var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
+                    ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d],
+                        treatMissingAsPresent: canEstimate);
+
+                var (o, r) = outputByDate.TryGetValue(d, out var v) ? v : (0, 0);
+
+                perDay[d] = new LineTotals(
+                    tailorsPresent, othersPresent, tailorsPresent + othersPresent,
+                    absent, unknown, lentOut, borrowedIn, o, r, canEstimate);
+            }
+
+            return perDay;
+        }
+
         private const double WorkingMinutesPerDay = 480;
 
         private sealed record LineTotals(

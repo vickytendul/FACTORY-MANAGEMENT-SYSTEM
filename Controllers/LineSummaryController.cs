@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using FactoryManagementSystem.Services.Attendance;
 using FactoryManagementSystem.Services.Ccs;
 using FactoryManagementSystem.Services.Layouts;
@@ -717,7 +718,12 @@ namespace FactoryManagementSystem.Controllers
         ///
         /// Controllers are built per request, so these fields hold for one
         /// request and cannot leak between callers.
-        private readonly Dictionary<(DateTime, DateTime),
+        ///
+        /// Concurrent because the daily series warms it one day at a time
+        /// and does so in parallel - sixteen vendor calls one after
+        /// another is most of a minute. The keys are distinct per day, so
+        /// nothing is fetched twice; this only keeps the writes safe.
+        private readonly ConcurrentDictionary<(DateTime, DateTime),
             (Dictionary<DateTime, Dictionary<string, string>> Attendance,
              HashSet<string> Codes,
              HashSet<string> PayrollTailors)> _rosterByRange = new();
@@ -1534,33 +1540,46 @@ namespace FactoryManagementSystem.Controllers
                 await LoadRosterAsync(DateTime.UtcNow.Date, DateTime.UtcNow.Date);
                 _payrollTailors = await PayrollTailorCodesAsync(from, to);
 
-                // ── a day in a range is not always a day on its own ──
+                // ── and then every day on its own ────────────────────
                 //
-                // Asked for the 12th to the 14th, the 14th comes back 376
-                // present. Asked for the 14th alone it comes back 470.
-                // The 12th and the 13th agree either way, so this is not
-                // the last day of a range being clipped - it is that day.
+                // A day read inside a range does not always classify as
+                // that day read by itself. Asked for the 1st to the 16th,
+                // the 14th comes back 375 present; asked for the 14th
+                // alone, 470. Twelve of the thirteen worked days agree
+                // either way, so this is not a range being clipped.
                 //
-                // The 14th was a Saturday, and the vendor had posted
-                // nothing for it when it was asked for alone: with no
-                // payroll for a day, this controller falls back to the
-                // floor's own attendance records and counts what it finds
-                // there. Asked as part of a range, the vendor's response
-                // does carry that day, so payroll counts as posted and
-                // the real figures are used instead.
+                // The 14th was a Saturday the vendor had not finished
+                // filing. Asked for that date alone it returns nothing,
+                // and with no payroll for a day this controller falls
+                // back to the floor's own attendance and counts what is
+                // there - 470. Asked as part of a range it returns a
+                // PARTIAL row for that day, which reads as payroll having
+                // posted, and the incomplete figure is used instead.
                 //
-                // 376 is the vendor's record. 470 is this application's
-                // estimate of a day the vendor had not yet filed. Which
-                // one a trend should print is a question about the
-                // factory, not about this code, and it is NOT settled
-                // here: these are the same figures the OWE report shows
-                // for the same range, arrived at the same way, and that
-                // is the one promise this endpoint makes.
+                // 470 is the right answer, and the factory's own
+                // spreadsheet is what settles it: it carries 40% for the
+                // 14th against 90,120 earned minutes, and 90,120 over
+                // 40% is 469 people. The range reading would print 50%.
                 //
-                // Reading each day on its own would pick the estimate,
-                // and costs a vendor call per day - three days went from
-                // 8s to 21s. If the decision ever comes down on the side
-                // of the estimate, that is the lever.
+                // So every day is warmed here, by itself, before anything
+                // reads it. Four at a time, because sixteen vendor calls
+                // one after another is most of a minute, and into a cache
+                // that is concurrent for exactly this.
+                using (var rosterGate = new SemaphoreSlim(4))
+                {
+                    await Task.WhenAll(days.Select(async day =>
+                    {
+                        await rosterGate.WaitAsync();
+                        try
+                        {
+                            await LoadRosterAsync(day, day);
+                        }
+                        finally
+                        {
+                            rosterGate.Release();
+                        }
+                    }));
+                }
 
                 // Four at a time. Supabase's session pooler allows fifteen
                 // clients for the whole project and refuses the sixteenth.
@@ -1659,8 +1678,17 @@ namespace FactoryManagementSystem.Controllers
             foreach (var dayLoans in loansByDate.Values)
                 foreach (var code in dayLoans.BorrowedIn.Keys) borrowedCodes.Add(code);
 
-            var attendanceByDate = await FetchAttendanceRangeAsync(
-                from, to, context.EmployeeSectionMap.Keys.Concat(borrowedCodes));
+            // Each day's attendance read AS THAT DAY, not as a slice of
+            // the range - see the note at the call site, where the
+            // per-day rosters were warmed. Served from that cache here,
+            // so this is a dictionary lookup and not a vendor call.
+            var codes = context.EmployeeSectionMap.Keys.Concat(borrowedCodes).ToList();
+            var attendanceByDate = new Dictionary<DateTime, Dictionary<string, string>>();
+            foreach (var d in days)
+            {
+                attendanceByDate[d] = (await FetchAttendanceRangeAsync(d, d, codes))[d];
+            }
+
             var ownByDate = await FetchOwnAttendanceRangeAsync(lineId, days);
 
             var perDay = new Dictionary<DateTime, LineTotals>(days.Count);

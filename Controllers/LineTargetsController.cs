@@ -27,6 +27,7 @@ namespace FactoryManagementSystem.Controllers
             t.LineId,
             t.LineName,
             t.Target,
+            t.NoOfDays,
             t.EnteredByCode,
             t.EnteredByName,
             t.UpdatedAt,
@@ -103,7 +104,12 @@ namespace FactoryManagementSystem.Controllers
                 {
                     if (row.LineId <= 0) continue;
 
-                    if (row.Target == null)
+                    // The row holds two figures now, so it is cleared
+                    // only when BOTH are gone. Clearing on the plan
+                    // alone would take the day count out with it, and
+                    // the person who emptied one box would have emptied
+                    // a box they were not looking at.
+                    if (row.Target == null && row.NoOfDays == null)
                     {
                         if (await _targets.ClearAsync(day, row.LineId)) cleared++;
                         continue;
@@ -130,12 +136,27 @@ namespace FactoryManagementSystem.Controllers
                         });
                     }
 
+                    // A month has thirty-one days in it and this column
+                    // counts days within one. Anything past that is a
+                    // piece count typed into the wrong box, and it would
+                    // sit on the sheet looking like a fact.
+                    if (row.NoOfDays is < 0 or > 31)
+                    {
+                        return BadRequest(new
+                        {
+                            Success = false,
+                            Message =
+                                $"{row.LineName}: a month has at most 31 days.",
+                        });
+                    }
+
                     var result = await _targets.SetAsync(new LineTarget
                     {
                         TargetDay = day,
                         LineId = row.LineId,
                         LineName = (row.LineName ?? string.Empty).Trim(),
-                        Target = row.Target.Value,
+                        Target = row.Target,
+                        NoOfDays = row.NoOfDays,
                         EnteredByCode = by,
                         EnteredByName = name,
                     });
@@ -178,5 +199,9 @@ namespace FactoryManagementSystem.Controllers
         /// Null clears the line's plan. Zero does not - zero is a real
         /// plan on a line that is not running.
         public int? Target { get; set; }
+
+        /// Days this line has run, as the floor counts them. Null the
+        /// same way, and the row survives as long as either is set.
+        public int? NoOfDays { get; set; }
     }
 }

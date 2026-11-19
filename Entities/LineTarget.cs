@@ -22,7 +22,20 @@ namespace FactoryManagementSystem.Entities
         /// still reads correctly after a line is renamed.
         public string LineName { get; set; } = string.Empty;
 
-        public int Target { get; set; }
+        /// Null when no plan was entered. Not zero - zero is a real plan
+        /// on a line that is not running.
+        public int? Target { get; set; }
+
+        /// Days this line has run, as the FLOOR counts them.
+        ///
+        /// Typed beside the plan rather than derived from attendance.
+        /// The two answers are not always the same one, and this sheet
+        /// is read against the floor's: a day half the line sat out, a
+        /// day run on overtime, a day the vendor filed late. The person
+        /// filling in the plan knows which of those happened.
+        ///
+        /// Null means nothing was entered, which is not nought.
+        public int? NoOfDays { get; set; }
 
         public string EnteredByCode { get; set; } = string.Empty;
         public string EnteredByName { get; set; } = string.Empty;

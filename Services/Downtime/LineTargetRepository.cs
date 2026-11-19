@@ -18,7 +18,7 @@ namespace FactoryManagementSystem.Services.Downtime
 
         private const string Cols = """
             select id, target_day, line_id, line_name, target,
-                   entered_by_code, entered_by_name, updated_at
+                   entered_by_code, entered_by_name, updated_at, no_of_days
             from public.line_targets
             """;
 
@@ -28,10 +28,11 @@ namespace FactoryManagementSystem.Services.Downtime
             TargetDay = r.GetDateTime(1),
             LineId = r.GetInt32(2),
             LineName = r.GetString(3),
-            Target = r.GetInt32(4),
+            Target = r.IsDBNull(4) ? null : r.GetInt32(4),
             EnteredByCode = r.GetString(5),
             EnteredByName = r.GetString(6),
             UpdatedAt = r.GetDateTime(7),
+            NoOfDays = r.IsDBNull(8) ? null : r.GetInt32(8),
         };
 
         /// One day's plan, by line.
@@ -88,17 +89,20 @@ namespace FactoryManagementSystem.Services.Downtime
         {
             await using var cmd = _dataSource.CreateCommand("""
                 insert into public.line_targets
-                    (target_day, line_id, line_name, target,
+                    (target_day, line_id, line_name, target, no_of_days,
                      entered_by_code, entered_by_name, updated_at)
-                values (@day, @line, @lineName, @target, @byCode, @byName, now())
+                values (@day, @line, @lineName, @target, @days,
+                        @byCode, @byName, now())
                 on conflict (target_day, line_id) do update
                    set target = excluded.target,
+                       no_of_days = excluded.no_of_days,
                        line_name = excluded.line_name,
                        entered_by_code = excluded.entered_by_code,
                        entered_by_name = excluded.entered_by_name,
                        updated_at = now()
                 returning id, target_day, line_id, line_name, target,
-                          entered_by_code, entered_by_name, updated_at
+                          entered_by_code, entered_by_name, updated_at,
+                          no_of_days
                 """);
 
             cmd.Parameters.Add(new NpgsqlParameter("day", target.TargetDay.Date)
@@ -107,7 +111,12 @@ namespace FactoryManagementSystem.Services.Downtime
             });
             cmd.Parameters.Add(new NpgsqlParameter("line", target.LineId));
             cmd.Parameters.Add(new NpgsqlParameter("lineName", target.LineName ?? string.Empty));
-            cmd.Parameters.Add(new NpgsqlParameter("target", target.Target));
+            // DBNull and not nought on either: "nothing entered" has to
+            // stay distinguishable from a real zero.
+            cmd.Parameters.Add(new NpgsqlParameter("target",
+                (object?)target.Target ?? DBNull.Value));
+            cmd.Parameters.Add(new NpgsqlParameter("days",
+                (object?)target.NoOfDays ?? DBNull.Value));
             cmd.Parameters.Add(new NpgsqlParameter("byCode", target.EnteredByCode ?? string.Empty));
             cmd.Parameters.Add(new NpgsqlParameter("byName", target.EnteredByName ?? string.Empty));
 

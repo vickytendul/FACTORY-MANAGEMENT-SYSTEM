@@ -47,6 +47,7 @@ namespace FactoryManagementSystem.Services.Users
         public const string Admin = "Admin";
         public const string Manager = "Manager";
         public const string Production = "Production";
+        public const string LineLeader = "Line Leader";
         public const string Cutting = "Cutting";
         public const string Store = "Store";
         public const string IE = "IE";
@@ -130,6 +131,26 @@ namespace FactoryManagementSystem.Services.Users
             // The three who can open and close other people's accounts.
             if (desig is "GM-OPERATIONS" or "FACTORY MANAGER" or "AGM") return Admin;
 
+            // The line leaders, who get one page: the feeding request.
+            //
+            // They used to fall into Production with the supervisors and
+            // the recorders and saw the eleven screens that tier opens.
+            // A line leader stands at a line; the one thing this
+            // application is for them is asking for the next bundle, and
+            // the rest was a menu to scroll past.
+            //
+            // By DESIGNATION and ahead of every section test, because
+            // that is what was asked for - every line leader, wherever
+            // payroll files them and whatever work detail the floor has
+            // them under. Ahead of the sewing test in particular, which
+            // names LINE LEADER itself and would otherwise take them
+            // first.
+            //
+            // Safe above HR and MANAGER as well: "LINE LEADER" contains
+            // neither word, so nothing that belongs to those two can
+            // land here by accident.
+            if (desig == "LINE LEADER") return LineLeader;
+
             // HR manage people, not production. Strength Summary is a
             // headcount, which is theirs; the rest is not.
             //
@@ -169,8 +190,10 @@ namespace FactoryManagementSystem.Services.Users
             if (section == "QUALITY" || dept == "QUALITY") return Quality;
             if (section == "ADMIN" || dept == "ADMIN") return Manager;
 
+            // LINE LEADER is handled above and deliberately no longer
+            // named here.
             if (section == "SEWING"
-                || desig is "LINE LEADER" or "SUPERVISOR" or "RECORDER"
+                || desig is "SUPERVISOR" or "RECORDER"
                 || desig.Contains("INCHARGE"))
             {
                 return Production;

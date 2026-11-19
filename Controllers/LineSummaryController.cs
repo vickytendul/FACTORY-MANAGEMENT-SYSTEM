@@ -1716,7 +1716,11 @@ namespace FactoryManagementSystem.Controllers
 
                 perDay[d] = new LineTotals(
                     tailorsPresent, othersPresent, tailorsPresent + othersPresent,
-                    absent, unknown, lentOut, borrowedIn, o, r, canEstimate);
+                    absent, unknown, lentOut, borrowedIn, o, r, canEstimate,
+                    // One day, so one or none - and the trend page's own
+                    // threshold for a day worked is attendance, same as
+                    // the count this feeds.
+                    tailorsPresent + othersPresent > 0 ? 1 : 0);
             }
 
             return perDay;
@@ -1727,7 +1731,22 @@ namespace FactoryManagementSystem.Controllers
         private sealed record LineTotals(
             int TailorsPresent, int OthersPresent, int TotalPresent,
             int Absent, int Unknown, int LentOut, int BorrowedIn,
-            double Output, double Rej, bool AnyEstimated);
+            double Output, double Rej, bool AnyEstimated,
+            /// Days in the range on which anybody stood on this line.
+            ///
+            /// The headcounts beside it are PERSON-days summed across
+            /// the range - fifty-one people for twelve days is six
+            /// hundred and twelve - so nothing else in this record says
+            /// how long the line actually ran. Two lines with the same
+            /// available minutes can be a big line for a week and a
+            /// small one for a month, and the sheet could not tell them
+            /// apart.
+            ///
+            /// Presence and not output: a line that was manned and
+            /// produced nothing worked that day, badly. Counting output
+            /// instead would quietly drop its zero out of the average
+            /// and flatter the line.
+            int DaysWorked = 0);
 
         private sealed record FactoryLine(
             int LineId, string LineName, string CcNo, double? Sam, int TotalPositions,
@@ -1821,6 +1840,7 @@ namespace FactoryManagementSystem.Controllers
             lentOut = line.Totals.LentOut,
             borrowedIn = line.Totals.BorrowedIn,
             attendanceEstimated = line.Totals.AnyEstimated,
+            daysWorked = line.Totals.DaysWorked,
 
             output = line.Totals.Output,
             rej = line.Totals.Rej,
@@ -1915,6 +1935,14 @@ namespace FactoryManagementSystem.Controllers
                 borrowedIn = lines.Sum(l => l.Totals.BorrowedIn),
                 attendanceEstimated = lines.Any(l => l.Totals.AnyEstimated),
 
+                // The MOST any line ran, not the sum of them. The
+                // factory worked on a day if anybody did; adding
+                // fifteen lines' day counts together would say the
+                // factory ran for two hundred days in November.
+                daysWorked = lines.Count == 0
+                    ? 0
+                    : lines.Max(l => l.Totals.DaysWorked),
+
                 output = lines.Sum(l => l.Totals.Output),
                 rej = lines.Sum(l => l.Totals.Rej),
 
@@ -1979,6 +2007,7 @@ namespace FactoryManagementSystem.Controllers
             int tp = 0, op = 0, ab = 0, un = 0, lo = 0, bi = 0;
             double output = 0, rej = 0;
             var anyEstimated = false;
+            var daysWorked = 0;
 
             foreach (var d in days)
             {
@@ -2006,13 +2035,16 @@ namespace FactoryManagementSystem.Controllers
                 un += unknown;
                 lo += lentOut;
                 bi += borrowedIn;
+                if (tailorsPresent + othersPresent > 0) daysWorked++;
 
                 var (o, r) = outputByDate.TryGetValue(d, out var v) ? v : (0, 0);
                 output += o;
                 rej += r;
             }
 
-            return new LineTotals(tp, op, tp + op, ab, un, lo, bi, output, rej, anyEstimated);
+            return new LineTotals(
+                tp, op, tp + op, ab, un, lo, bi, output, rej, anyEstimated,
+                daysWorked);
         }
 
         /// The production report for every line at once.

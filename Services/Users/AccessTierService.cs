@@ -53,8 +53,35 @@ namespace FactoryManagementSystem.Services.Users
         public const string IE = "IE";
         public const string Hr = "HR";
         public const string Quality = "Quality";
+        public const string QualityChecker = "Quality Checker";
         public const string Maintenance = "Maintenance";
         public const string None = "None";
+
+        /// Access granted to a PERSON rather than to a job.
+        ///
+        /// [Tier] answers for a designation, and designations cover
+        /// everybody - which is the whole point of it, and exactly why
+        /// it cannot answer for one person. GUL1456 is a CHECKER, so
+        /// the first line of that rule sends her to None along with the
+        /// six hundred others on the floor who carry the same word, and
+        /// the GM wants her and only her able to read the quality
+        /// sheet. Widening the rule to CHECKER would have handed it to
+        /// all of them.
+        ///
+        /// Keyed by employee code and read before anything else, so it
+        /// outranks every rule below, the exclusions included.
+        ///
+        /// Deliberately short. A list like this growing past a handful
+        /// means the rule itself is wrong and should be changed instead
+        /// - a per-person list is a thing somebody has to maintain, and
+        /// nothing reminds anybody to take a name off it when that
+        /// person moves or leaves.
+        private static readonly Dictionary<string, string> PersonalTiers =
+            new(StringComparer.OrdinalIgnoreCase)
+            {
+                // DEVIKA, a checker, reads the quality sheet.
+                ["GUL1456"] = QualityChecker,
+            };
 
         /// The tier for one employee code, or null when the floor and
         /// payroll between them cannot say - which the caller treats as
@@ -64,6 +91,13 @@ namespace FactoryManagementSystem.Services.Users
         {
             var code = (employeeCode ?? string.Empty).Trim();
             if (code.Length == 0) return null;
+
+            // Before payroll is read at all. A tier granted to the
+            // person does not depend on what the roster says their job
+            // is, and it must survive the vendor being unreachable -
+            // which is the one case where this method otherwise gives
+            // up and returns null.
+            if (PersonalTiers.TryGetValue(code, out var granted)) return granted;
 
             CompanyApiEmployee? person;
             try

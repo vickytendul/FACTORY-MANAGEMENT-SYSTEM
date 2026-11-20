@@ -136,17 +136,28 @@ namespace FactoryManagementSystem.Controllers
                         });
                     }
 
-                    // A month has thirty-one days in it and this column
-                    // counts days within one. Anything past that is a
-                    // piece count typed into the wrong box, and it would
-                    // sit on the sheet looking like a fact.
-                    if (row.NoOfDays is < 0 or > 31)
+                    // A year, not a month.
+                    //
+                    // This was capped at 31 on the assumption that the
+                    // count is days within the month the sheet's CUM
+                    // column covers. It is not: the floor counts how
+                    // long the line has been running, which carries
+                    // past a month end, and the cap refused a 90 that
+                    // was perfectly correct.
+                    //
+                    // A ceiling is still worth having, because the box
+                    // sits beside one that takes piece counts in the
+                    // hundreds and a figure in the wrong box would sit
+                    // on the sheet looking like a fact. 366 catches
+                    // that without refusing anything real.
+                    if (row.NoOfDays is < 0 or > 366)
                     {
                         return BadRequest(new
                         {
                             Success = false,
                             Message =
-                                $"{row.LineName}: a month has at most 31 days.",
+                                $"{row.LineName}: {row.NoOfDays} days is more "
+                                + "than a year - is that the piece count?",
                         });
                     }
 

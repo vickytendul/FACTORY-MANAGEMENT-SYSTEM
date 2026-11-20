@@ -373,6 +373,123 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// Who has not been in for a long time, among the people still to
+        /// be allocated.
+        ///
+        /// The question behind BAL TO ALLOCATE being long: a layout is
+        /// short of people, two hundred names are waiting to be put on
+        /// one, and a good share of them have not walked through the gate
+        /// for a month. Those are not people to allocate, and finding
+        /// them by eye down a list of two hundred is how they stay on it.
+        ///
+        /// ── one load, not sixty ─────────────────────────────────────
+        ///
+        /// [LoadAsync] already fetches the roster for a whole RANGE in
+        /// one call to the vendor and reads each day's statuses out of
+        /// it, so a run of weeks costs what one day costs. Asking the
+        /// drill-down endpoint once per day instead - which is how this
+        /// list was first produced - was sixty round trips for an answer
+        /// already sitting in one of them.
+        ///
+        /// ── posted days, and only posted days ───────────────────────
+        ///
+        /// A Sunday, a holiday and a day payroll simply has not filed are
+        /// all days with no status on them, and none of the three is a
+        /// day somebody failed to turn up on. [RosterLoad.PostedDays]
+        /// drops them, so a streak counts working days without needing a
+        /// calendar to be maintained anywhere.
+        ///
+        /// ── absent, and not-said ────────────────────────────────────
+        ///
+        /// A streak breaks on PRESENT and on nothing else, but the days
+        /// in it are not all the same claim: some payroll marked absent,
+        /// and on the rest it posted the day and said nothing about this
+        /// person. Both go out. "Out forty days, thirty-eight of them
+        /// marked" is a fact to act on; "out ten, two marked" is a
+        /// question for whoever files attendance.
+        [HttpGet("long-absentees")]
+        public async Task<IActionResult> LongAbsentees(
+            DateTime? fromDate = null, DateTime? toDate = null,
+            int recent = 30)
+        {
+            try
+            {
+                var to = (toDate ?? DateTime.Now).Date;
+                var from = (fromDate ?? to.AddDays(-59)).Date;
+                if (to < from) (from, to) = (to, from);
+                if (recent < 1) recent = 1;
+
+                var load = await LoadAsync(null, from, to);
+
+                // Newest first, which is the order a streak is counted in.
+                var posted = load.PostedDays.OrderByDescending(d => d).ToList();
+                var window = posted.Take(recent).ToList();
+
+                var people = load.People
+                    .Where(p => !load.AllocatedLineByCode.ContainsKey(p.Code))
+                    .Where(p => !load.PlacedByCode.ContainsKey(p.Code))
+                    .Select(p =>
+                    {
+                        DateTime? lastPresent = null;
+                        var inARow = 0;
+                        var marked = 0;
+
+                        foreach (var d in posted)
+                        {
+                            if (p.IsPresentOn(d)) { lastPresent = d; break; }
+                            if (p.IsAbsentOn(d)) marked++;
+                            inARow++;
+                        }
+
+                        return new
+                        {
+                            code = p.Code,
+                            name = p.Name,
+                            department = p.Department,
+                            designation = p.Designation,
+                            isTailor = p.IsTailor,
+
+                            lastPresent,
+                            /// Days running, in posted days. Equal to the
+                            /// whole window when they have not been in at
+                            /// all, which the null date above says.
+                            daysInARow = inARow,
+                            markedAbsentInARow = marked,
+
+                            absentInRecent = window.Count(p.IsAbsentOn),
+                            presentInRecent = window.Count(p.IsPresentOn),
+                            noStatusInRecent = window.Count(
+                                d => !p.IsPresentOn(d) && !p.IsAbsentOn(d)),
+                        };
+                    })
+                    // Longest out first: the list is read from the top and
+                    // acted on until somebody stops reading.
+                    .OrderByDescending(p => p.daysInARow)
+                    .ThenBy(p => p.name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                return Ok(new
+                {
+                    fromDate = from,
+                    toDate = to,
+                    postedDayCount = posted.Count,
+                    firstPostedDay = posted.Count == 0
+                        ? (DateTime?)null
+                        : posted[^1],
+                    lastPostedDay = posted.Count == 0
+                        ? (DateTime?)null
+                        : posted[0],
+                    recentWindow = window.Count,
+                    count = people.Count,
+                    people,
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
         private sealed record RosterLoad(
             List<Person> People,
             List<DateTime> PostedDays,

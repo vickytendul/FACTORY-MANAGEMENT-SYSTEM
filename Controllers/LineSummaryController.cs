@@ -1021,6 +1021,100 @@ namespace FactoryManagementSystem.Controllers
         /// grows slowly with history; if it ever outgrows the per-day cost
         /// it is worth revisiting, but it is two orders of magnitude
         /// cheaper at present.
+        /// Which line gets to count a borrowed-in person on a given day,
+        /// when more than one filed a row for them.
+        ///
+        /// Keyed by employee code, then by day, to the line that keeps
+        /// them. Null where nothing has been worked out - the per-line
+        /// and per-day endpoints build one line at a time and have no
+        /// view across the floor, and for them a person on two lines is
+        /// a question that does not arise.
+        private Dictionary<string, Dictionary<DateTime, int>>? _borrowClaim;
+
+        /// Settles, for the whole floor at once, who counts a person who
+        /// covered on more than one line in a day.
+        ///
+        /// Four people did exactly that on 20 Nov: GUL1322 on lines 1 and
+        /// 23, GUL0441 on 3 and 21, GUL1695 on 3 and 23, GUL2802 on 19
+        /// and 23. Each line built its own loans independently and each
+        /// counted them present, so the factory's total carried four
+        /// people twice - nobody is in two places at once, and the sheet
+        /// said five hundred where the floor had four hundred and
+        /// ninety-six.
+        ///
+        /// The line that covered the MOST of their operations keeps
+        /// them, because that is where most of their day went. Ties
+        /// break on the lower line id so the answer is the same twice
+        /// running.
+        ///
+        /// Read once for the floor rather than per line: this is the
+        /// same query [FetchLoansForRangeAsync] already runs for each
+        /// line's lent-out side, asked once with every allocated code
+        /// instead of fourteen times with a fourteenth of them.
+        ///
+        /// A person whose layout places them on no line at all cannot be
+        /// claimed here, because the codes asked for are the allocated
+        /// ones. Two of those stood on a line on 20 Nov and neither was
+        /// on a second, so nothing is lost today; a department person
+        /// splitting a day between two lines would still double count,
+        /// and that is a smaller hole than the one being closed.
+        private async Task BuildBorrowClaimAsync(
+            List<DateTime> days, Dictionary<string, int> homeLineByCode)
+        {
+            var wanted = new HashSet<DateTime>(
+                days.Select(d => DateTime.SpecifyKind(d.Date, DateTimeKind.Utc)));
+
+            // code -> day -> line -> how many rows that line filed
+            var seen = new Dictionary<string, Dictionary<DateTime, Dictionary<int, int>>>(
+                StringComparer.OrdinalIgnoreCase);
+
+            var rows = await _attendance.GetByReplacementCodesAllDatesAsync(
+                homeLineByCode.Keys.ToList());
+
+            foreach (var tx in rows)
+            {
+                var code = (tx.ReplacementEmployeeCode ?? string.Empty).Trim();
+                if (code.Length == 0) continue;
+
+                // Covering on their own line is not a loan.
+                if (homeLineByCode.TryGetValue(code, out var home)
+                    && home == tx.LineId)
+                {
+                    continue;
+                }
+
+                var day = DateTime.SpecifyKind(tx.AttendanceDate.Date, DateTimeKind.Utc);
+                if (!wanted.Contains(day)) continue;
+
+                if (!seen.TryGetValue(code, out var byDay))
+                    seen[code] = byDay = new Dictionary<DateTime, Dictionary<int, int>>();
+                if (!byDay.TryGetValue(day, out var byLine))
+                    byDay[day] = byLine = new Dictionary<int, int>();
+                byLine[tx.LineId] = byLine.GetValueOrDefault(tx.LineId) + 1;
+            }
+
+            var claim = new Dictionary<string, Dictionary<DateTime, int>>(
+                StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (code, byDay) in seen)
+            {
+                foreach (var (day, byLine) in byDay)
+                {
+                    // One line is the ordinary case and needs no rule.
+                    if (byLine.Count < 2) continue;
+                    var winner = byLine
+                        .OrderByDescending(x => x.Value)
+                        .ThenBy(x => x.Key)
+                        .First().Key;
+                    if (!claim.TryGetValue(code, out var days2))
+                        claim[code] = days2 = new Dictionary<DateTime, int>();
+                    days2[day] = winner;
+                }
+            }
+
+            _borrowClaim = claim;
+        }
+
         private async Task<Dictionary<DateTime, DayLoans>> FetchLoansForRangeAsync(
             int lineId, DateTime from, DateTime to, LineContext context)
         {
@@ -1051,6 +1145,18 @@ namespace FactoryManagementSystem.Controllers
 
                 // The section of the row they covered, found in the
                 // layout this request already loaded - no extra read.
+                // Somebody who covered on two lines today belongs to
+                // whichever of them the floor-wide pass settled on, so
+                // the factory's total counts them once. See
+                // BuildBorrowClaimAsync.
+                if (_borrowClaim != null
+                    && _borrowClaim.TryGetValue(code, out var claimedDays)
+                    && claimedDays.TryGetValue(day, out var keeper)
+                    && keeper != lineId)
+                {
+                    continue;
+                }
+
                 var covered = context.LayoutItems
                     .FirstOrDefault(x => x.LayoutMasterId == tx.LayoutMasterId);
                 loans.BorrowedIn[code] = covered?.Section ?? "MAIN";
@@ -1413,6 +1519,20 @@ namespace FactoryManagementSystem.Controllers
                     .ToList();
 
                 var outputByLine = await FetchOutputAndRejForLinesAsync(lineIds, from, to);
+
+                // Who keeps a person who covered on two lines in one day.
+                // Settled across the whole floor before any line is built,
+                // because no line can see the other's rows - and two lines
+                // each counting the same body is how the factory total
+                // came to four more than the floor had.
+                var homeLineByCode = new Dictionary<string, int>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var t in active)
+                {
+                    var c = (t.EmployeeCode ?? string.Empty).Trim();
+                    if (c.Length > 0) homeLineByCode[c] = t.LineId;
+                }
+                await BuildBorrowClaimAsync(days, homeLineByCode);
 
                 // Both roster ranges are loaded here, before anything runs
                 // in parallel. The per-request cache they fill is a plain

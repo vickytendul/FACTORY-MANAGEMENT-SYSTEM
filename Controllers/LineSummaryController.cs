@@ -1031,6 +1031,91 @@ namespace FactoryManagementSystem.Controllers
         /// a question that does not arise.
         private Dictionary<string, Dictionary<DateTime, int>>? _borrowClaim;
 
+        /// The layout as it stood on each day of the range: day, then
+        /// line, then the people placed on it. Null on the endpoints that
+        /// answer for one day as it is now, where today's allocation IS
+        /// the day's allocation.
+        private Dictionary<DateTime, Dictionary<int, List<LayoutTransaction>>>? _layoutByDay;
+
+        /// SAM by CC id, so a past day can be priced at the CC the line
+        /// was actually running rather than at the one it runs now.
+        private Dictionary<int, double?>? _samByCc;
+
+        /// Reads the whole allocation timeline and lays out one roster per
+        /// day of the range.
+        ///
+        /// See LayoutHistory for why this is needed and why it is
+        /// possible. A day earlier than anything in the table falls back
+        /// to the current allocation: a wrong headcount beats a line that
+        /// reads as having nobody on it.
+        private async Task BuildLayoutHistoryAsync(
+            List<DateTime> days, List<LayoutTransaction> active)
+        {
+            var history = LayoutHistory.Build(
+                await _layouts.GetAllLayoutTransactionsAsync());
+
+            var ccs = await _ccs.GetActiveAsync();
+            _samByCc = ccs
+                .Where(c => c.CCId > 0)
+                .GroupBy(c => c.CCId)
+                .ToDictionary(g => g.Key, g => (double?)g.First().SAM);
+
+            // Today is not reconstructed. The active layout IS today's
+            // layout - it is the record, not an inference from one - and
+            // today's figures are the ones the floor reads every evening
+            // and would notice moving. Reconstruction answers for days
+            // that have already closed, where the active layout is the
+            // wrong answer and the only one there was.
+            var today = DateTime.Now.Date;
+
+            var byDay = new Dictionary<DateTime, Dictionary<int, List<LayoutTransaction>>>();
+            foreach (var d in days)
+            {
+                var rows = d.Date >= today || !history.CoversDay(d)
+                    ? active
+                    : history.AsAt(d);
+                byDay[d.Date] = rows
+                    .Where(r => !string.IsNullOrWhiteSpace(r.EmployeeCode))
+                    .GroupBy(r => r.LineId)
+                    .ToDictionary(g => g.Key, g => g.ToList());
+            }
+            _layoutByDay = byDay;
+        }
+
+        /// Who was on this line that day, and what its minutes were worth.
+        ///
+        /// The CC comes from the same rows as the people, which is the
+        /// point: the floor sizes a line to the style it is running, so
+        /// the headcount and the SAM change together and have to be read
+        /// together. Dominant CC by allocated rows, ties on the lower id -
+        /// the rule ResolveLineContextAsync already uses for today.
+        private (Dictionary<string, string> Map, double? Sam, string CcNo)? LayoutOnDay(
+            int lineId, DateTime day)
+        {
+            if (_layoutByDay == null) return null;
+            if (!_layoutByDay.TryGetValue(day.Date, out var byLine)) return null;
+            if (!byLine.TryGetValue(lineId, out var rows) || rows.Count == 0) return null;
+
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in rows)
+            {
+                map[(r.EmployeeCode ?? string.Empty).Trim()] = r.Section ?? "MAIN";
+            }
+
+            var dominant = rows
+                .GroupBy(r => r.CCId)
+                .OrderByDescending(g => g.Count())
+                .ThenBy(g => g.Key)
+                .First();
+
+            var sam = _samByCc != null
+                && _samByCc.TryGetValue(dominant.Key, out var s)
+                ? s
+                : null;
+
+            return (map, sam, dominant.First().CCNo ?? string.Empty);
+        }
+
         /// Settles, for the whole floor at once, who counts a person who
         /// covered on more than one line in a day.
         ///
@@ -1534,6 +1619,11 @@ namespace FactoryManagementSystem.Controllers
                 }
                 await BuildBorrowClaimAsync(days, homeLineByCode);
 
+                // The layout as it stood on each day of the range, which
+                // is where both halves of OWE come from: who was on the
+                // line, and the CC whose SAM prices what came off it.
+                await BuildLayoutHistoryAsync(days, active.ToList());
+
                 // Both roster ranges are loaded here, before anything runs
                 // in parallel. The per-request cache they fill is a plain
                 // dictionary, which is safe to read from many tasks at once
@@ -1701,6 +1791,13 @@ namespace FactoryManagementSystem.Controllers
                     }));
                 }
 
+                // The layout as it stood on each day, so a day in the
+                // trend is read with the people and the CC the line had
+                // THEN. Same reason as the range path - and the trend is
+                // where a style change shows up most plainly, as a step
+                // in a line that nothing on the floor stepped.
+                await BuildLayoutHistoryAsync(days, active.ToList());
+
                 // Four at a time. Supabase's session pooler allows fifteen
                 // clients for the whole project and refuses the sixteenth.
                 using var gate = new SemaphoreSlim(4);
@@ -1802,7 +1899,19 @@ namespace FactoryManagementSystem.Controllers
             // the range - see the note at the call site, where the
             // per-day rosters were warmed. Served from that cache here,
             // so this is a dictionary lookup and not a vendor call.
-            var codes = context.EmployeeSectionMap.Keys.Concat(borrowedCodes).ToList();
+            // Everybody who was on this line on any day of the range -
+            // the trend is read day by day and each day has its own
+            // roster, so payroll has to be asked about all of them.
+            var allCodes = new HashSet<string>(
+                context.EmployeeSectionMap.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (var d in days)
+            {
+                var onDay = LayoutOnDay(lineId, d);
+                if (onDay != null)
+                    foreach (var c in onDay.Value.Map.Keys) allCodes.Add(c);
+            }
+
+            var codes = allCodes.Concat(borrowedCodes).ToList();
             var attendanceByDate = new Dictionary<DateTime, Dictionary<string, string>>();
             foreach (var d in days)
             {
@@ -1819,7 +1928,12 @@ namespace FactoryManagementSystem.Controllers
                     ? m
                     : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceForDay);
+                // The line as it stood that day, same as the range path.
+                var onDay = LayoutOnDay(lineId, d);
+                var mapForDay = onDay?.Map ?? context.EmployeeSectionMap;
+                var samForDay = onDay != null ? onDay.Value.Sam : context.Sam;
+
+                var payrollPosted = PayrollHasPosted(mapForDay, attendanceForDay);
                 var canEstimate = !payrollPosted
                     && ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own)
                     && own.Count > 0;
@@ -1829,7 +1943,7 @@ namespace FactoryManagementSystem.Controllers
                 }
 
                 var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
-                    ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d],
+                    ClassifyAttendance(mapForDay, attendanceForDay, loansByDate[d],
                         treatMissingAsPresent: canEstimate);
 
                 var (o, r) = outputByDate.TryGetValue(d, out var v) ? v : (0, 0);
@@ -1840,7 +1954,8 @@ namespace FactoryManagementSystem.Controllers
                     // One day, so one or none - and the trend page's own
                     // threshold for a day worked is attendance, same as
                     // the count this feeds.
-                    tailorsPresent + othersPresent > 0 ? 1 : 0);
+                    tailorsPresent + othersPresent > 0 ? 1 : 0,
+                    samForDay == null ? null : Math.Round(o * samForDay.Value, 2));
             }
 
             return perDay;
@@ -1866,7 +1981,18 @@ namespace FactoryManagementSystem.Controllers
             /// produced nothing worked that day, badly. Counting output
             /// instead would quietly drop its zero out of the average
             /// and flatter the line.
-            int DaysWorked = 0);
+            int DaysWorked = 0,
+
+            /// Earned minutes, added up day by day at the SAM of the CC
+            /// the line was running on each of them.
+            ///
+            /// Null where no day could be priced, and null on the paths
+            /// that answer for a single day as it stands - there
+            /// [FactoryLine.EarnedMinutes] does output x SAM and the two
+            /// come to the same figure. It is a range crossing a style
+            /// change that they part company on, and Line 14's month was
+            /// 1,05,358 minutes one way and 72,335 the other.
+            double? EarnedMinutes = null);
 
         private sealed record FactoryLine(
             int LineId, string LineName, string CcNo, double? Sam, int TotalPositions,
@@ -1874,8 +2000,13 @@ namespace FactoryManagementSystem.Controllers
             /// Still on this line's layout, but no longer employed.
             int LeftOnLayout = 0)
         {
+            /// The day-by-day sum where one was worked out, which is the
+            /// only honest answer over a range that crosses a style
+            /// change. Otherwise output at this line's current SAM, which
+            /// is the same thing for a single day.
             public double? EarnedMinutes =>
-                Sam == null ? null : Math.Round(Totals.Output * Sam.Value, 2);
+                Totals.EarnedMinutes
+                ?? (Sam == null ? null : Math.Round(Totals.Output * Sam.Value, 2));
         }
 
         /// The sewing teams, as the Strength Summary lays them out: four
@@ -2120,22 +2251,43 @@ namespace FactoryManagementSystem.Controllers
             foreach (var dayLoans in loansByDate.Values)
                 foreach (var code in dayLoans.BorrowedIn.Keys) borrowedCodes.Add(code);
 
+            // Everybody who was on this line on ANY day of the range, not
+            // just the ones on it now - payroll has to be asked about all
+            // of them or a day's roster comes back unknown.
+            var allCodes = new HashSet<string>(
+                context.EmployeeSectionMap.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (var d in days)
+            {
+                var onDay = LayoutOnDay(lineId, d);
+                if (onDay != null)
+                    foreach (var c in onDay.Value.Map.Keys) allCodes.Add(c);
+            }
+
             var attendanceByDate = await FetchAttendanceRangeAsync(
-                from, to, context.EmployeeSectionMap.Keys.Concat(borrowedCodes));
+                from, to, allCodes.Concat(borrowedCodes));
             var ownByDate = await FetchOwnAttendanceRangeAsync(lineId, days);
 
             int tp = 0, op = 0, ab = 0, un = 0, lo = 0, bi = 0;
-            double output = 0, rej = 0;
+            double output = 0, rej = 0, earned = 0;
+            var anySam = false;
             var anyEstimated = false;
             var daysWorked = 0;
 
             foreach (var d in days)
             {
+                // The line as it stood THAT day - who was on it and what
+                // its minutes were worth. Both move together when the CC
+                // changes, and reading either off today's allocation is
+                // what made a month of Line 14 read 255%.
+                var onDay = LayoutOnDay(lineId, d);
+                var mapForDay = onDay?.Map ?? context.EmployeeSectionMap;
+                var samForDay = onDay != null ? onDay.Value.Sam : context.Sam;
+
                 var attendanceForDay = attendanceByDate.TryGetValue(d, out var m)
                     ? m
                     : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-                var payrollPosted = PayrollHasPosted(context.EmployeeSectionMap, attendanceForDay);
+                var payrollPosted = PayrollHasPosted(mapForDay, attendanceForDay);
                 var canEstimate = !payrollPosted
                     && ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own)
                     && own.Count > 0;
@@ -2146,7 +2298,7 @@ namespace FactoryManagementSystem.Controllers
                 }
 
                 var (tailorsPresent, othersPresent, absent, unknown, lentOut, borrowedIn) =
-                    ClassifyAttendance(context.EmployeeSectionMap, attendanceForDay, loansByDate[d],
+                    ClassifyAttendance(mapForDay, attendanceForDay, loansByDate[d],
                         treatMissingAsPresent: canEstimate);
 
                 tp += tailorsPresent;
@@ -2160,11 +2312,22 @@ namespace FactoryManagementSystem.Controllers
                 var (o, r) = outputByDate.TryGetValue(d, out var v) ? v : (0, 0);
                 output += o;
                 rej += r;
+
+                // Priced at the SAM of the CC the line ran THAT day, and
+                // added up - not the whole range's output at one rate. A
+                // line that changed style mid-month has two rates in it,
+                // and the sheet used to charge the lot at whichever one
+                // it happens to be running today.
+                if (samForDay != null)
+                {
+                    anySam = true;
+                    earned += o * samForDay.Value;
+                }
             }
 
             return new LineTotals(
                 tp, op, tp + op, ab, un, lo, bi, output, rej, anyEstimated,
-                daysWorked);
+                daysWorked, anySam ? Math.Round(earned, 2) : null);
         }
 
         /// The production report for every line at once.

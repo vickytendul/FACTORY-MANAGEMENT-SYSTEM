@@ -49,6 +49,7 @@ namespace FactoryManagementSystem.Services.Layouts
         /// windows the Firestore path used, so staleness behaves as it did.
         private const string TransactionsKey = "supabase_active_layout_transactions";
         private const string MasterCountsKey = "supabase_active_main_master_counts";
+        private const string OthersCountsKey = "supabase_active_others_master_counts";
         private static readonly TimeSpan TransactionTtl = TimeSpan.FromSeconds(60);
         private static readonly TimeSpan MasterTtl = TimeSpan.FromSeconds(45);
 
@@ -202,11 +203,48 @@ namespace FactoryManagementSystem.Services.Layouts
             return result;
         }
 
+        public async Task<Dictionary<(int CCId, int LayoutNo), int>> GetActiveOthersLayoutMasterCountsAsync()
+        {
+            if (_cache.TryGetValue(
+                    OthersCountsKey, out Dictionary<(int, int), int>? hit) && hit != null)
+            {
+                return hit;
+            }
+
+            // LayoutSections.IsOthers in SQL: everything but MAIN, the
+            // super team and the bench - plus a QC or IE that had to be
+            // filed on the bench for want of a section of its own.
+            const string sql = """
+                select cc_id, coalesce(layout_no, 1) as ln, count(*)
+                from public.layout_masters
+                where is_active
+                  and coalesce(is_required, true)
+                  and (
+                        upper(trim(section)) not in ('MAIN', 'SUPER TEAM', 'OTHERS')
+                     or (upper(trim(section)) = 'OTHERS'
+                         and upper(trim(operation_name)) in ('QC', 'IE'))
+                      )
+                group by cc_id, coalesce(layout_no, 1)
+                """;
+            await using var cmd = _dataSource.CreateCommand(sql);
+            await using var r = await cmd.ExecuteReaderAsync();
+            var result = new Dictionary<(int, int), int>();
+            while (await r.ReadAsync())
+                result[(r.GetInt32(0), r.GetInt32(1))] = (int)r.GetInt64(2);
+
+            _cache.Set(OthersCountsKey, result, MasterTtl);
+            return result;
+        }
+
         // Called by the controllers after every write, which is what keeps
         // a saved layout from being invisible for the next minute.
         public void InvalidateLayoutTransactionsCache() => _cache.Remove(TransactionsKey);
 
-        public void InvalidateLayoutMastersCache() => _cache.Remove(MasterCountsKey);
+        public void InvalidateLayoutMastersCache()
+        {
+            _cache.Remove(MasterCountsKey);
+            _cache.Remove(OthersCountsKey);
+        }
 
         // ── LayoutMaster reads ──────────────────────────────────────────
 

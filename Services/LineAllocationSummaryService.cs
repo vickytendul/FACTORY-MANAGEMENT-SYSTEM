@@ -99,6 +99,8 @@ public class LineAllocationSummaryService
                 LayoutNo = row.LayoutNo,
                 RequiredCount = row.RequiredCount,
                 AllocatedCount = row.AllocatedCount,
+                OthersRequiredCount = row.OthersRequiredCount,
+                OthersAllocatedCount = row.OthersAllocatedCount,
                 UpdatedAtUtc = now
             }).ToList(),
             UpdatedAtUtc = now
@@ -223,6 +225,8 @@ public class LineAllocationSummaryService
                     RequiredCount = doc.RequiredCount,
                     AllocatedCount = manned,
                     AllocatedOnPaperCount = doc.AllocatedCount,
+                    OthersRequiredCount = doc.OthersRequiredCount,
+                    OthersAllocatedCount = doc.OthersAllocatedCount,
                     AbsentUncoveredCount = adjustment.AbsentUncovered,
                     CoveredCount = adjustment.Covered,
                     LentOutCount = adjustment.LentOut,

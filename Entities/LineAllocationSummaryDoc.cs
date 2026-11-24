@@ -40,6 +40,17 @@ namespace FactoryManagementSystem.Entities
         [FirestoreProperty]
         public int AllocatedCount { get; set; }
 
+        /// The OTHERS table's own pair - checkers, helpers, line leaders,
+        /// QC and IE. Absent from documents written before they existed,
+        /// which deserialise to 0 and read as "no others on this layout"
+        /// until the next rebuild; a rebuild runs on the next layout save
+        /// and on the admin endpoint, so the gap closes itself.
+        [FirestoreProperty]
+        public int OthersRequiredCount { get; set; }
+
+        [FirestoreProperty]
+        public int OthersAllocatedCount { get; set; }
+
         [FirestoreProperty]
         public DateTime UpdatedAtUtc { get; set; }
     }

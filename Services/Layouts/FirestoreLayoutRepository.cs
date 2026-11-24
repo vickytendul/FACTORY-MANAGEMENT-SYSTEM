@@ -99,6 +99,34 @@ namespace FactoryManagementSystem.Services.Layouts
             return result;
         }
 
+        public async Task<Dictionary<(int CCId, int LayoutNo), int>> GetActiveOthersLayoutMasterCountsAsync()
+        {
+            var key = $"layoutrepo_others_counts_v{Volatile.Read(ref _masterVersion)}";
+            if (_cache.TryGetValue(key, out Dictionary<(int, int), int>? cached) && cached != null)
+                return cached;
+
+            // No server-side section filter here: the rule is "anything but
+            // these three, plus two operations out of one of them", which
+            // Firestore cannot express as an equality. Active rows only,
+            // and the result is cached the same 45 seconds as the MAIN
+            // count beside it.
+            var snapshot = await _firestore.LayoutMasters
+                .WhereEqualTo(nameof(LayoutMaster.IsActive), true)
+                .GetSnapshotAsync();
+
+            var result = snapshot.Documents
+                .Select(d => d.ConvertTo<LayoutMaster>())
+                .Where(x => LayoutSections.IsOthers(x.Section, x.OperationName))
+                // An operation the floor is not running - see the MAIN
+                // count above for why this is filtered in memory.
+                .Where(x => x.IsRequired)
+                .GroupBy(x => (x.CCId, NormalizeLayoutNo(x.LayoutNo)))
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            _cache.Set(key, result, MasterTtl);
+            return result;
+        }
+
         public void InvalidateLayoutTransactionsCache()
         {
             Interlocked.Increment(ref _transactionVersion);

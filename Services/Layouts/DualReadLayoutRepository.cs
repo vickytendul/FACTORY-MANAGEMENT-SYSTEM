@@ -148,6 +148,29 @@ namespace FactoryManagementSystem.Services.Layouts
             return primary;
         }
 
+        public async Task<Dictionary<(int CCId, int LayoutNo), int>> GetActiveOthersLayoutMasterCountsAsync()
+        {
+            var primary = await _firebase.GetActiveOthersLayoutMasterCountsAsync();
+            try
+            {
+                var other = await _supabase.GetActiveOthersLayoutMasterCountsAsync();
+                var differing = primary.Keys.Union(other.Keys)
+                    .Where(k => !primary.TryGetValue(k, out var pv) || !other.TryGetValue(k, out var ov) || pv != ov)
+                    .ToList();
+                if (differing.Count > 0)
+                    _log.LogWarning("LAYOUT DUAL-READ MISMATCH [GetActiveOthersLayoutMasterCounts] " +
+                        "firebaseKeys={Fb} supabaseKeys={Sb} differing=[{Keys}]",
+                        primary.Count, other.Count, string.Join(",", differing.Take(10)));
+                else
+                    _log.LogInformation("LAYOUT DUAL-READ OK [GetActiveOthersLayoutMasterCounts] {Count} groups matched", primary.Count);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "LAYOUT DUAL-READ [GetActiveOthersLayoutMasterCounts] supabase read failed");
+            }
+            return primary;
+        }
+
         public Task<List<LayoutMaster>> GetAllLayoutMastersByCcAsync(int ccId) =>
             CompareAsync($"GetAllLayoutMastersByCc:{ccId}",
                 _firebase.GetAllLayoutMastersByCcAsync(ccId),

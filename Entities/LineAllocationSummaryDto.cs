@@ -25,6 +25,17 @@ public class LineAllocationSummaryDto
     /// two counts below are today's live adjustment to it.
     public int AllocatedOnPaperCount { get; set; }
 
+    /// The same two figures for the OTHERS table - checkers, helpers,
+    /// line leaders, QC and IE. The card printed MAIN alone, which on a
+    /// line of 39 machines left the eight people standing beside them
+    /// unaccounted for on the one screen the floor reads every morning.
+    ///
+    /// On paper, not adjusted for today's attendance: MAIN is adjusted
+    /// because the percentage and the status are read off it, and
+    /// nothing is read off these two.
+    public int OthersRequiredCount { get; set; }
+    public int OthersAllocatedCount { get; set; }
+
     /// Allocated operators away today (absent or on leave per payroll)
     /// with no replacement recorded - each one costs a position.
     public int AbsentUncoveredCount { get; set; }

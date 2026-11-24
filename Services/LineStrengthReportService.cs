@@ -386,6 +386,7 @@ public class LineStrengthReportService
         var lines = await ResolveLinesAsync();
         var layoutTransactions = await _layouts.GetActiveLayoutTransactionsAsync();
         var requiredByLayout = await _layouts.GetActiveMainLayoutMasterCountsAsync();
+        var othersRequiredByLayout = await _layouts.GetActiveOthersLayoutMasterCountsAsync();
         var ccNumbers = await CcNumbersByIdAsync();
 
         var transactionsByLine = layoutTransactions
@@ -397,6 +398,7 @@ public class LineStrengthReportService
                 line,
                 transactionsByLine.GetValueOrDefault(line.LineId),
                 requiredByLayout,
+                othersRequiredByLayout,
                 ccNumbers))
             .OrderBy(r => ExtractLineNumber(r.LineName))
             .ToList();
@@ -408,6 +410,7 @@ public class LineStrengthReportService
         Line line,
         List<LayoutTransaction>? transactions,
         Dictionary<(int CCId, int LayoutNo), int> requiredByLayout,
+        Dictionary<(int CCId, int LayoutNo), int> othersRequiredByLayout,
         Dictionary<int, string> ccNumbers)
     {
         if (transactions == null || transactions.Count == 0)
@@ -421,6 +424,8 @@ public class LineStrengthReportService
                 LayoutNo = null,
                 RequiredCount = 0,
                 AllocatedCount = 0,
+                OthersRequiredCount = 0,
+                OthersAllocatedCount = 0,
                 Percentage = null,
                 Status = "Not Started"
             };
@@ -430,6 +435,7 @@ public class LineStrengthReportService
         var ccId = firstTx.CCId;
         var layoutNo = NormalizeLayoutNo(firstTx.LayoutNo);
         var requiredCount = requiredByLayout.GetValueOrDefault((ccId, layoutNo), 0);
+        var othersRequiredCount = othersRequiredByLayout.GetValueOrDefault((ccId, layoutNo), 0);
 
         // Both halves of this ratio must describe the same population.
         // Required counts MAIN LayoutMasters only, so allocated counts MAIN
@@ -440,7 +446,20 @@ public class LineStrengthReportService
         // read 41 of 36 - more allocated than the layout even has.
         var allocatedCount = transactions.Count(t =>
             !string.IsNullOrWhiteSpace(t.EmployeeCode) &&
-            string.Equals(t.Section, "MAIN", StringComparison.OrdinalIgnoreCase));
+            LayoutSections.IsMain(t.Section));
+
+        // The same ratio for the OTHERS table - checkers, helpers, line
+        // leaders, QC and IE. Counted with the same rule on both halves
+        // for the reason spelled out above: a required count over one
+        // population and an allocated count over another is a figure that
+        // can read past 100% or hide a hole.
+        //
+        // The bench and the super team are in neither. The card is about
+        // whether the line is manned, and a bench place nobody is standing
+        // on is not a line short of a person.
+        var othersAllocatedCount = transactions.Count(t =>
+            !string.IsNullOrWhiteSpace(t.EmployeeCode) &&
+            LayoutSections.IsOthers(t.Section, t.OperationName));
 
         var (percentage, status) = ComputePercentageAndStatus(requiredCount, allocatedCount);
 
@@ -453,6 +472,8 @@ public class LineStrengthReportService
             LayoutNo = layoutNo,
             RequiredCount = requiredCount,
             AllocatedCount = allocatedCount,
+            OthersRequiredCount = othersRequiredCount,
+            OthersAllocatedCount = othersAllocatedCount,
             Percentage = percentage,
             Status = status
         };

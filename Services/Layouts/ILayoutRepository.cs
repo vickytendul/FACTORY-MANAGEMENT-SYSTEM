@@ -31,6 +31,15 @@ namespace FactoryManagementSystem.Services.Layouts
         /// headcount" figure the Home Screen summary is built from.
         Task<Dictionary<(int CCId, int LayoutNo), int>> GetActiveMainLayoutMasterCountsAsync();
 
+        /// The same count for the OTHERS table - the named support
+        /// sections plus a QC or IE filed under the catch-all. See
+        /// [LayoutSections] for what belongs there and why.
+        ///
+        /// The bench (BACKUP - OTHERS) and the super team are deliberately
+        /// out of it: the card is about the line being manned, and neither
+        /// of those is a position the line is short of.
+        Task<Dictionary<(int CCId, int LayoutNo), int>> GetActiveOthersLayoutMasterCountsAsync();
+
         void InvalidateLayoutTransactionsCache();
         void InvalidateLayoutMastersCache();
 

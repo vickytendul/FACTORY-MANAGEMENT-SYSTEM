@@ -1686,6 +1686,343 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// The people behind the STRENGTH figures on the OWE sheet, named.
+        ///
+        /// The sheet says a line had 46 and the factory had 478. This says
+        /// which 46 and which 478 - the question a headcount always
+        /// provokes, and the one a supervisor has to answer before he can
+        /// do anything about the number.
+        ///
+        /// ── why it is a sum of days and not a list of people ─────────────
+        ///
+        /// Over a range the sheet's TOTAL is person-days: AggregateLineOver
+        /// Days adds each day's headcount, because that is what the
+        /// available minutes beside it are worked out from. So every row
+        /// here carries its own PresentDays, and the rows' PresentDays add
+        /// up to exactly the figure that was clicked. On a single date each
+        /// is 1 and the sum is simply the number of people, which is what
+        /// somebody reading one day expects.
+        ///
+        /// ── why it is not AttendanceDetail over a range ─────────────────
+        ///
+        /// AttendanceDetail answers for the line as it stands TODAY and
+        /// leaves out the people borrowed in, who are in the present count.
+        /// This walks the days the way the sheet walks them: the layout as
+        /// it stood on each one, the loans settled for that day, the
+        /// supervisor's own marks on a day payroll has not posted, and the
+        /// borrowed operators counted where their minutes were worked. Same
+        /// order, same rules, same source - so the list cannot come to
+        /// disagree with the figure it explains.
+        ///
+        /// [lineIds] is a comma-separated list, so one line, a team's lines
+        /// or the whole floor are the same request. Empty means every
+        /// allocated line, which is what TOTAL SUMMARY asks for.
+        [HttpGet("present-people")]
+        public async Task<IActionResult> PresentPeople(
+            string? lineIds = null,
+            DateTime? date = null, DateTime? fromDate = null, DateTime? toDate = null)
+        {
+            try
+            {
+                var from = (fromDate ?? date ?? DateTime.Now).Date;
+                var to = (toDate ?? date ?? DateTime.Now).Date;
+                if (to < from) (from, to) = (to, from);
+
+                var days = new List<DateTime>();
+                for (var d = from; d <= to; d = d.AddDays(1)) days.Add(d);
+
+                var active = await _layouts.GetActiveLayoutTransactionsAsync();
+                var allocated = active
+                    .Where(x => !string.IsNullOrWhiteSpace(x.EmployeeCode))
+                    .Select(x => x.LineId)
+                    .Distinct()
+                    .OrderBy(x => x)
+                    .ToList();
+
+                var asked = (lineIds ?? string.Empty)
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries
+                                | StringSplitOptions.TrimEntries)
+                    .Select(s => int.TryParse(s, out var v) ? v : (int?)null)
+                    .Where(v => v != null)
+                    .Select(v => v!.Value)
+                    .ToHashSet();
+
+                var wanted = asked.Count == 0
+                    ? allocated
+                    : allocated.Where(asked.Contains).ToList();
+
+                // The same prologue the sheet itself runs, in the same
+                // order. Each of these writes a per-request cache that is
+                // then read from several tasks at once, so all of it
+                // happens here while there is still one thread.
+                var homeLineByCode = new Dictionary<string, int>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var t in active)
+                {
+                    var c = (t.EmployeeCode ?? string.Empty).Trim();
+                    if (c.Length > 0) homeLineByCode[c] = t.LineId;
+                }
+                await BuildBorrowClaimAsync(days, homeLineByCode);
+                await BuildLayoutHistoryAsync(days, active.ToList());
+                await LoadRosterAsync(from, to);
+                await LoadRosterAsync(DateTime.UtcNow.Date, DateTime.UtcNow.Date);
+                _payrollTailors = await PayrollTailorCodesAsync(from, to);
+
+                // Names off the whole allocation timeline, not just the
+                // active rows: somebody who stood on this line in the first
+                // week of the month and has since been moved is in the
+                // figure, and a row with a code and no name is the one row
+                // nobody can act on.
+                var nameByCode = new Dictionary<string, string>(
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var t in await _layouts.GetAllLayoutTransactionsAsync())
+                {
+                    var c = (t.EmployeeCode ?? string.Empty).Trim();
+                    if (c.Length == 0) continue;
+                    var n = (t.EmployeeName ?? string.Empty).Trim();
+                    if (n.Length > 0) nameByCode[c] = n;
+                }
+
+                var rows = new List<PresentPerson>();
+                foreach (var lineId in wanted)
+                {
+                    rows.AddRange(await PresentPeopleOnLineAsync(lineId, days, nameByCode));
+                }
+
+                // Present first, because that is what was clicked; then the
+                // people who were on the line and were not, which is the
+                // next question. Within each, most days first.
+                var ordered = rows
+                    .OrderByDescending(p => p.PresentDays > 0)
+                    .ThenByDescending(p => p.PresentDays)
+                    .ThenBy(p => p.LineId)
+                    .ThenBy(p => p.Code, StringComparer.Ordinal)
+                    .ToList();
+
+                return Ok(new
+                {
+                    fromDate = from,
+                    toDate = to,
+                    dayCount = days.Count,
+                    lineIds = wanted,
+                    // The three figures the sheet printed, worked out from
+                    // these rows - so a mismatch is visible here rather
+                    // than only to somebody adding the list up by hand.
+                    tailorsPresent = ordered.Sum(p => p.PresentDaysTailor),
+                    othersPresent = ordered.Sum(p => p.PresentDaysOthers),
+                    totalPresent = ordered.Sum(p => p.PresentDays),
+                    peopleCount = ordered.Select(p => p.Code)
+                        .Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                    people = ordered,
+                });
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        /// One person's standing on one line over the range.
+        ///
+        /// [LineId] and [Borrowed] are part of the identity, not just
+        /// description: somebody can be on their own line for half the week
+        /// and covering on another for the rest, and those are two rows
+        /// because they are two different lots of minutes.
+        private sealed record PresentPerson(
+            string Code,
+            string Name,
+            string Section,
+            string Category,
+            bool IsTailor,
+            int LineId,
+            bool Borrowed,
+            int PresentDays,
+            /// Which column each present day landed in.
+            ///
+            /// Split per day and not per person, because the section is a
+            /// per-day fact: a tailor who stood in as a checker for part of
+            /// a month is counted under OTHERS on those days and under
+            /// TAILOR on the rest, exactly as ClassifyAttendance counts
+            /// them. Labelling the whole row with one category and adding
+            /// the row's days to that column put line 28's November at
+            /// 375/87 against the sheet's 392/70 - the same total, split
+            /// seventeen days wrong.
+            int PresentDaysTailor,
+            int PresentDaysOthers,
+            int AbsentDays,
+            int UnknownDays,
+            int LentOutDays,
+            int DaysOnLine,
+            bool Estimated);
+
+        /// [AggregateLineOverDaysAsync]'s walk, keeping the people instead
+        /// of adding them up. Every branch below has its counterpart there;
+        /// if one changes, change both.
+        private async Task<List<PresentPerson>> PresentPeopleOnLineAsync(
+            int lineId, List<DateTime> days, Dictionary<string, string> nameByCode)
+        {
+            var context = await ResolveLineContextAsync(lineId, null, null);
+            if (context == null) return new List<PresentPerson>();
+
+            var from = days[0];
+            var to = days[^1];
+
+            var loansByDate = await FetchLoansForRangeAsync(lineId, from, to, context);
+            var borrowedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dayLoans in loansByDate.Values)
+                foreach (var code in dayLoans.BorrowedIn.Keys) borrowedCodes.Add(code);
+
+            var allCodes = new HashSet<string>(
+                context.EmployeeSectionMap.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (var d in days)
+            {
+                var onDay = LayoutOnDay(lineId, d);
+                if (onDay != null)
+                    foreach (var c in onDay.Value.Map.Keys) allCodes.Add(c);
+            }
+
+            var attendanceByDate = await FetchAttendanceRangeAsync(
+                from, to, allCodes.Concat(borrowedCodes));
+            var ownByDate = await FetchOwnAttendanceRangeAsync(lineId, days);
+
+            // Keyed by code AND whether they were borrowed, for the reason
+            // given on PresentPerson.
+            var acc = new Dictionary<(string Code, bool Borrowed), int[]>();
+            var meta = new Dictionary<(string Code, bool Borrowed), (string Section, bool Estimated)>();
+
+            int[] Slot(string code, bool borrowed)
+            {
+                var key = (code, borrowed);
+                if (!acc.TryGetValue(key, out var v)) acc[key] = v = new int[7];
+                return v;
+            }
+
+            const int Present = 0, Absent = 1, Unknown = 2, LentOut = 3, OnLine = 4,
+                      PresentT = 5, PresentO = 6;
+
+            foreach (var d in days)
+            {
+                var onDay = LayoutOnDay(lineId, d);
+                var mapForDay = onDay?.Map ?? context.EmployeeSectionMap;
+
+                var attendanceForDay = attendanceByDate.TryGetValue(d, out var m)
+                    ? m
+                    : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                var payrollPosted = PayrollHasPosted(mapForDay, attendanceForDay);
+                var canEstimate = !payrollPosted
+                    && ownByDate.TryGetValue(DateTime.SpecifyKind(d, DateTimeKind.Utc), out var own)
+                    && own.Count > 0;
+                if (canEstimate)
+                {
+                    attendanceForDay = ownByDate[DateTime.SpecifyKind(d, DateTimeKind.Utc)];
+                }
+
+                var loans = loansByDate[d];
+
+                foreach (var (code, section) in mapForDay)
+                {
+                    var slot = Slot(code, false);
+                    var isTailorToday = CountsAsTailor(code, section);
+                    slot[OnLine]++;
+                    meta[(code, false)] = (
+                        section ?? string.Empty,
+                        meta.TryGetValue((code, false), out var was) && was.Estimated);
+
+                    void CountPresent()
+                    {
+                        slot[Present]++;
+                        if (isTailorToday) slot[PresentT]++; else slot[PresentO]++;
+                    }
+
+                    if (loans.LentOut.Contains(code)) { slot[LentOut]++; continue; }
+
+                    if (!attendanceForDay.TryGetValue(code, out var status))
+                    {
+                        if (canEstimate)
+                        {
+                            CountPresent();
+                            var mm = meta[(code, false)];
+                            meta[(code, false)] = (mm.Section, true);
+                        }
+                        else slot[Unknown]++;
+                        continue;
+                    }
+
+                    var trimmed = status.Trim();
+                    if (trimmed.Equals("P", StringComparison.OrdinalIgnoreCase) ||
+                        trimmed.Equals("Present", StringComparison.OrdinalIgnoreCase))
+                    {
+                        CountPresent();
+                    }
+                    else if (trimmed.Equals("A", StringComparison.OrdinalIgnoreCase) ||
+                             trimmed.Equals("AB", StringComparison.OrdinalIgnoreCase) ||
+                             trimmed.Equals("Absent", StringComparison.OrdinalIgnoreCase))
+                    {
+                        slot[Absent]++;
+                    }
+                    else slot[Unknown]++;
+                }
+
+                foreach (var (code, section) in loans.BorrowedIn)
+                {
+                    if (!attendanceForDay.TryGetValue(code, out var status)) continue;
+                    var trimmed = status.Trim();
+                    if (!trimmed.Equals("P", StringComparison.OrdinalIgnoreCase) &&
+                        !trimmed.Equals("Present", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    // The operation they covered HERE, not their home
+                    // section - a super team tailor standing in as a checker
+                    // did a checker's work today, which is the rule
+                    // ClassifyAttendance applies to the same rows.
+                    var sec = (section ?? string.Empty).Trim().ToUpper();
+                    var slot = Slot(code, true);
+                    slot[Present]++;
+                    if (sec == "MAIN" || sec == "SUPER TEAM") slot[PresentT]++;
+                    else slot[PresentO]++;
+                    slot[OnLine]++;
+                    meta[(code, true)] = (section ?? string.Empty, false);
+                }
+            }
+
+            var people = new List<PresentPerson>();
+            foreach (var ((code, borrowed), v) in acc)
+            {
+                var (section, estimated) = meta.TryGetValue((code, borrowed), out var mm)
+                    ? mm
+                    : (string.Empty, false);
+
+                // One label for a row whose days may have landed in both
+                // columns: whichever took more of them, and TAILOR on a tie
+                // because that is what the section map says when there are
+                // no present days to go on.
+                var isTailor = v[Present] > 0
+                    ? v[PresentT] >= v[PresentO]
+                    : CountsAsTailor(code, section);
+
+                people.Add(new PresentPerson(
+                    Code: code,
+                    Name: nameByCode.GetValueOrDefault(code, string.Empty),
+                    Section: section,
+                    Category: isTailor ? "TAILOR" : "OTHERS",
+                    IsTailor: isTailor,
+                    LineId: lineId,
+                    Borrowed: borrowed,
+                    PresentDays: v[Present],
+                    PresentDaysTailor: v[PresentT],
+                    PresentDaysOthers: v[PresentO],
+                    AbsentDays: v[Absent],
+                    UnknownDays: v[Unknown],
+                    LentOutDays: v[LentOut],
+                    DaysOnLine: v[OnLine],
+                    Estimated: estimated));
+            }
+            return people;
+        }
+
         /// The same report as [Factory], but one row per DAY rather than
         /// one total over the range.
         ///

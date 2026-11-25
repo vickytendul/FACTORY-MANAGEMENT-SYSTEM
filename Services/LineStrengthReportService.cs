@@ -389,6 +389,24 @@ public class LineStrengthReportService
         var othersRequiredByLayout = await _layouts.GetActiveOthersLayoutMasterCountsAsync();
         var ccNumbers = await CcNumbersByIdAsync();
 
+        // Which table each allocated row actually stands in.
+        //
+        // A LayoutTransaction carries a Section and an OperationName of
+        // its own, and both go stale. GUL0208 on Line 10 stands on a row
+        // the layout now calls QC; the transaction still said LINE
+        // LEADER, filed under the catch-all - so the rule that lets a QC
+        // off the bench never fired and the card read 7 of 9 under a
+        // table of eight. The allocation screen draws its tables off the
+        // LayoutMaster, and so does the required count beside this one.
+        // Judging the allocated half by the transaction's own words was
+        // the one place the three disagreed.
+        var masterById = (await _layouts.GetLayoutMastersByIdsAsync(
+                layoutTransactions
+                    .Where(t => t.LayoutMasterId > 0)
+                    .Select(t => t.LayoutMasterId)))
+            .GroupBy(m => m.Id)
+            .ToDictionary(g => g.Key, g => g.First());
+
         var transactionsByLine = layoutTransactions
             .GroupBy(t => t.LineId)
             .ToDictionary(g => g.Key, g => g.ToList());
@@ -399,6 +417,7 @@ public class LineStrengthReportService
                 transactionsByLine.GetValueOrDefault(line.LineId),
                 requiredByLayout,
                 othersRequiredByLayout,
+                masterById,
                 ccNumbers))
             .OrderBy(r => ExtractLineNumber(r.LineName))
             .ToList();
@@ -406,11 +425,31 @@ public class LineStrengthReportService
         return results;
     }
 
+    /// Where a row stands, as the LAYOUT says rather than as the
+    /// transaction remembers.
+    ///
+    /// The transaction's own Section and OperationName are a copy taken
+    /// when the row was allocated, and the layout has moved under them
+    /// since - a position renamed, or re-filed into another section.
+    /// The allocation screen and the required count both read the
+    /// master, so this is what keeps all three saying the same thing.
+    ///
+    /// Falls back to the transaction's copy where the master has since
+    /// been deleted: 97 inactive transactions point at masters that no
+    /// longer exist, and their own words are all they have left.
+    private static (string? Section, string? Operation) Place(
+        LayoutTransaction t,
+        Dictionary<int, LayoutMaster> masterById) =>
+        masterById.TryGetValue(t.LayoutMasterId, out var master)
+            ? (master.Section, master.OperationName)
+            : (t.Section, t.OperationName);
+
     private static LineAllocationSummaryDto BuildSummary(
         Line line,
         List<LayoutTransaction>? transactions,
         Dictionary<(int CCId, int LayoutNo), int> requiredByLayout,
         Dictionary<(int CCId, int LayoutNo), int> othersRequiredByLayout,
+        Dictionary<int, LayoutMaster> masterById,
         Dictionary<int, string> ccNumbers)
     {
         if (transactions == null || transactions.Count == 0)
@@ -446,7 +485,7 @@ public class LineStrengthReportService
         // read 41 of 36 - more allocated than the layout even has.
         var allocatedCount = transactions.Count(t =>
             !string.IsNullOrWhiteSpace(t.EmployeeCode) &&
-            LayoutSections.IsMain(t.Section));
+            LayoutSections.IsMain(Place(t, masterById).Section));
 
         // The same ratio for the OTHERS table - checkers, helpers, line
         // leaders, QC and IE. Counted with the same rule on both halves
@@ -458,8 +497,11 @@ public class LineStrengthReportService
         // whether the line is manned, and a bench place nobody is standing
         // on is not a line short of a person.
         var othersAllocatedCount = transactions.Count(t =>
-            !string.IsNullOrWhiteSpace(t.EmployeeCode) &&
-            LayoutSections.IsOthers(t.Section, t.OperationName));
+        {
+            if (string.IsNullOrWhiteSpace(t.EmployeeCode)) return false;
+            var (section, operation) = Place(t, masterById);
+            return LayoutSections.IsOthers(section, operation);
+        });
 
         var (percentage, status) = ComputePercentageAndStatus(requiredCount, allocatedCount);
 

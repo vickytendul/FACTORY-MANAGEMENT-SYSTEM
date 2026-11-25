@@ -14,10 +14,13 @@ namespace FactoryManagementSystem.Controllers
     public class LineTargetsController : ControllerBase
     {
         private readonly LineTargetRepository _targets;
+        private readonly LineRunDayCounter _dayCounter;
 
-        public LineTargetsController(LineTargetRepository targets)
+        public LineTargetsController(
+            LineTargetRepository targets, LineRunDayCounter dayCounter)
         {
             _targets = targets;
+            _dayCounter = dayCounter;
         }
 
         private static object Public(LineTarget t) => new
@@ -67,6 +70,39 @@ namespace FactoryManagementSystem.Controllers
                 var day = (date ?? DateTime.Now).Date;
                 var rows = await _targets.GetForDayAsync(day);
                 return Ok(rows.Select(Public));
+            }
+            catch (Exception ex)
+            {
+                return BadRequest(new { Success = false, Message = ex.Message });
+            }
+        }
+
+        // GET: api/LineTargets/day-count?asOf=2026-11-25
+        //
+        // How many days each line has been running its current style, as
+        // at that date. Counted from the day the line took the style on,
+        // one per working day - Sundays and declared holidays do not
+        // move it - and running on from the floor's own figure where one
+        // was written down. See LineRunDayCounter.
+        //
+        // Today when no date is given. A line not running that day is
+        // absent from the answer rather than nought.
+        [HttpGet("day-count")]
+        public async Task<IActionResult> DayCount([FromQuery] DateTime? asOf = null)
+        {
+            try
+            {
+                var day = (asOf ?? DateTime.Now).Date;
+                var counts = await _dayCounter.CountsAsOfAsync(day);
+                return Ok(counts.Values
+                    .OrderBy(v => v.LineId)
+                    .Select(v => new
+                    {
+                        lineId = v.LineId,
+                        noOfDays = v.NoOfDays,
+                        runStart = v.RunStart.ToString("yyyy-MM-dd"),
+                        seeded = v.Seeded,
+                    }));
             }
             catch (Exception ex)
             {

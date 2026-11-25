@@ -402,6 +402,10 @@ if (hasSupabase)
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.DowntimeEntryRepository>();
     // The day's plan, line by line. Same terms again.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.LineTargetRepository>();
+    // How long each line has been on the style it is running. Counted
+    // from the allocation history rather than typed every morning - see
+    // LineRunDayCounter for what the typed figures had become.
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.LineRunDayCounter>();
     // Machine requests - a line calling for a mechanic. Same terms
     // again, and the same shape as the feeding requests beside them.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Machine.MachineRequestRepository>();

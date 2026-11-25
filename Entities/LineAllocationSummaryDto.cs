@@ -30,18 +30,28 @@ public class LineAllocationSummaryDto
     /// line of 39 machines left the eight people standing beside them
     /// unaccounted for on the one screen the floor reads every morning.
     ///
-    /// On paper, not adjusted for today's attendance: MAIN is adjusted
-    /// because the percentage and the status are read off it, and
-    /// nothing is read off these two.
+    /// Adjusted for today's attendance exactly as MAIN is, and for the
+    /// same reason. Line 23 read OTHERS 11 of 11 with six of the eleven
+    /// lent out to four other lines and three more away uncovered - two
+    /// people standing on a line the card called fully manned.
     public int OthersRequiredCount { get; set; }
     public int OthersAllocatedCount { get; set; }
 
+    /// The OTHERS allocation on paper, before today's attendance - the
+    /// twin of [AllocatedOnPaperCount].
+    public int OthersAllocatedOnPaperCount { get; set; }
+
     /// Allocated operators away today (absent or on leave per payroll)
     /// with no replacement recorded - each one costs a position.
+    ///
+    /// Both tables together, because both figures above are now
+    /// adjusted and this line of small print sits under the pair. A
+    /// note that accounted for only one of them would have the card
+    /// explaining part of its own arithmetic.
     public int AbsentUncoveredCount { get; set; }
 
     /// Allocated operators away today whose position somebody is covering
-    /// - these still count as manned.
+    /// - these still count as manned. Both tables, as above.
     public int CoveredCount { get; set; }
 
     /// Allocated operators who were recorded today as covering somebody on

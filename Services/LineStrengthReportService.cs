@@ -253,9 +253,17 @@ public class LineStrengthReportService
     /// figures. Lent out is tested first: somebody put them on another
     /// line today, which is a deliberate act and more recent than
     /// anything payroll has to say.
-    public async Task<Dictionary<int, (int AbsentUncovered, int Covered, int LentOut)>> GetAbsenceAdjustmentAsync()
+    ///
+    /// Counted for the OTHERS table as well as for MAIN, in its own
+    /// three figures. Line 23 read OTHERS 11 of 11 with six of those
+    /// eleven lent out to four other lines and three more away
+    /// uncovered: two people standing on a line the card called fully
+    /// manned. MAIN has been adjusted since the day it read 15 of 25
+    /// with nobody on it; the checkers and the line leaders beside it
+    /// had not been.
+    public async Task<Dictionary<int, AbsenceAdjustment>> GetAbsenceAdjustmentAsync()
     {
-        var result = new Dictionary<int, (int AbsentUncovered, int Covered, int LentOut)>();
+        var result = new Dictionary<int, AbsenceAdjustment>();
 
         var today = DateTime.Today;
         // No early return on an empty payroll any more. Absence needs it,
@@ -296,10 +304,30 @@ public class LineStrengthReportService
             lentOutToLine[cover] = a.LineId;
         }
 
+        // Which table each row stands in, read from the LayoutMaster for
+        // the reason BuildSummary reads it there: a transaction's own
+        // Section and OperationName are a copy taken at allocation time
+        // and go stale. Both halves of this figure are subtracted from
+        // counts classified that way, and a row sorted one way here and
+        // the other way there is a person subtracted from a table they
+        // were never counted in.
+        var masterById = (await _layouts.GetLayoutMastersByIdsAsync(
+                layoutTransactions
+                    .Where(t => t.LayoutMasterId > 0)
+                    .Select(t => t.LayoutMasterId)))
+            .GroupBy(m => m.Id)
+            .ToDictionary(g => g.Key, g => g.First());
+
         foreach (var tx in layoutTransactions)
         {
             if (tx.LineId <= 0) continue;
-            if (!string.Equals(tx.Section, "MAIN", StringComparison.OrdinalIgnoreCase)) continue;
+
+            var (section, operation) = Place(tx, masterById);
+            var main = LayoutSections.IsMain(section);
+            var others = !main && LayoutSections.IsOthers(section, operation);
+            // The bench and the super team are in neither count, exactly
+            // as they are in neither allocated count.
+            if (!main && !others) continue;
 
             var code = (tx.EmployeeCode ?? string.Empty).Trim();
             if (code.Length == 0) continue;
@@ -317,20 +345,50 @@ public class LineStrengthReportService
                 // costs nothing and is not reported as short.
                 if (isCovered) continue;
 
-                result[tx.LineId] = (current.AbsentUncovered, current.Covered, current.LentOut + 1);
+                result[tx.LineId] = main
+                    ? current with { LentOut = current.LentOut + 1 }
+                    : current with { OthersLentOut = current.OthersLentOut + 1 };
                 continue;
             }
 
             if (!payroll.TryGetValue(code, out var status)) continue;
             if (!CompanyAttendanceService.IsUnavailable(status)) continue;
 
-            result[tx.LineId] = isCovered
-                ? (current.AbsentUncovered, current.Covered + 1, current.LentOut)
-                : (current.AbsentUncovered + 1, current.Covered, current.LentOut);
+            result[tx.LineId] = (main, isCovered) switch
+            {
+                (true, true) => current with { Covered = current.Covered + 1 },
+                (true, false) => current with
+                {
+                    AbsentUncovered = current.AbsentUncovered + 1,
+                },
+                (false, true) => current with
+                {
+                    OthersCovered = current.OthersCovered + 1,
+                },
+                (false, false) => current with
+                {
+                    OthersAbsentUncovered = current.OthersAbsentUncovered + 1,
+                },
+            };
         }
 
         return result;
     }
+
+    /// What today's attendance takes off one line's allocation on paper,
+    /// kept apart for the two tables the card prints.
+    ///
+    /// Apart and not added together, because each half is subtracted
+    /// from its own allocated count. A single pair of figures was what
+    /// let the OTHERS half go unadjusted: there was nothing to subtract
+    /// from it that did not also belong to MAIN.
+    public readonly record struct AbsenceAdjustment(
+        int AbsentUncovered,
+        int Covered,
+        int LentOut,
+        int OthersAbsentUncovered,
+        int OthersCovered,
+        int OthersLentOut);
 
     /// The lines the Home Screen should show one card each for.
     ///

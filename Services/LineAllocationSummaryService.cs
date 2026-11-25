@@ -212,6 +212,15 @@ public class LineAllocationSummaryService
                     - adjustment.LentOut;
                 if (manned < 0) manned = 0;
 
+                // The same arithmetic for the checkers, helpers, line
+                // leaders, QC and IE. Six of Line 23's eleven were lent
+                // out to four other lines and three more were away with
+                // nobody covering them, and the card read 11 of 11.
+                var othersManned = doc.OthersAllocatedCount
+                    - adjustment.OthersAbsentUncovered
+                    - adjustment.OthersLentOut;
+                if (othersManned < 0) othersManned = 0;
+
                 var (percentage, status) =
                     LineStrengthReportService.ComputePercentageAndStatus(doc.RequiredCount, manned);
 
@@ -226,10 +235,14 @@ public class LineAllocationSummaryService
                     AllocatedCount = manned,
                     AllocatedOnPaperCount = doc.AllocatedCount,
                     OthersRequiredCount = doc.OthersRequiredCount,
-                    OthersAllocatedCount = doc.OthersAllocatedCount,
-                    AbsentUncoveredCount = adjustment.AbsentUncovered,
-                    CoveredCount = adjustment.Covered,
-                    LentOutCount = adjustment.LentOut,
+                    OthersAllocatedCount = othersManned,
+                    OthersAllocatedOnPaperCount = doc.OthersAllocatedCount,
+                    // Both tables in the note under them, so the small
+                    // print accounts for both figures it sits beneath.
+                    AbsentUncoveredCount =
+                        adjustment.AbsentUncovered + adjustment.OthersAbsentUncovered,
+                    CoveredCount = adjustment.Covered + adjustment.OthersCovered,
+                    LentOutCount = adjustment.LentOut + adjustment.OthersLentOut,
                     Output = made.Output,
                     Rejects = made.Rejects,
                     Percentage = percentage,

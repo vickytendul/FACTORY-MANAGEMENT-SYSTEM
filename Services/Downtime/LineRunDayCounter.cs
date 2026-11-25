@@ -18,7 +18,9 @@ namespace FactoryManagementSystem.Services.Downtime
     /// Sundays and declared factory holidays do not move it. The floor
     /// can still write a figure down, and from then on the count runs on
     /// from THEIRS rather than from its own - one correction, not a
-    /// daily chore.
+    /// daily chore. Theirs wins whatever it says; the entry screen
+    /// prints the counted figure beside it, so a slip shows up on the
+    /// screen it was made on rather than on a report tomorrow.
     ///
     /// Counted on the way out rather than written down each night. A
     /// nightly job on a host that sleeps misses days and cannot be
@@ -67,8 +69,13 @@ namespace FactoryManagementSystem.Services.Downtime
         /// thinks it should be 12 can see that the style has been on
         /// the line since the end of September, and that nobody wrote a
         /// figure down.
+        /// [Counted] is what the allocation history alone says, with
+        /// nobody's figure in it. Carried so the entry screen can show
+        /// the two side by side where they differ: the floor's figure
+        /// is the one that is printed, and seeing what it is being
+        /// preferred to is how a slip gets noticed the same day.
         public sealed record LineRunDays(
-            int LineId, int NoOfDays, DateTime RunStart, bool Seeded);
+            int LineId, int NoOfDays, int Counted, DateTime RunStart, bool Seeded);
 
         /// The day count for every line that was running on [asOf].
         ///
@@ -131,39 +138,30 @@ namespace FactoryManagementSystem.Services.Downtime
             var result = new Dictionary<int, LineRunDays>();
             foreach (var (lineId, start) in runStart)
             {
-                int count;
-                var seeded = seeds.TryGetValue(lineId, out var seed)
-                    && Believable(seed, start, holidays);
-                if (seeded)
-                {
-                    count = seed.Value + WorkingDays(
-                        seed.Day.AddDays(1), day, holidays);
-                }
-                else
-                {
-                    // Day one is the first working day of the run.
-                    count = WorkingDays(start, day, holidays);
-                }
+                // Day one is the first working day of the run. This is
+                // the answer where nobody has written one down, and the
+                // one the floor's figure is preferred to where they
+                // have.
+                var counted = WorkingDays(start, day, holidays);
+
+                // The floor's figure wins, whatever it says. They are
+                // the ones standing on the line, and a count that
+                // argues with the person keeping it is a count they
+                // stop keeping. Where it is wrong it is wrong in
+                // public: the entry screen prints the counted figure
+                // beside it, and one correction puts both right.
+                var seeded = seeds.TryGetValue(lineId, out var seed);
+                var count = seeded
+                    ? seed.Value + WorkingDays(seed.Day.AddDays(1), day, holidays)
+                    : counted;
 
                 if (count > 0)
-                    result[lineId] = new LineRunDays(lineId, count, start, seeded);
+                    result[lineId] = new LineRunDays(
+                        lineId, count, counted, start, seeded);
             }
 
             return result;
         }
-
-        /// Whether a typed figure can be what it says it is.
-        ///
-        /// A line cannot be on its ninety-fourth day of a style it took
-        /// on three weeks ago. A figure larger than the run itself is a
-        /// slip or a leftover from the style before, and following it
-        /// would add one to a wrong number every morning from now on.
-        ///
-        /// Smaller is not suspect: the floor may count from a later
-        /// point than the allocation does, and that is theirs to decide.
-        private static bool Believable(
-            (DateTime Day, int Value) seed, DateTime runStart, HashSet<DateTime> holidays) =>
-            seed.Value <= WorkingDays(runStart, seed.Day, holidays);
 
         /// Working days in [from, to] inclusive - Sundays and declared
         /// holidays left out, because the line did not run on them and

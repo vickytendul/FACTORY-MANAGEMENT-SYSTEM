@@ -100,6 +100,7 @@ namespace FactoryManagementSystem.Controllers
                     {
                         lineId = v.LineId,
                         noOfDays = v.NoOfDays,
+                        counted = v.Counted,
                         runStart = v.RunStart.ToString("yyyy-MM-dd"),
                         seeded = v.Seeded,
                     }));

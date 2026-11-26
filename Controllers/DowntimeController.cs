@@ -88,12 +88,41 @@ namespace FactoryManagementSystem.Controllers
         // department list had a gap in it the day it was written down -
         // and a list the screen keeps its own copy of is a list that
         // goes stale the first time somebody adds a word to it.
+        //
+        // The department list is the written-down one plus every
+        // department anybody has since typed into the box behind
+        // "Others". A word typed once is offered from then on, so the
+        // second person to stop for Embroidery picks it rather than
+        // spelling it their own way - and "Others" stays last, where a
+        // catch-all has to be to stop being the first thing read.
         [HttpGet("options")]
-        public IActionResult Options() => Ok(new
+        public async Task<IActionResult> Options()
         {
-            Domains = DowntimeEntry.Domains,
-            Departments = DowntimeEntry.Departments,
-        });
+            var known = DowntimeEntry.Departments;
+            var departments = known.ToList();
+            try
+            {
+                var used = await _entries.GetDepartmentsUsedAsync();
+                var extra = used
+                    .Where(d => DowntimeEntry.Canonical(known, d) == null)
+                    .OrderBy(d => d, StringComparer.OrdinalIgnoreCase);
+                // Before the catch-all, which is the last word in the
+                // written-down list.
+                departments.InsertRange(departments.Count - 1, extra);
+            }
+            catch
+            {
+                // The written-down list is the list. A form that cannot
+                // offer last week's typed department still works; one
+                // that will not open because of it does not.
+            }
+
+            return Ok(new
+            {
+                Domains = DowntimeEntry.Domains,
+                Departments = departments,
+            });
+        }
 
         // GET: api/Downtime/by-line?from=2026-10-01&to=2026-10-31
         //
@@ -303,6 +332,23 @@ namespace FactoryManagementSystem.Controllers
             }
         }
 
+        /// Every department already recorded, or none of them.
+        ///
+        /// Only ever used to fold a second spelling into the first, so
+        /// a read that fails costs one department written twice rather
+        /// than a stoppage nobody could record.
+        private async Task<IReadOnlyCollection<string>> SafeDepartmentsUsedAsync()
+        {
+            try
+            {
+                return await _entries.GetDepartmentsUsedAsync();
+            }
+            catch
+            {
+                return Array.Empty<string>();
+            }
+        }
+
         /// Everything a stoppage has to satisfy, in one place.
         ///
         /// Written once because it is checked twice - a new entry and a
@@ -312,8 +358,15 @@ namespace FactoryManagementSystem.Controllers
         ///
         /// Returns the refusal to send, or null and a filled [clean]
         /// when the body is good.
+        ///
+        /// [usedDepartments] is every department already recorded, so a
+        /// typed one is folded into its existing spelling rather than
+        /// standing beside it. Passed in rather than read here: this
+        /// stays a pure check over the body it was given.
         private static IActionResult? Validate(
-            DowntimeCreate body, out DowntimeEntry clean)
+            DowntimeCreate body,
+            IReadOnlyCollection<string> usedDepartments,
+            out DowntimeEntry clean)
         {
             clean = new DowntimeEntry();
 
@@ -321,10 +374,9 @@ namespace FactoryManagementSystem.Controllers
                 return new BadRequestObjectResult(
                     new { Success = false, Message = "Pick a line." });
 
-            // Checked against the lists rather than taken as sent, so
-            // the report can group on these two columns later. A
-            // free-typed department is a department that will be
-            // spelled three ways by Friday.
+            // The domain is checked against its list rather than taken
+            // as sent, so the report can group on the column later. Six
+            // of them, settled, and a seventh would be somebody's typo.
             var domain = DowntimeEntry.Canonical(DowntimeEntry.Domains, body.Domain);
             if (domain == null)
             {
@@ -336,15 +388,22 @@ namespace FactoryManagementSystem.Controllers
                 });
             }
 
-            var department = DowntimeEntry.Canonical(
-                DowntimeEntry.Departments, body.Department);
+            // The department is not held to its list. Behind "Others"
+            // is a box to name the one that stopped the line, and what
+            // is typed there is the department - folded into an
+            // existing spelling where there is one, so the column stays
+            // groupable without the list having to have been complete
+            // before the floor found out it was not.
+            var department = DowntimeEntry.CanonicalDepartment(
+                body.Department, usedDepartments);
             if (department == null)
             {
                 return new BadRequestObjectResult(new
                 {
                     Success = false,
-                    Message = "Pick a department: "
-                            + string.Join(", ", DowntimeEntry.Departments) + ".",
+                    Message = "Say which department: "
+                            + string.Join(", ", DowntimeEntry.Departments)
+                            + " - or name one.",
                 });
             }
 
@@ -491,7 +550,7 @@ namespace FactoryManagementSystem.Controllers
                     });
                 }
 
-                var bad = Validate(body, out var clean);
+                var bad = Validate(body, await SafeDepartmentsUsedAsync(), out var clean);
                 if (bad != null) return bad;
 
                 clean.Id = id;
@@ -528,7 +587,7 @@ namespace FactoryManagementSystem.Controllers
         {
             try
             {
-                var bad = Validate(body, out var clean);
+                var bad = Validate(body, await SafeDepartmentsUsedAsync(), out var clean);
                 if (bad != null) return bad;
 
                 // The token where there is one, and only otherwise what

@@ -100,6 +100,29 @@ namespace FactoryManagementSystem.Services.Downtime
             return list;
         }
 
+        /// Every department the table already holds, in the order they
+        /// read best - alphabetically, since nobody set an order for
+        /// words nobody wrote down in advance.
+        ///
+        /// Read so the form can offer a department somebody typed last
+        /// week instead of making the next person type it again, and so
+        /// a second spelling of one is folded into the first. Cheap: a
+        /// distinct over an indexed text column of a few thousand rows.
+        public async Task<List<string>> GetDepartmentsUsedAsync()
+        {
+            await using var cmd = _dataSource.CreateCommand("""
+                select distinct department
+                from public.downtime_entries
+                where department is not null and btrim(department) <> ''
+                order by department
+                """);
+
+            await using var r = await cmd.ExecuteReaderAsync();
+            var list = new List<string>();
+            while (await r.ReadAsync()) list.Add(r.GetString(0).Trim());
+            return list;
+        }
+
         public async Task<DowntimeEntry?> GetByIdAsync(int id)
         {
             await using var cmd = _dataSource.CreateCommand(

@@ -162,5 +162,52 @@ namespace FactoryManagementSystem.Entities
             return list.FirstOrDefault(
                 x => string.Equals(x, v, StringComparison.OrdinalIgnoreCase));
         }
+
+        /// The longest a typed department may be.
+        ///
+        /// Long enough for the longest real one anybody has named, short
+        /// enough that a sentence pasted into the box does not become a
+        /// column heading on a report.
+        public const int DepartmentMaxLength = 40;
+
+        /// The department as it will be stored: one of [Departments]
+        /// where it is one, a department somebody has already typed
+        /// where it matches one of those, and otherwise the words as
+        /// they were typed.
+        ///
+        /// Free text was refused here, on the grounds that a typed
+        /// department is a department spelled three ways by Friday. The
+        /// list has a catch-all precisely because the floor keeps
+        /// stopping for a department nobody wrote down, and "Others"
+        /// alone says that a stoppage was somebody's without ever
+        /// saying whose - which is the one thing the column is for.
+        ///
+        /// The three spellings are answered instead of refused: a value
+        /// matching anything already recorded is stored the way it was
+        /// recorded the first time, so "embroidery" joins "Embroidery"
+        /// rather than standing beside it. [alreadyUsed] is what the
+        /// table already holds.
+        public static string? CanonicalDepartment(
+            string? value, IEnumerable<string>? alreadyUsed = null)
+        {
+            var v = (value ?? string.Empty).Trim();
+            if (v.Length == 0) return null;
+
+            var known = Canonical(Departments, v);
+            if (known != null) return known;
+
+            if (alreadyUsed != null)
+            {
+                foreach (var used in alreadyUsed)
+                {
+                    if (string.Equals(used, v, StringComparison.OrdinalIgnoreCase))
+                        return used;
+                }
+            }
+
+            return v.Length <= DepartmentMaxLength
+                ? v
+                : v[..DepartmentMaxLength].TrimEnd();
+        }
     }
 }

@@ -295,13 +295,21 @@ public class LineStrengthReportService
         // The same rows as above, read from the covering end. One person
         // can only stand in one place, so a second row for the same code
         // simply replaces the first rather than being counted twice.
-        var lentOutToLine = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        //
+        // A row where the cover and the absentee are the same code is
+        // nobody standing anywhere else, and is skipped: it is somebody
+        // recorded as covering themselves.
+        var standingOnInsteadOf =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var a in attendance)
         {
             if (a.LineId <= 0) continue;
             var cover = (a.ReplacementEmployeeCode ?? string.Empty).Trim();
             if (cover.Length == 0) continue;
-            lentOutToLine[cover] = a.LineId;
+            var instead = (a.EmployeeCode ?? string.Empty).Trim();
+            if (string.Equals(cover, instead, StringComparison.OrdinalIgnoreCase))
+                continue;
+            standingOnInsteadOf[cover] = a.LineId;
         }
 
         // Which table each row stands in, read from the LayoutMaster for
@@ -335,19 +343,43 @@ public class LineStrengthReportService
             var current = result.GetValueOrDefault(tx.LineId);
             var isCovered = coveredOnLine.Contains((tx.LineId, code.ToUpperInvariant()));
 
-            // Covering on their OWN line is a same-line replacement, not a
-            // loan - they are still standing here.
-            if (lentOutToLine.TryGetValue(code, out var standingOn) && standingOn != tx.LineId)
+            // Standing on somebody else's position empties their own,
+            // and it empties it just as thoroughly when the position
+            // they moved to is on this same line.
+            //
+            // This used to let a same-line move pass as manned, on the
+            // grounds that the person is still standing here. They are.
+            // The machine they left is not: on Line 23 the shuffle ran
+            // GUL2114 away, GUL0288 onto GUL2114's station, GUL2629
+            // onto GUL0288's - and nobody onto GUL2629's. Back Rise
+            // Overlock stood empty all day under a card reading 39 of
+            // 39, fully manned, in green.
+            if (standingOnInsteadOf.TryGetValue(code, out var standingOn))
             {
-                // Lending somebody out only empties the position they
-                // left. Put a replacement on it and the line is whole
-                // again - exactly as a covered absence is - so this
-                // costs nothing and is not reported as short.
+                // Moving somebody only empties the position they left.
+                // Put a replacement on it and the line is whole again -
+                // exactly as a covered absence is - so this costs
+                // nothing and is not reported as short.
                 if (isCovered) continue;
 
-                result[tx.LineId] = main
-                    ? current with { LentOut = current.LentOut + 1 }
-                    : current with { OthersLentOut = current.OthersLentOut + 1 };
+                // Lent out to another line, or moved along this one.
+                // The same hole either way; two names because a
+                // supervisor reading the card can do something about
+                // one of them without picking up the phone.
+                var away = standingOn != tx.LineId;
+                result[tx.LineId] = (main, away) switch
+                {
+                    (true, true) => current with { LentOut = current.LentOut + 1 },
+                    (true, false) => current with { Moved = current.Moved + 1 },
+                    (false, true) => current with
+                    {
+                        OthersLentOut = current.OthersLentOut + 1,
+                    },
+                    (false, false) => current with
+                    {
+                        OthersMoved = current.OthersMoved + 1,
+                    },
+                };
                 continue;
             }
 
@@ -382,13 +414,21 @@ public class LineStrengthReportService
     /// from its own allocated count. A single pair of figures was what
     /// let the OTHERS half go unadjusted: there was nothing to subtract
     /// from it that did not also belong to MAIN.
+    /// [Moved] is the same hole as [LentOut] with the person still in
+    /// the building: allocated to a position on this line and standing
+    /// on a different one, with nobody on the one they left. Kept apart
+    /// because the two are fixed differently - one by asking the line
+    /// next door for somebody back, the other by looking down the line
+    /// you are standing on.
     public readonly record struct AbsenceAdjustment(
         int AbsentUncovered,
         int Covered,
         int LentOut,
+        int Moved,
         int OthersAbsentUncovered,
         int OthersCovered,
-        int OthersLentOut);
+        int OthersLentOut,
+        int OthersMoved);
 
     /// The lines the Home Screen should show one card each for.
     ///

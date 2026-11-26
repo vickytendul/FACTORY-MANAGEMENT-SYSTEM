@@ -63,6 +63,17 @@ public class LineAllocationSummaryDto
     /// line is whole, and nothing on this card should say otherwise.
     public int LentOutCount { get; set; }
 
+    /// Allocated here, standing on a DIFFERENT position on this same
+    /// line, with nobody on the one they left.
+    ///
+    /// The same hole as [LentOutCount] with the person still in the
+    /// building, and it went uncounted: a same-line move was read as
+    /// "still standing here", which is true of the person and not of
+    /// the machine. Line 23 ran a shuffle three deep and the last
+    /// station in the chain stood empty all day under a card reading
+    /// 39 of 39 in green.
+    public int MovedCount { get; set; }
+
     /// What this line has produced today, per the Company production API.
     /// Live, never persisted - it climbs all day.
     public double Output { get; set; }

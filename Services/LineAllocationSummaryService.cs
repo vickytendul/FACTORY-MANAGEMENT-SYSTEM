@@ -209,7 +209,8 @@ public class LineAllocationSummaryService
                 // which counts each allocated operator once.
                 var manned = doc.AllocatedCount
                     - adjustment.AbsentUncovered
-                    - adjustment.LentOut;
+                    - adjustment.LentOut
+                    - adjustment.Moved;
                 if (manned < 0) manned = 0;
 
                 // The same arithmetic for the checkers, helpers, line
@@ -218,7 +219,8 @@ public class LineAllocationSummaryService
                 // nobody covering them, and the card read 11 of 11.
                 var othersManned = doc.OthersAllocatedCount
                     - adjustment.OthersAbsentUncovered
-                    - adjustment.OthersLentOut;
+                    - adjustment.OthersLentOut
+                    - adjustment.OthersMoved;
                 if (othersManned < 0) othersManned = 0;
 
                 var (percentage, status) =
@@ -243,6 +245,7 @@ public class LineAllocationSummaryService
                         adjustment.AbsentUncovered + adjustment.OthersAbsentUncovered,
                     CoveredCount = adjustment.Covered + adjustment.OthersCovered,
                     LentOutCount = adjustment.LentOut + adjustment.OthersLentOut,
+                    MovedCount = adjustment.Moved + adjustment.OthersMoved,
                     Output = made.Output,
                     Rejects = made.Rejects,
                     Percentage = percentage,

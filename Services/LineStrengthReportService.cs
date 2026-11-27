@@ -265,6 +265,91 @@ public class LineStrengthReportService
     {
         var result = new Dictionary<int, AbsenceAdjustment>();
 
+        foreach (var s in await BuildStationsAsync())
+        {
+            var current = result.GetValueOrDefault(s.LineId);
+            result[s.LineId] = (s.Main, s.Reason) switch
+            {
+                (true, StationReason.Covered) =>
+                    current with { Covered = current.Covered + 1 },
+                (true, StationReason.Absent) =>
+                    current with { AbsentUncovered = current.AbsentUncovered + 1 },
+                (true, StationReason.LentOut) =>
+                    current with { LentOut = current.LentOut + 1 },
+                (true, StationReason.Moved) =>
+                    current with { Moved = current.Moved + 1 },
+                (false, StationReason.Covered) =>
+                    current with { OthersCovered = current.OthersCovered + 1 },
+                (false, StationReason.Absent) =>
+                    current with
+                    {
+                        OthersAbsentUncovered = current.OthersAbsentUncovered + 1,
+                    },
+                (false, StationReason.LentOut) =>
+                    current with { OthersLentOut = current.OthersLentOut + 1 },
+                (false, StationReason.Moved) =>
+                    current with { OthersMoved = current.OthersMoved + 1 },
+                // Unallocated is already the difference between required
+                // and allocated. Counting it here would take it off the
+                // allocated figure a second time.
+                _ => current,
+            };
+        }
+
+        return result;
+    }
+
+    /// Why a station is not being worked.
+    public static class StationReason
+    {
+        /// Nobody was ever scanned into it.
+        public const string Unallocated = "unallocated";
+
+        /// Its operator is away per payroll and nobody is covering.
+        public const string Absent = "absent";
+
+        /// Its operator is covering somebody on ANOTHER line.
+        public const string LentOut = "lentOut";
+
+        /// Its operator is covering a different station on THIS line.
+        public const string Moved = "moved";
+
+        /// Its operator is away and somebody is standing on it. Not a
+        /// hole - carried so the screen can show the whole picture of a
+        /// line rather than only its gaps.
+        public const string Covered = "covered";
+    }
+
+    /// One station on one line, and what is happening to it today.
+    ///
+    /// The card's figures are counted from exactly these rows, so the
+    /// list a supervisor opens and the number they tapped cannot come
+    /// to disagree: the only way to add one is to add the other.
+    public sealed record LineStation(
+        int LineId,
+        bool Main,
+        string OperationName,
+        string MachineType,
+        string EmployeeCode,
+        string EmployeeName,
+        string Reason,
+        string? PayrollStatus = null,
+        string? CoveredByCode = null,
+        string? CoveredByName = null,
+        string? StandingOnCode = null,
+        string? StandingOnName = null,
+        string? StandingOnOperation = null,
+        int? StandingOnLineId = null);
+
+    /// Every station on every line, classified.
+    ///
+    /// One walk, which the counts above and the list a supervisor opens
+    /// are both read from. The alternative is two walks that agree
+    /// until somebody edits one of them.
+    public async Task<List<LineStation>> BuildStationsAsync()
+    {
+        var stations = new List<LineStation>();
+
         var today = DateTime.Today;
         // No early return on an empty payroll any more. Absence needs it,
         // but lent out does not - that is this application's own record,
@@ -284,12 +369,16 @@ public class LineStrengthReportService
         // set used to hold bare codes, so an operator allocated here who
         // was away and covered on some other line came back as "covered"
         // here too - and this line counted an empty position as manned.
-        var coveredOnLine = attendance
-            .Where(a => a.LineId > 0 &&
-                        !string.IsNullOrWhiteSpace(a.EmployeeCode) &&
-                        !string.IsNullOrWhiteSpace(a.ReplacementEmployeeCode))
-            .Select(a => (a.LineId, Code: a.EmployeeCode.Trim().ToUpperInvariant()))
-            .ToHashSet();
+        var coverOf = new Dictionary<(int, string), (string Code, string Name)>();
+        foreach (var a in attendance)
+        {
+            if (a.LineId <= 0) continue;
+            var who = (a.EmployeeCode ?? string.Empty).Trim();
+            var cover = (a.ReplacementEmployeeCode ?? string.Empty).Trim();
+            if (who.Length == 0 || cover.Length == 0) continue;
+            coverOf[(a.LineId, who.ToUpperInvariant())] =
+                (cover, (a.ReplacementEmployeeName ?? string.Empty).Trim());
+        }
 
         // The replacement's own code -> the line they were put on today.
         // The same rows as above, read from the covering end. One person
@@ -300,7 +389,8 @@ public class LineStrengthReportService
         // nobody standing anywhere else, and is skipped: it is somebody
         // recorded as covering themselves.
         var standingOnInsteadOf =
-            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            new Dictionary<string, (int LineId, string Code)>(
+                StringComparer.OrdinalIgnoreCase);
         foreach (var a in attendance)
         {
             if (a.LineId <= 0) continue;
@@ -309,7 +399,7 @@ public class LineStrengthReportService
             var instead = (a.EmployeeCode ?? string.Empty).Trim();
             if (string.Equals(cover, instead, StringComparison.OrdinalIgnoreCase))
                 continue;
-            standingOnInsteadOf[cover] = a.LineId;
+            standingOnInsteadOf[cover] = (a.LineId, instead);
         }
 
         // Which table each row stands in, read from the LayoutMaster for
@@ -326,6 +416,18 @@ public class LineStrengthReportService
             .GroupBy(m => m.Id)
             .ToDictionary(g => g.Key, g => g.First());
 
+        // Where everybody allocated anywhere is standing, so a station
+        // can say which operation its operator went to rather than only
+        // that they went.
+        var txByCode = new Dictionary<string, LayoutTransaction>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var t in layoutTransactions)
+        {
+            var c = (t.EmployeeCode ?? string.Empty).Trim();
+            if (c.Length == 0) continue;
+            txByCode.TryAdd(c, t);
+        }
+
         foreach (var tx in layoutTransactions)
         {
             if (tx.LineId <= 0) continue;
@@ -337,11 +439,26 @@ public class LineStrengthReportService
             // as they are in neither allocated count.
             if (!main && !others) continue;
 
-            var code = (tx.EmployeeCode ?? string.Empty).Trim();
-            if (code.Length == 0) continue;
+            var machine = masterById.TryGetValue(tx.LayoutMasterId, out var m)
+                ? m.MachineType
+                : tx.MachineType;
 
-            var current = result.GetValueOrDefault(tx.LineId);
-            var isCovered = coveredOnLine.Contains((tx.LineId, code.ToUpperInvariant()));
+            var code = (tx.EmployeeCode ?? string.Empty).Trim();
+
+            // A station nobody was ever scanned into. It is already the
+            // gap between required and allocated, so it is not counted
+            // again - but it IS an empty machine, and a supervisor
+            // looking for empty machines wants it in the list.
+            if (code.Length == 0)
+            {
+                stations.Add(new LineStation(
+                    tx.LineId, main, operation ?? string.Empty, machine ?? string.Empty,
+                    string.Empty, string.Empty, StationReason.Unallocated));
+                continue;
+            }
+
+            var isCovered = coverOf.TryGetValue(
+                (tx.LineId, code.ToUpperInvariant()), out var cover);
 
             // Standing on somebody else's position empties their own,
             // and it empties it just as thoroughly when the position
@@ -362,49 +479,52 @@ public class LineStrengthReportService
                 // nothing and is not reported as short.
                 if (isCovered) continue;
 
+                // Whose station they are on now, and what is done at
+                // it. A supervisor reading "moved" wants to know where
+                // to go and look.
+                txByCode.TryGetValue(standingOn.Code, out var onTx);
+                var onOperation = onTx == null
+                    ? null
+                    : Place(onTx, masterById).Operation;
+
                 // Lent out to another line, or moved along this one.
                 // The same hole either way; two names because a
                 // supervisor reading the card can do something about
                 // one of them without picking up the phone.
-                var away = standingOn != tx.LineId;
-                result[tx.LineId] = (main, away) switch
-                {
-                    (true, true) => current with { LentOut = current.LentOut + 1 },
-                    (true, false) => current with { Moved = current.Moved + 1 },
-                    (false, true) => current with
-                    {
-                        OthersLentOut = current.OthersLentOut + 1,
-                    },
-                    (false, false) => current with
-                    {
-                        OthersMoved = current.OthersMoved + 1,
-                    },
-                };
+                stations.Add(new LineStation(
+                    tx.LineId,
+                    main,
+                    operation ?? string.Empty,
+                    machine ?? string.Empty,
+                    code,
+                    tx.EmployeeName ?? string.Empty,
+                    standingOn.LineId != tx.LineId
+                        ? StationReason.LentOut
+                        : StationReason.Moved,
+                    StandingOnCode: standingOn.Code,
+                    StandingOnName: onTx?.EmployeeName,
+                    StandingOnOperation: onOperation,
+                    StandingOnLineId: standingOn.LineId));
                 continue;
             }
 
             if (!payroll.TryGetValue(code, out var status)) continue;
             if (!CompanyAttendanceService.IsUnavailable(status)) continue;
 
-            result[tx.LineId] = (main, isCovered) switch
-            {
-                (true, true) => current with { Covered = current.Covered + 1 },
-                (true, false) => current with
-                {
-                    AbsentUncovered = current.AbsentUncovered + 1,
-                },
-                (false, true) => current with
-                {
-                    OthersCovered = current.OthersCovered + 1,
-                },
-                (false, false) => current with
-                {
-                    OthersAbsentUncovered = current.OthersAbsentUncovered + 1,
-                },
-            };
+            stations.Add(new LineStation(
+                tx.LineId,
+                main,
+                operation ?? string.Empty,
+                machine ?? string.Empty,
+                code,
+                tx.EmployeeName ?? string.Empty,
+                isCovered ? StationReason.Covered : StationReason.Absent,
+                PayrollStatus: status,
+                CoveredByCode: isCovered ? cover.Code : null,
+                CoveredByName: isCovered ? cover.Name : null));
         }
 
-        return result;
+        return stations;
     }
 
     /// What today's attendance takes off one line's allocation on paper,

@@ -34,6 +34,57 @@ public class LineStrengthReportController : ControllerBase
         }
     }
 
+    // GET: api/LineStrengthReport/open-stations?lineId=23
+    //
+    // Which machines on a line nobody is working today, and why. The
+    // card says four are short; this says which four, who left them
+    // and where that person went.
+    //
+    // Counted from the same walk the card's figures are counted from,
+    // so the list and the number that opened it cannot disagree.
+    //
+    // Everything is included - covered absences too - and the client
+    // decides what to show: a supervisor reading a line wants its whole
+    // state, not only its gaps. Without lineId it answers for every
+    // line, which is what a floor-wide view would ask for.
+    [HttpGet("open-stations")]
+    public async Task<IActionResult> GetOpenStations([FromQuery] int? lineId = null)
+    {
+        try
+        {
+            var all = await _reportService.BuildStationsAsync();
+            var rows = lineId is > 0
+                ? all.Where(s => s.LineId == lineId.Value)
+                : all;
+
+            return Ok(rows
+                .OrderBy(s => s.LineId)
+                .ThenByDescending(s => s.Main)
+                .ThenBy(s => s.OperationName, StringComparer.OrdinalIgnoreCase)
+                .Select(s => new
+                {
+                    s.LineId,
+                    section = s.Main ? "MAIN" : "OTHERS",
+                    s.OperationName,
+                    s.MachineType,
+                    s.EmployeeCode,
+                    s.EmployeeName,
+                    s.Reason,
+                    s.PayrollStatus,
+                    s.CoveredByCode,
+                    s.CoveredByName,
+                    s.StandingOnCode,
+                    s.StandingOnName,
+                    s.StandingOnOperation,
+                    s.StandingOnLineId,
+                }));
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { Success = false, Message = ex.Message });
+        }
+    }
+
     // GET: api/LineStrengthReport/allocated-lines
     //
     // Home Screen "Allocated Lines" summary - one small, purpose-specific

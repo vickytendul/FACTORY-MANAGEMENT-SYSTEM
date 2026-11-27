@@ -406,6 +406,11 @@ if (hasSupabase)
     // from the allocation history rather than typed every morning - see
     // LineRunDayCounter for what the typed figures had become.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Downtime.LineRunDayCounter>();
+    // The running production total, written down at the end of each
+    // hour so that the hours can be the differences between readings.
+    // The vendor has no hourly figure; this is how one is made.
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Production.ProductionSnapshotRepository>();
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Production.HourlyProductionService>();
     // Machine requests - a line calling for a mechanic. Same terms
     // again, and the same shape as the feeding requests beside them.
     builder.Services.AddSingleton<FactoryManagementSystem.Services.Machine.MachineRequestRepository>();

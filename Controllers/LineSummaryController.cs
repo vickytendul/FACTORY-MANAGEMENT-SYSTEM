@@ -1051,8 +1051,17 @@ namespace FactoryManagementSystem.Controllers
         private async Task BuildLayoutHistoryAsync(
             List<DateTime> days, List<LayoutTransaction> active)
         {
-            var history = LayoutHistory.Build(
-                await _layouts.GetAllLayoutTransactionsAsync());
+            // Today is not reconstructed - the active layout IS today's
+            // layout, which the loop below already knows. So a report
+            // that asks only about today never touches the history, and
+            // reading the whole allocation table to answer it was the
+            // single most expensive thing this application did. Most
+            // reads of these screens are of today.
+            var today = DateTime.Now.Date;
+            var needsHistory = days.Any(d => d.Date < today);
+            var history = needsHistory
+                ? LayoutHistory.Build(await _layouts.GetAllLayoutTransactionsAsync())
+                : null;
 
             var ccs = await _ccs.GetActiveAsync();
             _samByCc = ccs
@@ -1066,12 +1075,10 @@ namespace FactoryManagementSystem.Controllers
             // and would notice moving. Reconstruction answers for days
             // that have already closed, where the active layout is the
             // wrong answer and the only one there was.
-            var today = DateTime.Now.Date;
-
             var byDay = new Dictionary<DateTime, Dictionary<int, List<LayoutTransaction>>>();
             foreach (var d in days)
             {
-                var rows = d.Date >= today || !history.CoversDay(d)
+                var rows = d.Date >= today || history == null || !history.CoversDay(d)
                     ? active
                     : history.AsAt(d);
                 byDay[d.Date] = rows

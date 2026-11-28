@@ -48,6 +48,19 @@ namespace FactoryManagementSystem.Services.Layouts
         /// factory report - fifteen full-table reads for one page. The same
         /// windows the Firestore path used, so staleness behaves as it did.
         private const string TransactionsKey = "supabase_active_layout_transactions";
+
+        /// The WHOLE allocation table, history included.
+        ///
+        /// This went uncached while the active half beside it did not,
+        /// and it is the more expensive of the two by far: every row
+        /// the floor has ever been allocated to, every column, read
+        /// afresh. The factory report asks for it, so does the line
+        /// summary, the trend, the strength drill-down and the day
+        /// counter - two or three times per page - and four screens
+        /// re-read themselves every three minutes. A free Supabase
+        /// plan allows 5GB of egress a month; this alone had sent 7.68
+        /// through it.
+        private const string AllTransactionsKey = "supabase_all_layout_transactions";
         private const string MasterCountsKey = "supabase_active_main_master_counts";
         private const string OthersCountsKey = "supabase_active_others_master_counts";
         private static readonly TimeSpan TransactionTtl = TimeSpan.FromSeconds(60);
@@ -238,7 +251,11 @@ namespace FactoryManagementSystem.Services.Layouts
 
         // Called by the controllers after every write, which is what keeps
         // a saved layout from being invisible for the next minute.
-        public void InvalidateLayoutTransactionsCache() => _cache.Remove(TransactionsKey);
+        public void InvalidateLayoutTransactionsCache()
+        {
+            _cache.Remove(TransactionsKey);
+            _cache.Remove(AllTransactionsKey);
+        }
 
         public void InvalidateLayoutMastersCache()
         {
@@ -359,8 +376,66 @@ namespace FactoryManagementSystem.Services.Layouts
             return (bool)(await cmd.ExecuteScalarAsync())!;
         }
 
-        public Task<List<LayoutTransaction>> GetAllLayoutTransactionsAsync() =>
-            QueryAsync(TxCols, ReadTx);
+        /// The eleven columns the allocation HISTORY is read for, and
+        /// not the twenty-two the table has.
+        ///
+        /// Everything the history is used for - which line somebody was
+        /// on, on which day, under which CC, in which section - comes
+        /// out of these. The zone, the grades, the barcode, the
+        /// allocation date and who did the allocating are never read
+        /// from a historic row, and carrying them was carrying half the
+        /// bytes of every read of the whole table for nothing.
+        ///
+        /// Columns left out come back at their property initialisers -
+        /// empty strings and zeroes - so a caller that starts reading
+        /// one gets a blank rather than a wrong value. Hence the name:
+        /// this is the history, not a transaction.
+        private const string HistoryCols = """
+            select firebase_doc_id, layout_master_id, line_id, line_name,
+                   cc_id, cc_no, layout_no, operation_name, machine_type,
+                   section, employee_code, employee_name,
+                   allocated_date_time, is_active
+            from public.layout_transactions
+            """;
+
+        private static LayoutTransaction ReadHistory(NpgsqlDataReader r) => new()
+        {
+            FirestoreId = r.GetString(0),
+            TransactionId = 0,           // 0 on every Firebase row; never stored
+            LayoutMasterId = r.GetInt32(1),
+            LineId = r.GetInt32(2),
+            LineName = r.GetString(3),
+            CCId = r.GetInt32(4),
+            CCNo = r.GetString(5),
+            LayoutNo = r.IsDBNull(6) ? 1 : r.GetInt32(6),
+            OperationName = r.GetString(7),
+            MachineType = r.GetString(8),
+            Section = r.GetString(9),
+            EmployeeCode = r.GetString(10),
+            EmployeeName = r.GetString(11),
+            // Read the way ReadTx reads it: timestamptz comes back as an
+            // offset, and taking it as a plain DateTime would shift
+            // every comparison the history makes by five and a half
+            // hours.
+            AllocatedDateTime = r.GetFieldValue<DateTimeOffset>(12).UtcDateTime,
+            IsActive = r.GetBoolean(13),
+        };
+
+        public async Task<List<LayoutTransaction>> GetAllLayoutTransactionsAsync()
+        {
+            if (_cache.TryGetValue(AllTransactionsKey, out List<LayoutTransaction>? hit)
+                && hit != null)
+            {
+                return hit;
+            }
+
+            var result = await QueryAsync(HistoryCols, ReadHistory);
+            // The same window the active half uses, and invalidated by
+            // the same writes - a saved allocation must not be invisible
+            // to one of them for a minute while the other has it.
+            _cache.Set(AllTransactionsKey, result, TransactionTtl);
+            return result;
+        }
 
         // ── writes ──────────────────────────────────────────────────────
         //

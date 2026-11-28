@@ -79,7 +79,28 @@ namespace FactoryManagementSystem.Services.Production
             double TotalRejects,
             int? CurrentSlot,
             int ElapsedMinutes,
+            double? CatchUpPerHour,
             List<SlotRow> Slots);
+
+        /// What the line has to make every hour from this minute on to
+        /// still finish the day's plan.
+        ///
+        /// This is the question the hourly targets used to answer by
+        /// re-sharing themselves, which put a past hour's target and a
+        /// future hour's target in one column and had them add up to
+        /// more than the plan. It is one figure, and it always was.
+        ///
+        /// Null where there is no plan or no day left; nought where the
+        /// plan is already made.
+        public static double? CatchUp(
+            double? dailyTarget, double madeSoFar, int elapsedMinutes)
+        {
+            if (dailyTarget == null) return null;
+            var left = ShiftSlots.PlannedMinutes - elapsedMinutes;
+            if (left <= 0) return null;
+            var owed = dailyTarget.Value - madeSoFar;
+            return owed <= 0 ? 0 : Math.Round(owed / left * 60, 0);
+        }
 
         /// How many of the day's planned minutes have been worked by
         /// [at], part of an hour included.
@@ -205,24 +226,45 @@ namespace FactoryManagementSystem.Services.Production
             // leaves forty on the remaining hours; a hundred and forty
             // takes forty off them. The plan is the day, not the hour.
             var rows = new List<SlotRow>();
-            var remaining = dailyTarget ?? 0;
-            var remainingMinutes = ShiftSlots.PlannedMinutes;
 
-            // The pace: what is still to be made, over the minutes still
-            // left to make it in. It moves only when production is
-            // actually accounted for, which is the whole of the fix
-            // below.
-            double Rate() => remainingMinutes > 0
-                ? Math.Max(0, remaining) / remainingMinutes
-                : 0;
+            // The day's plan over the day's minutes, and it does not
+            // move. An hour's target is its share of the plan, so the
+            // column adds up to the plan and nothing else.
+            //
+            // It used to re-share whatever was left after every hour,
+            // which answers a real question - what do we need now - but
+            // answers it in the same column as the hours that have
+            // already gone. Line 21's column read 250, 144, 82, 82,
+            // 163... and came to 1,211 against a plan of 1,000, because
+            // a past hour's target and a future hour's target are two
+            // different things and they were being added together.
+            //
+            // What we need now has its own figure instead:
+            // [LineHour.CatchUpPerHour].
+            var rate = dailyTarget == null || ShiftSlots.PlannedMinutes <= 0
+                ? 0
+                : dailyTarget.Value / ShiftSlots.PlannedMinutes;
 
-            // How many planned minutes a reading covers - its own slot,
-            // and every slot back to the last reading that nobody took
-            // one in. Lunch is not among them.
-            double MinutesFrom(int fromIndex, int toIndex) => ShiftSlots.All
-                .Where(s => s.Production && s.Index >= fromIndex
-                    && s.Index <= toIndex && s.Index < 11)
+            // Planned minutes worked before a slot begins. Lunch and
+            // overtime are not among them.
+            int Before(int index) => ShiftSlots.All
+                .Where(s => s.Production && s.Index < index && s.Index < 11)
                 .Sum(s => s.Minutes);
+
+            // A slot's target, by the minute it starts at and the minute
+            // it ends at rather than by its own length.
+            //
+            // Rounding each hour on its own makes the column miss the
+            // plan: a thousand over eight hours puts 62.5 in each half
+            // hour, both round up, and the column reads 1,001 for a line
+            // asked for 1,000. Taking the difference of two rounded
+            // running totals makes the roundings cancel, so the column
+            // comes to the plan exactly - whichever hours a reading
+            // happens to cover.
+            double Target(int fromIndex, int toIndex) =>
+                Math.Round(rate * (Before(toIndex) + ShiftSlots.All
+                    .First(s => s.Index == toIndex).Minutes), 0)
+                - Math.Round(rate * Before(fromIndex), 0);
 
             foreach (var slot in ShiftSlots.All)
             {
@@ -265,51 +307,34 @@ namespace FactoryManagementSystem.Services.Production
                         // a half hours' work against one hour's target
                         // read as a line 375 ahead when it was 74
                         // behind.
-                        var minutes = MinutesFrom(coversFrom ?? slot.Index, slot.Index);
-                        planned = Math.Round(Rate() * minutes, 0);
-                        remaining -= output ?? 0;
-                        remainingMinutes -= (int)minutes;
+                        planned = Target(coversFrom ?? slot.Index, slot.Index);
                     }
-                    else if (!ended)
+                    else if (!ended || running)
                     {
-                        // Still to come. It takes its share and is
-                        // assumed to make it, which is what keeps the
-                        // hours after it level rather than each one
-                        // carrying the whole of what is left.
-                        planned = Math.Round(Rate() * slot.Minutes, 0);
-                        remaining -= planned.Value;
-                        remainingMinutes -= slot.Minutes;
+                        planned = Target(slot.Index, slot.Index);
                     }
-                    else if (running)
-                    {
-                        // Half done. Shown against its own share, and
-                        // it settles up when the hour ends and somebody
-                        // reads the meter.
-                        planned = Math.Round(Rate() * slot.Minutes, 0);
-                    }
-                    // Ended and nobody read it: no target of its own,
-                    // and it takes nothing out of the pace. Whatever
-                    // was made in it is inside a later reading, and
-                    // charging the plan for it here is what drove the
-                    // afternoon's target to nought.
+                    // Ended and nobody read it: no target of its own.
+                    // Whatever was made in it is inside a later
+                    // reading, and that reading carries its target too.
                 }
-
-                if (remaining < 0) remaining = 0;
 
                 rows.Add(new SlotRow(
                     slot.Index, slot.Label, true, slot.Minutes,
                     planned, output, rejects, state, coversFrom));
             }
 
+            // A day that has closed has worked all of its minutes,
+            // whatever the clock says now.
+            var elapsed = isToday
+                ? ElapsedPlannedMinutes(TimeOnly.FromDateTime(FloorNow))
+                : ShiftSlots.PlannedMinutes;
+
             return new LineHour(
                 lineId, day.Date, dailyTarget,
                 live.Output, live.Rejects,
                 nowSlot?.Index,
-                // A day that has closed has worked all of its minutes,
-                // whatever the clock says now.
-                isToday
-                    ? ElapsedPlannedMinutes(TimeOnly.FromDateTime(FloorNow))
-                    : ShiftSlots.PlannedMinutes,
+                elapsed,
+                CatchUp(dailyTarget, live.Output, elapsed),
                 rows);
         }
 

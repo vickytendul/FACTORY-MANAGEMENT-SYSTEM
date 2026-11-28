@@ -46,6 +46,7 @@ namespace FactoryManagementSystem.Controllers
                     result.TotalOutput,
                     result.TotalRejects,
                     result.CurrentSlot,
+                    result.ElapsedMinutes,
                     plannedMinutes = ShiftSlots.PlannedMinutes,
                     slots = result.Slots.Select(s => new
                     {

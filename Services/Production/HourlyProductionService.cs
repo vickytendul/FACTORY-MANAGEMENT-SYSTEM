@@ -78,7 +78,30 @@ namespace FactoryManagementSystem.Services.Production
             double TotalOutput,
             double TotalRejects,
             int? CurrentSlot,
+            int ElapsedMinutes,
             List<SlotRow> Slots);
+
+        /// How many of the day's planned minutes have been worked by
+        /// [at], part of an hour included.
+        ///
+        /// What the line was due by now is this against the day's
+        /// plan - a flat pace, not the per-hour targets added up. Those
+        /// re-share whatever is left after every hour, so on a day a
+        /// line fell behind they come to more than the day's plan: Line
+        /// 1 was due 1,174 against a plan of 900, and read as 451
+        /// behind when it was 177 behind.
+        public static int ElapsedPlannedMinutes(TimeOnly at)
+        {
+            var t = at.ToTimeSpan();
+            var minutes = 0;
+            foreach (var s in ShiftSlots.All)
+            {
+                if (!s.Production || s.Index >= 11) continue;
+                if (t >= s.To) minutes += s.Minutes;
+                else if (t > s.From) minutes += (int)(t - s.From).TotalMinutes;
+            }
+            return minutes;
+        }
 
         /// Reads the meter for every line and writes it against the slot
         /// that has just ended, if nobody has yet.
@@ -185,6 +208,22 @@ namespace FactoryManagementSystem.Services.Production
             var remaining = dailyTarget ?? 0;
             var remainingMinutes = ShiftSlots.PlannedMinutes;
 
+            // The pace: what is still to be made, over the minutes still
+            // left to make it in. It moves only when production is
+            // actually accounted for, which is the whole of the fix
+            // below.
+            double Rate() => remainingMinutes > 0
+                ? Math.Max(0, remaining) / remainingMinutes
+                : 0;
+
+            // How many planned minutes a reading covers - its own slot,
+            // and every slot back to the last reading that nobody took
+            // one in. Lunch is not among them.
+            double MinutesFrom(int fromIndex, int toIndex) => ShiftSlots.All
+                .Where(s => s.Production && s.Index >= fromIndex
+                    && s.Index <= toIndex && s.Index < 11)
+                .Sum(s => s.Minutes);
+
             foreach (var slot in ShiftSlots.All)
             {
                 if (!slot.Production)
@@ -194,13 +233,6 @@ namespace FactoryManagementSystem.Services.Production
                         null, null, null, SlotState.Lunch, null));
                     continue;
                 }
-
-                // Overtime is outside the plan, so it is outside the
-                // share-out: it carries what was made and no target.
-                var planned = slot.Index < 11 && dailyTarget != null
-                    && remainingMinutes > 0
-                    ? Math.Round(remaining * slot.Minutes / remainingMinutes, 0)
-                    : (double?)null;
 
                 var read = outputs.TryGetValue(slot.Index, out var made);
                 var running = nowSlot?.Index == slot.Index;
@@ -218,26 +250,67 @@ namespace FactoryManagementSystem.Services.Production
                     ? SlotState.NotRead
                     : SlotState.Ahead;
 
+                // Overtime is outside the plan, so it is outside the
+                // share-out: it carries what was made and no target.
+                double? planned = null;
+                var coversFrom = read && made.From < slot.Index ? made.From : (int?)null;
+
+                if (slot.Index < 11 && dailyTarget != null)
+                {
+                    if (read)
+                    {
+                        // A reading carries everything since the last
+                        // one, so it is weighed against everything that
+                        // was due since the last one. Weighing five and
+                        // a half hours' work against one hour's target
+                        // read as a line 375 ahead when it was 74
+                        // behind.
+                        var minutes = MinutesFrom(coversFrom ?? slot.Index, slot.Index);
+                        planned = Math.Round(Rate() * minutes, 0);
+                        remaining -= output ?? 0;
+                        remainingMinutes -= (int)minutes;
+                    }
+                    else if (!ended)
+                    {
+                        // Still to come. It takes its share and is
+                        // assumed to make it, which is what keeps the
+                        // hours after it level rather than each one
+                        // carrying the whole of what is left.
+                        planned = Math.Round(Rate() * slot.Minutes, 0);
+                        remaining -= planned.Value;
+                        remainingMinutes -= slot.Minutes;
+                    }
+                    else if (running)
+                    {
+                        // Half done. Shown against its own share, and
+                        // it settles up when the hour ends and somebody
+                        // reads the meter.
+                        planned = Math.Round(Rate() * slot.Minutes, 0);
+                    }
+                    // Ended and nobody read it: no target of its own,
+                    // and it takes nothing out of the pace. Whatever
+                    // was made in it is inside a later reading, and
+                    // charging the plan for it here is what drove the
+                    // afternoon's target to nought.
+                }
+
+                if (remaining < 0) remaining = 0;
+
                 rows.Add(new SlotRow(
                     slot.Index, slot.Label, true, slot.Minutes,
-                    planned, output, rejects, state,
-                    read && made.From < slot.Index ? made.From : null));
-
-                if (slot.Index < 11)
-                {
-                    // Known is what happened; unknown is the plan. From
-                    // the first slot nobody has a figure for, the rest
-                    // of the day shares what is left at one rate.
-                    remaining -= output ?? planned ?? 0;
-                    if (remaining < 0) remaining = 0;
-                    remainingMinutes -= slot.Minutes;
-                }
+                    planned, output, rejects, state, coversFrom));
             }
 
             return new LineHour(
                 lineId, day.Date, dailyTarget,
                 live.Output, live.Rejects,
-                nowSlot?.Index, rows);
+                nowSlot?.Index,
+                // A day that has closed has worked all of its minutes,
+                // whatever the clock says now.
+                isToday
+                    ? ElapsedPlannedMinutes(TimeOnly.FromDateTime(FloorNow))
+                    : ShiftSlots.PlannedMinutes,
+                rows);
         }
 
         private async Task<IReadOnlyDictionary<int, LineProduction>> SafeProductionAsync(

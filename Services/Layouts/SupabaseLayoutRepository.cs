@@ -63,7 +63,21 @@ namespace FactoryManagementSystem.Services.Layouts
         private const string AllTransactionsKey = "supabase_all_layout_transactions";
         private const string MasterCountsKey = "supabase_active_main_master_counts";
         private const string OthersCountsKey = "supabase_active_others_master_counts";
-        private static readonly TimeSpan TransactionTtl = TimeSpan.FromSeconds(60);
+        /// Ten minutes, and it used to be one.
+        ///
+        /// A minute was shorter than the screens that read it. They
+        /// re-read themselves every few minutes, so a cache that
+        /// expired in between was a cache that never once answered
+        /// them: one screen open on a wall went back to the table on
+        /// every single tick, which is the behaviour the cache was put
+        /// there to stop. It only ever helped where two requests landed
+        /// in the same minute.
+        ///
+        /// Ten costs nothing, because this is not held until it goes
+        /// stale - it is dropped the moment anybody saves an
+        /// allocation. The window is what a change made outside the
+        /// application would wait, and the floor does not make those.
+        private static readonly TimeSpan TransactionTtl = TimeSpan.FromMinutes(10);
         private static readonly TimeSpan MasterTtl = TimeSpan.FromSeconds(45);
 
         private readonly IMemoryCache _cache;
@@ -249,8 +263,10 @@ namespace FactoryManagementSystem.Services.Layouts
             return result;
         }
 
-        // Called by the controllers after every write, which is what keeps
-        // a saved layout from being invisible for the next minute.
+        // Called by the controllers after every write, which is what
+        // keeps a saved layout from being invisible while the cache
+        // holds - and what lets the window be ten minutes rather than
+        // one without anybody waiting to see their own work.
         public void InvalidateLayoutTransactionsCache()
         {
             _cache.Remove(TransactionsKey);
@@ -431,8 +447,8 @@ namespace FactoryManagementSystem.Services.Layouts
 
             var result = await QueryAsync(HistoryCols, ReadHistory);
             // The same window the active half uses, and invalidated by
-            // the same writes - a saved allocation must not be invisible
-            // to one of them for a minute while the other has it.
+            // the same writes - a saved allocation must not be visible
+            // in one of them and missing from the other.
             _cache.Set(AllTransactionsKey, result, TransactionTtl);
             return result;
         }

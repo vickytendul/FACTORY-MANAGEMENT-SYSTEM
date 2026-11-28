@@ -78,7 +78,11 @@ namespace FactoryManagementSystem.Services.Layouts
         /// allocation. The window is what a change made outside the
         /// application would wait, and the floor does not make those.
         private static readonly TimeSpan TransactionTtl = TimeSpan.FromMinutes(10);
-        private static readonly TimeSpan MasterTtl = TimeSpan.FromSeconds(45);
+        /// The master counts, on the same terms and for the same reason
+        /// as TransactionTtl above: dropped on every write, so the
+        /// window is only what a change made outside the application
+        /// would wait.
+        private static readonly TimeSpan MasterTtl = TimeSpan.FromMinutes(10);
 
         private readonly IMemoryCache _cache;
 

@@ -7,13 +7,20 @@ namespace FactoryManagementSystem.Services.Sessions
     /// Two things stand between a token and the database, and both of
     /// them are in memory:
     ///
-    /// Which sessions are live, held for a minute. Checking a row per
-    /// request would put a query in front of every call the floor
-    /// makes; one small query a minute for the whole instance says the
+    /// Which sessions have been ended, held for a minute. Checking a
+    /// row per request would put a query in front of every call the
+    /// floor makes; one query a minute for the whole instance says the
     /// same thing. A device signed out from somewhere else therefore
     /// keeps working for up to that minute - unless it was signed out
     /// on this instance, which is the usual case and takes effect at
     /// once.
+    ///
+    /// It is the ended ones and not the live ones on purpose. The live
+    /// set is every signed-in device in the factory and would cross the
+    /// wire once a minute all day to catch the one that had been signed
+    /// out; the ended set is usually empty, and a row leaves it as soon
+    /// as its token expires, because a token nobody can use needs
+    /// nothing done about it.
     ///
     /// When each session was last written down, so recording that a
     /// device is still at its screen costs one update every few
@@ -37,51 +44,23 @@ namespace FactoryManagementSystem.Services.Sessions
 
         public SessionRepository? Repository => _repo;
 
-        private static readonly TimeSpan LiveTtl = TimeSpan.FromMinutes(1);
-        private static readonly TimeSpan MissRecheck = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan EndedTtl = TimeSpan.FromMinutes(1);
         private static readonly TimeSpan TouchEvery = TimeSpan.FromMinutes(5);
 
         private readonly object _gate = new();
         private readonly SemaphoreSlim _reading = new(1, 1);
 
-        private HashSet<Guid> _live = new();
-        private DateTime _liveReadAt = DateTime.MinValue;
-
-        /// Sessions opened here that a read of the table may not have
-        /// caught yet. They survive a refresh until the table itself
-        /// reports them.
-        private readonly HashSet<Guid> _opened = new();
-
-        /// Set when the table could not be read. Everything is let
-        /// through while it is: a database that is briefly unreachable
-        /// must not sign the whole factory out.
-        private volatile bool _blind;
+        private HashSet<Guid> _ended = new();
+        private DateTime _endedReadAt = DateTime.MinValue;
 
         private readonly ConcurrentDictionary<Guid, DateTime> _touched = new();
 
-        /// A session opened on this instance is usable from this
-        /// instant, without waiting for the next read of the table.
-        /// Otherwise somebody could be turned away holding the token
-        /// they were handed a second ago.
-        public void Remember(Guid id)
-        {
-            lock (_gate)
-            {
-                _live.Add(id);
-                _opened.Add(id);
-            }
-        }
-
-        /// Drops a session the moment it ends, so the device that was
-        /// signed out stops working on its next request rather than at
-        /// the end of the minute.
+        /// Ends a session here and now, so the device that was signed
+        /// out stops working on its next request rather than at the end
+        /// of the minute.
         public void Forget(Guid id)
         {
-            lock (_gate)
-            {
-                _live.Remove(id);
-                _opened.Remove(id);
-            }
+            lock (_gate) _ended.Add(id);
             _touched.TryRemove(id, out _);
         }
 
@@ -99,23 +78,14 @@ namespace FactoryManagementSystem.Services.Sessions
         {
             if (_repo == null || id == null) return true;
 
-            await EnsureFreshAsync(LiveTtl);
-            if (_blind) return true;
-            lock (_gate) if (_live.Contains(id.Value)) return true;
-
-            // Not in the set - which is also what a session opened on
-            // another instance a moment ago looks like. Ask once more
-            // before turning anybody away, but not as often as an
-            // unknown token could make us.
-            await EnsureFreshAsync(MissRecheck);
-            if (_blind) return true;
-            lock (_gate) return _live.Contains(id.Value);
+            await EnsureFreshAsync();
+            lock (_gate) return !_ended.Contains(id.Value);
         }
 
-        private async Task EnsureFreshAsync(TimeSpan age)
+        private async Task EnsureFreshAsync()
         {
             if (_repo == null) return;
-            if (DateTime.UtcNow - _liveReadAt < age) return;
+            if (DateTime.UtcNow - _endedReadAt < EndedTtl) return;
 
             // Whoever gets here first does the read; everybody else
             // carries on with what is in hand rather than queueing
@@ -123,29 +93,31 @@ namespace FactoryManagementSystem.Services.Sessions
             if (!await _reading.WaitAsync(0)) return;
             try
             {
-                if (DateTime.UtcNow - _liveReadAt < age) return;
+                if (DateTime.UtcNow - _endedReadAt < EndedTtl) return;
 
-                var ids = await _repo.LiveIdsAsync();
+                var ids = await _repo.EndedIdsAsync();
                 lock (_gate)
                 {
-                    // A session opened while the query was in flight
-                    // is missing from what came back and is not stale,
-                    // so it is added; one the table now reports is no
-                    // longer this instance's business to remember.
-                    _opened.RemoveWhere(ids.Contains);
-                    ids.UnionWith(_opened);
-                    _live = ids;
+                    // Union rather than replace: a session ended on this
+                    // instance while the query was in flight is missing
+                    // from what came back and is not stale. A row that
+                    // has expired out of the table drops from both at
+                    // the next restart, and costs nothing in the
+                    // meantime - it names a token nobody can use.
+                    ids.UnionWith(_ended);
+                    _ended = ids;
                 }
-                _blind = false;
             }
             catch (Exception ex)
             {
-                _log.LogWarning(ex, "Live sessions could not be read");
-                _blind = true;
+                // Everything that is not already known to be ended is
+                // let through. A database that is briefly unreachable
+                // must not sign the whole factory out.
+                _log.LogWarning(ex, "Ended sessions could not be read");
             }
             finally
             {
-                _liveReadAt = DateTime.UtcNow;
+                _endedReadAt = DateTime.UtcNow;
                 _reading.Release();
             }
         }

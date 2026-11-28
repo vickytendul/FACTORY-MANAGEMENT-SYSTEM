@@ -142,18 +142,28 @@ namespace FactoryManagementSystem.Services.Sessions
             return list;
         }
 
-        /// The ids of every session that is live right now.
+        /// The ids of the sessions that have been ended and whose tokens
+        /// have not yet expired.
         ///
-        /// This is what the middleware checks a token against, and it is
-        /// deliberately the live ones rather than the ended ones: a
-        /// token signed before a server restart, or against a row
-        /// somebody deleted, has no session and should not pass either.
-        /// One small query a minute for the whole instance.
-        public async Task<HashSet<Guid>> LiveIdsAsync()
+        /// The middleware checks a token against this and lets through
+        /// anything it does not name, which is the opposite of the
+        /// obvious way round and is the right way for what this costs.
+        /// Asking for the live ones meant carrying every signed-in
+        /// device across the wire once a minute, all day, to catch the
+        /// one that had been signed out. This set is usually empty and
+        /// never more than the few ended since this morning: a row drops
+        /// out of it the moment its token expires, because a token
+        /// nobody can use needs nothing done about it.
+        ///
+        /// What it gives up is a token naming a session that never
+        /// existed or has been deleted outright. Both need the signing
+        /// key to make, and anybody holding that can mint a token with
+        /// no session at all.
+        public async Task<HashSet<Guid>> EndedIdsAsync()
         {
             await using var cmd = _dataSource.CreateCommand("""
                 select id from public.app_sessions
-                where ended_at is null and expires_at > now()
+                where ended_at is not null and expires_at > now()
                 """);
             await using var r = await cmd.ExecuteReaderAsync();
             var ids = new HashSet<Guid>();

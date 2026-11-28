@@ -20,7 +20,21 @@ namespace FactoryManagementSystem.Services.Employees
     public sealed class SupabaseEmployeeRepository : IEmployeeRepository
     {
         private const string CacheKey = "supabase_all_employees";
-        private static readonly TimeSpan CacheTtl = TimeSpan.FromSeconds(45);
+        /// Ten minutes, and it was forty-five seconds.
+        ///
+        /// Forty-five was the Firestore window carried across, and it
+        /// was shorter than the gap between the reads it was meant to
+        /// catch: a screen that re-reads itself every few minutes found
+        /// it expired every time and went back for nine hundred rows,
+        /// which is the behaviour the cache was put here to stop. It
+        /// only ever helped the run of keystrokes in one search box.
+        ///
+        /// Ten costs nothing, because this is dropped the moment
+        /// anybody saves an employee - see UpsertAsync, the only write
+        /// here. The window is what a change made outside the
+        /// application would wait, and the roster's own sync writes
+        /// through that same method.
+        private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(10);
 
         private readonly NpgsqlDataSource _dataSource;
         private readonly IMemoryCache _cache;

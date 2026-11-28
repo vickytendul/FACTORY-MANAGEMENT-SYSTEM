@@ -54,7 +54,6 @@ namespace FactoryManagementSystem.Controllers
                     id, user.Username, user.DisplayName, user.Role,
                     Trim(device, 200), Trim(platform, 60),
                     DateTimeOffset.UtcNow + _jwt.Lifetime);
-                _sessions.Remember(id);
 
                 // Rare, and this is the rare moment: tidying old rows
                 // on a login costs nothing anybody is waiting for.

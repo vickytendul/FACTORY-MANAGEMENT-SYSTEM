@@ -1,5 +1,6 @@
 using FactoryManagementSystem.Entities;
 using FactoryManagementSystem.Services;
+using FactoryManagementSystem.Services.Sessions;
 using FactoryManagementSystem.Services.Users;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -14,18 +15,71 @@ namespace FactoryManagementSystem.Controllers
         private readonly JwtTokenService _jwt;
         private readonly EnrolmentService _enrolment;
         private readonly AccessTierService _access;
+        private readonly SessionTracker _sessions;
+        private readonly ILogger<AuthController> _log;
 
         public AuthController(
             IUserRepository users,
             JwtTokenService jwt,
             EnrolmentService enrolment,
-            AccessTierService access)
+            AccessTierService access,
+            SessionTracker sessions,
+            ILogger<AuthController> log)
         {
             _users = users;
             _jwt = jwt;
             _enrolment = enrolment;
             _access = access;
+            _sessions = sessions;
+            _log = log;
         }
+
+        /// Writes down this login and returns a token naming it.
+        ///
+        /// The session is what makes "three devices are signed in" and
+        /// "sign that one out" answerable at all - before it, the token
+        /// left and the server forgot. If the table cannot be written
+        /// the person still gets in, with a token that names no
+        /// session: being unable to keep a list is not a reason to
+        /// refuse somebody who typed the right password.
+        private async Task<string> TokenForAsync(AppUser user, string? device, string? platform)
+        {
+            if (!_sessions.Enabled || _sessions.Repository == null)
+                return _jwt.GenerateToken(user);
+
+            var id = Guid.NewGuid();
+            try
+            {
+                await _sessions.Repository.OpenAsync(
+                    id, user.Username, user.DisplayName, user.Role,
+                    Trim(device, 200), Trim(platform, 60),
+                    DateTimeOffset.UtcNow + _jwt.Lifetime);
+                _sessions.Remember(id);
+
+                // Rare, and this is the rare moment: tidying old rows
+                // on a login costs nothing anybody is waiting for.
+                _ = Task.Run(async () =>
+                {
+                    try { await _sessions.Repository.PruneAsync(); }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex, "Old sessions could not be pruned");
+                    }
+                });
+
+                return _jwt.GenerateToken(user, id);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex, "Session could not be opened for this login");
+                return _jwt.GenerateToken(user);
+            }
+        }
+
+        private static string? Trim(string? s, int max) =>
+            string.IsNullOrWhiteSpace(s)
+                ? null
+                : s.Trim().Length <= max ? s.Trim() : s.Trim()[..max];
 
         /// Brings the stored role back in line with where this person
         /// actually works, at every login.
@@ -112,7 +166,7 @@ namespace FactoryManagementSystem.Controllers
             await RefreshRoleAsync(user);
             LogStage("Access tier refreshed");
 
-            var token = _jwt.GenerateToken(user);
+            var token = await TokenForAsync(user, request.Device, request.Platform);
             LogStage("JWT generation completed");
 
             var result = Ok(new
@@ -157,7 +211,7 @@ namespace FactoryManagementSystem.Controllers
                 return Ok(new
                 {
                     Success = true,
-                    Token = _jwt.GenerateToken(user),
+                    Token = await TokenForAsync(user, request.Device, request.Platform),
                     Username = user.Username,
                     DisplayName = user.DisplayName,
                     Role = user.Role,
@@ -212,10 +266,25 @@ namespace FactoryManagementSystem.Controllers
     {
         public string Username { get; set; } = string.Empty;
         public string Password { get; set; } = string.Empty;
+
+        /// What the device says it is, so a list of signed-in devices
+        /// reads as "Chrome on Windows" and "the board on line 21"
+        /// rather than as eleven identical rows.
+        ///
+        /// Taken from the client rather than parsed out of a user
+        /// agent, because the application knows which of its own builds
+        /// it is and a user agent only knows it is Chrome. Optional: an
+        /// older build sends neither and gets a session with no name.
+        public string? Device { get; set; }
+        public string? Platform { get; set; }
     }
 
     public class EnrolRequest
     {
+        /// As on LoginRequest.
+        public string? Device { get; set; }
+        public string? Platform { get; set; }
+
         public string EmployeeCode { get; set; } = string.Empty;
 
         /// A date of birth or the last four digits of a mobile number -

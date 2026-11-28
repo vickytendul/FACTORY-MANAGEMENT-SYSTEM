@@ -451,6 +451,19 @@ builder.Services.AddSingleton(sp =>
 // user store Users__Source selected, and writes only to that store.
 builder.Services.AddSingleton<FactoryManagementSystem.Services.Users.EnrolmentService>();
 
+// One row per login, so "how many devices are signed in" has an answer
+// and "sign that one out" has somewhere to write it. Supabase only: with
+// no connection string the tracker is handed no repository, records
+// nothing, enforces nothing, and the application behaves as it did.
+if (hasSupabase)
+    builder.Services.AddSingleton<FactoryManagementSystem.Services.Sessions.SessionRepository>();
+
+builder.Services.AddSingleton(sp =>
+    new FactoryManagementSystem.Services.Sessions.SessionTracker(
+        sp.GetRequiredService<
+            ILogger<FactoryManagementSystem.Services.Sessions.SessionTracker>>(),
+        sp.GetService<FactoryManagementSystem.Services.Sessions.SessionRepository>()));
+
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
@@ -547,6 +560,11 @@ app.UseAuthentication();
 // After authentication so a real token still names its own user, and
 // before authorization so the identity is there when [Authorize] looks.
 if (!authRequired) app.UseMiddleware<OpenAccessMiddleware>();
+
+// After authentication, because it reads the session out of the token's
+// claims, and before authorization, so a device that has been signed
+// out is turned away rather than answered.
+app.UseMiddleware<FactoryManagementSystem.Services.Sessions.SessionMiddleware>();
 
 app.UseAuthorization();
 
